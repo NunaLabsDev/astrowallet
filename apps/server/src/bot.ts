@@ -83,6 +83,10 @@ async function createAndSignIntent(
   return { intent, deepLink };
 }
 
+function buildPwaAppUrl(pwaOrigin: string): string {
+  return `${pwaOrigin.replace(/\/+$/, "")}/app`;
+}
+
 function parsePositiveAmount(raw: string): string | null {
   const trimmed = raw.trim();
   if (!/^\d+(\.\d{1,7})?$/.test(trimmed)) return null;
@@ -154,8 +158,8 @@ export function createTelegramBot(
 
   bot.command("start", async (ctx) => {
     const keyboard = new InlineKeyboard().url(
-      "Open AstroWallet PWA",
-      config.pwaOrigin,
+      "Open AstroWallet App",
+      buildPwaAppUrl(config.pwaOrigin),
     );
 
     await ctx.reply(
@@ -608,7 +612,7 @@ export function createTelegramBot(
         deepLink,
       );
     } else {
-      keyboard.url("Open AstroWallet PWA", config.pwaOrigin);
+      keyboard.url("Open AstroWallet App", buildPwaAppUrl(config.pwaOrigin));
     }
 
     await ctx.reply(

@@ -1,6 +1,6 @@
 # AstroWallet — Next Session Handoff Guide
 
-> **Current Status:** **Phases 0–4**, UI/UX banking-trust & crisp-pixel overhaul, Sorobits SEP-50 integration, Cloudflare live Testnet deployment, and Telegram Super-Bot webhook are **100% live and verified**.
+> **Current Status:** **Phases 0–4**, the official Stellar Landing Website (`/`), the bank-grade Liquid Glass Wallet App (`/app`), animated crisp-pixel Navigators, live Sorobits SEP-50 integration, Cloudflare live Testnet deployment, and Telegram Super-Bot webhook are **100% live and verified** (`73` Vitest tests + `2` Soroban Rust tests passing).
 
 ---
 
@@ -8,7 +8,8 @@
 
 | Component | Live Value |
 | :--- | :--- |
-| **Web App & API Origin (Cloudflare Pages + Service Binding)** | `https://astrowallet-b1o.pages.dev` |
+| **Official Website (Landing Showcase)** | `https://astrowallet-b1o.pages.dev/` |
+| **Fintech Wallet App (PWA `/app` + Bot `/intent/*`)** | `https://astrowallet-b1o.pages.dev/app` |
 | **Worker Service Name (`workers_dev = false`)** | `astrowallet-server` (bound via `ASTROWALLET_SERVER` to Pages Functions) |
 | **Health Check** | `https://astrowallet-b1o.pages.dev/health` |
 | **Telegram Super-Bot** | `@AstroWalletAppBot` (`https://astrowallet-b1o.pages.dev/tg/webhook`) |
@@ -24,8 +25,9 @@
 ## 2. Completed & Verified Milestones
 
 - **Phases 0–4 Complete:** Zero-hardcoding Zod env config (`PwaConfig` + `ServerConfig` with Mainnet Friendbot hard-block), SEP-0005 multi-account Argon2id/AES-GCM-256 IndexedDB vault, mandatory PIN + optional Fingerprint, Scan & Shield zero-WASM pre-sign pipeline, Soroban Smart Accounts (`C...`) + Guardian rotation (`rotate_guardian`), Soroswap + Horizon Path Payments, Claim-Link Escrow Soroban contract (`contracts/claim-escrow/src/lib.rs`), `M...` muxed/typed Memos/LumenWipe/SDEX, Reown/WalletConnect v2 + Wallets Kit v2 + SEP-43, Goldsky/Mercury `POST /webhooks/indexer`, and Circle CCTP (6↔7 decimal guard) + MoonPay/Transak `RampPort`.
-- **Banking-Trust UI & Sorobits Pixel Identity (`apps/pwa` & `packages/stellar-core`):**
-  - 60/30/10 Sovereign Navy / Frosted Amethyst / Vault Gold palette, custody posture strip (`Self-Custodial SEP-0005 · Argon2id IndexedDB · 0 Server Keys`), `32×32` crisp-pixel `AstroWalletLogo` & `favicon.svg`, `32×32` pixel `AstroNavigatorAvatar` across 6 animated behavioral states (`float`, `shield`, `warp`, `vault`, `comms`, `zenith`), and live on-chain **Sorobits SEP-50** viewer (`CollectiblesSheet` + `fetchOwnerSorobits`).
+- **Banking-Trust Website (`/`) + Fintech Wallet App (`/app`) (`apps/pwa` & `packages/stellar-core`):**
+  - 60/30/10 Sovereign Navy / Frosted Amethyst / Vault Gold palette, `LandingPage.tsx` at `/` (live `/health` telemetry, interactive 6-state Navigator preview, honest `G...` vs `C...` comparison, `@AstroWalletAppBot` preview, and live on-chain `fetchSorobitShowcase`), and `/app` Wallet Shell (desktop sidebar + mobile icon dock, 2-step guided onboarding with `3×4` seed grid, uncluttered Wallet balance hero + quick actions + `ModalDrawer` tool sheets, and multi-token `CollectiblesSheet` showcase grid).
+  - Custody posture strip (`Self-Custodial SEP-0005 · Argon2id IndexedDB · 0 Server Keys`), `32×32` crisp-pixel `AstroWalletLogo` & `favicon.svg`, and `32×32` pixel `AstroNavigatorAvatar` across 6 animated behavioral states (`float`, `shield`, `warp`, `vault`, `comms`, `zenith`).
 
 ---
 

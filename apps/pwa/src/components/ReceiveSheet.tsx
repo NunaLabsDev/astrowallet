@@ -2,7 +2,13 @@ import { useEffect, useState } from "react";
 import QRCode from "qrcode";
 import { useWallet } from "../state/wallet-context.js";
 
-export function ReceiveSheet({ onClose }: { onClose: () => void }) {
+export function ReceiveSheet({
+  onClose,
+  embedded = false,
+}: {
+  onClose: () => void;
+  embedded?: boolean | undefined;
+}) {
   const { activeAccount, config } = useWallet();
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -45,26 +51,28 @@ export function ReceiveSheet({ onClose }: { onClose: () => void }) {
 
   return (
     <section className="glass-sheet" aria-label="Receive Stellar assets">
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          marginBottom: 14,
-        }}
-      >
-        <div>
-          <div style={{ fontSize: 16, fontWeight: 700 }}>
-            Receive to {activeAccount.label}
+      {!embedded && (
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            marginBottom: 14,
+          }}
+        >
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700 }}>
+              Receive to {activeAccount.label}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+              Classic Account (G...) • {config.network.toUpperCase()}
+            </div>
           </div>
-          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-            Classic Account (G...) • {config.network.toUpperCase()}
-          </div>
+          <button type="button" className="aw-chip-btn" onClick={onClose}>
+            Close
+          </button>
         </div>
-        <button type="button" className="aw-chip-btn" onClick={onClose}>
-          Close
-        </button>
-      </div>
+      )}
 
       <div
         style={{

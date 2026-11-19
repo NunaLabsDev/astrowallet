@@ -1,9 +1,15 @@
 import { useState, type FormEvent } from "react";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import { IconFingerprint, IconGlobe, IconLock } from "./Icons.js";
 
-export function UnlockSheet() {
+export function UnlockSheet({
+  onExploreSite,
+}: {
+  onExploreSite?: (() => void) | undefined;
+}) {
   const {
+    config,
     unlockWithPin,
     unlockWithBiometric,
     fingerprintSupported,
@@ -46,18 +52,23 @@ export function UnlockSheet() {
   };
 
   return (
-    <section className="glass-sheet" aria-label="Unlock AstroWallet">
-      <div style={{ display: "flex", alignItems: "center", gap: 14, marginBottom: 14 }}>
-        <AstroNavigatorAvatar seedKey="locked-vault" kind="classic" state="vault" size={64} />
-        <div>
-          <div style={{ fontSize: 18, fontWeight: 700 }}>Vault Locked</div>
-          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-            Unlock with your PIN/passphrase or enrolled Fingerprint
-          </div>
+    <section className="glass-sheet glass-card--vault aw-unlock-card" aria-label="Unlock AstroWallet">
+      <div className="aw-unlock-hero">
+        <div className="aw-pixel-frame">
+          <AstroNavigatorAvatar seedKey="locked-vault" kind="classic" state="vault" size={84} />
         </div>
+        <span className="glass-pill glass-pill--trust">
+          Argon2id + AES-GCM-256 · {config.network.toUpperCase()}
+        </span>
+        <h1 style={{ margin: 0, fontSize: 20, fontWeight: 700, letterSpacing: "-0.02em" }}>
+          Vault Locked
+        </h1>
+        <p style={{ margin: 0, fontSize: 13, color: "var(--aw-ink-secondary)" }}>
+          Decrypt locally with your PIN/passphrase or enrolled Fingerprint
+        </p>
       </div>
 
-      <form onSubmit={handlePinSubmit} style={{ display: "grid", gap: 12 }}>
+      <form onSubmit={handlePinSubmit} style={{ display: "grid", gap: 12, marginTop: 18 }}>
         <div>
           <label className="aw-label" htmlFor="unlock-pin-input">
             PIN or Passphrase
@@ -86,7 +97,8 @@ export function UnlockSheet() {
             style={{ flex: 1 }}
             disabled={busy || pin.length < 4}
           >
-            {busy ? "Decrypting..." : "Unlock with PIN"}
+            <IconLock size={16} />
+            <span>{busy ? "Decrypting..." : "Unlock with PIN"}</span>
           </button>
 
           {fingerprintSupported && fingerprintEnrolled && (
@@ -96,11 +108,21 @@ export function UnlockSheet() {
               disabled={busy}
               onClick={handleFingerprint}
             >
-              Use Fingerprint
+              <IconFingerprint size={16} />
+              <span>Use Fingerprint</span>
             </button>
           )}
         </div>
       </form>
+
+      {onExploreSite && (
+        <div className="aw-unlock-footer">
+          <button type="button" className="aw-chip-btn" onClick={onExploreSite}>
+            <IconGlobe size={14} />
+            <span>Explore AstroWallet Overview</span>
+          </button>
+        </div>
+      )}
     </section>
   );
 }

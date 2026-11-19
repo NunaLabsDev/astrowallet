@@ -1,12 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ClassicAddress, ContractAddress } from "@astrowallet/domain";
-import { fetchOwnerSorobits, type SorobitCollectible } from "@astrowallet/stellar-core";
+import {
+  fetchOwnerSorobits,
+  fetchSorobitShowcase,
+  type SorobitCollectible,
+} from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import {
   AstroNavigatorAvatar,
   deriveNavigatorTraits,
   type NavigatorState,
 } from "./AstroNavigatorAvatar.js";
+import { IconExternalLink, IconNft, IconSparkles } from "./Icons.js";
 
 const NAVIGATOR_STATES: ReadonlyArray<{ id: NavigatorState; label: string }> = [
   { id: "float", label: "Float" },
@@ -24,7 +29,8 @@ export function CollectiblesSheet() {
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [ownedSorobits, setOwnedSorobits] = useState<SorobitCollectible[]>([]);
-  const [showcaseGenesis, setShowcaseGenesis] = useState<SorobitCollectible | null>(null);
+  const [showcaseSorobits, setShowcaseSorobits] = useState<SorobitCollectible[]>([]);
+  const [totalSupply, setTotalSupply] = useState<number>(0);
 
   const traits = useMemo(() => {
     if (!activeAccount) return null;
@@ -34,29 +40,46 @@ export function CollectiblesSheet() {
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      if (
-        !activeAccount ||
-        !config.sorobitsContractId ||
-        !activeAccount.address.startsWith("G")
-      ) {
+      if (!activeAccount || !config.sorobitsContractId) {
         setOwnedSorobits([]);
-        setShowcaseGenesis(null);
+        setShowcaseSorobits([]);
+        setTotalSupply(0);
         return;
       }
 
       setLoading(true);
       setErrorMsg(null);
       try {
-        const res = await fetchOwnerSorobits({
-          rpcUrls: config.rpcUrls,
-          networkPassphrase: config.networkPassphrase,
-          contractId: config.sorobitsContractId as ContractAddress,
-          ownerAddress: activeAccount.address as ClassicAddress,
-          includeShowcaseGenesis: true,
-        });
-        if (!cancelled) {
-          setOwnedSorobits(res.owned);
-          setShowcaseGenesis(res.showcaseGenesis);
+        const contractId = config.sorobitsContractId as ContractAddress;
+        const owned = activeAccount.address.startsWith("G")
+          ? (
+              await fetchOwnerSorobits({
+                rpcUrls: config.rpcUrls,
+                networkPassphrase: config.networkPassphrase,
+                contractId,
+                ownerAddress: activeAccount.address as ClassicAddress,
+                includeShowcaseGenesis: false,
+              })
+            ).owned
+          : [];
+
+        if (cancelled) return;
+        setOwnedSorobits(owned);
+
+        if (owned.length === 0) {
+          const showcase = await fetchSorobitShowcase({
+            rpcUrls: config.rpcUrls,
+            networkPassphrase: config.networkPassphrase,
+            contractId,
+            maxTokens: 6,
+          });
+          if (!cancelled) {
+            setShowcaseSorobits(showcase.tokens);
+            setTotalSupply(showcase.totalSupply);
+          }
+        } else {
+          setShowcaseSorobits([]);
+          setTotalSupply(owned.length);
         }
       } catch (err) {
         if (!cancelled) {
@@ -84,26 +107,32 @@ export function CollectiblesSheet() {
   if (!activeAccount || !traits) return null;
 
   return (
-    <div style={{ display: "grid", gap: 14 }}>
+    <div style={{ display: "grid", gap: 16 }}>
       {/* Astro Navigator Guardian Card */}
-      <section className="glass-card glass-card--vault" style={{ display: "grid", gap: 12 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+      <section className="glass-card glass-card--vault" style={{ display: "grid", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
           <div className="aw-pixel-frame">
             <AstroNavigatorAvatar
               seedKey={activeAccount.address}
               kind={activeAccount.kind}
               state={navState}
-              size={84}
+              size={88}
             />
           </div>
-          <div style={{ flex: 1 }}>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>
+          <div style={{ flex: 1, minWidth: 210 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+              <span className="glass-pill glass-pill--gold">
+                <IconSparkles size={12} />
+                <span>Guardian Telemetry</span>
+              </span>
+            </div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>
               Astro Navigator · {activeAccount.label}
             </div>
             <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
               Deterministic 32&times;32 Pixel Guardian derived from your public key
             </div>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 8 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 10 }}>
               <span className="glass-pill glass-pill--gold">{traits.visorName}</span>
               <span className="glass-pill">{traits.armorName}</span>
               <span className="glass-pill">{traits.haloName}</span>
@@ -129,19 +158,30 @@ export function CollectiblesSheet() {
         </div>
       </section>
 
-      {/* Live On-Chain Sorobits (SEP-50) Vault */}
-      <section className="glass-card" style={{ display: "grid", gap: 12 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      {/* Live On-Chain Sorobits (SEP-50) Gallery */}
+      <section className="glass-card" style={{ display: "grid", gap: 14 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+          }}
+        >
           <div>
-            <div style={{ fontWeight: 700, fontSize: 15 }}>
-              NunaLabs Sorobits (SEP-50 On-Chain NFTs)
+            <div style={{ fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
+              <IconNft size={18} />
+              <span>NunaLabs Sorobits (SEP-50 On-Chain NFTs)</span>
             </div>
-            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-              100% on-chain 32&times;32 genomic pixel art via Soroban RPC
+            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
+              100% on-chain 32&times;32 genomic pixel art via Stellar Soroban RPC
             </div>
           </div>
           <span className="glass-pill glass-pill--trust">
-            {ownedSorobits.length} Owned
+            {ownedSorobits.length > 0
+              ? `${ownedSorobits.length} Owned`
+              : `${showcaseSorobits.length} Showcase · ${totalSupply} Supply`}
           </span>
         </div>
 
@@ -151,69 +191,91 @@ export function CollectiblesSheet() {
             on-chain Sorobits NFTs on {config.network.toUpperCase()}.
           </div>
         ) : loading ? (
-          <div style={{ fontSize: 13, color: "var(--aw-ink-secondary)" }}>
-            Querying Sorobits SEP-50 contract on {config.network.toUpperCase()}...
+          <div className="aw-sorobit-grid">
+            {[0, 1, 2].map((idx) => (
+              <div key={idx} className="glass-card aw-sorobit-skeleton">
+                <div className="aw-skeleton-art" />
+                <div className="aw-skeleton-line" />
+                <div className="aw-skeleton-line aw-skeleton-line--short" />
+              </div>
+            ))}
           </div>
         ) : errorMsg ? (
           <div className="aw-banner aw-banner--warn">{errorMsg}</div>
         ) : ownedSorobits.length > 0 ? (
-          <div style={{ display: "grid", gap: 10 }}>
+          <div className="aw-sorobit-grid">
             {ownedSorobits.map((item) => (
-              <div key={item.tokenId} className="aw-list-row">
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <div className="aw-pixel-frame">
-                    <img
-                      src={item.animatedDataUrl}
-                      alt={item.name}
-                      width={60}
-                      height={60}
-                    />
+              <article key={item.tokenId} className="glass-card glass-card--vault aw-sorobit-card">
+                <div className="aw-sorobit-media">
+                  <img
+                    src={item.animatedDataUrl}
+                    alt={item.name}
+                    width={144}
+                    height={144}
+                    className="aw-pixel-img"
+                  />
+                  <span className="glass-pill glass-pill--gold aw-sorobit-badge">
+                    {item.soulbound ? `Soulbound #${item.tokenId}` : `Token #${item.tokenId}`}
+                  </span>
+                </div>
+                <div className="aw-sorobit-info">
+                  <div className="aw-sorobit-title">{item.name}</div>
+                  <div className="aw-sorobit-meta">
+                    <span>{item.realmName}</span>
+                    <span>Ledger #{item.bornLedger.toLocaleString()}</span>
                   </div>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 13 }}>{item.name}</div>
-                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                      {item.realmName} · Tier {item.rankTier} · {item.xpScore} XP
-                    </div>
-                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 4 }}>
-                      <span className="glass-pill">
-                        {item.soulbound ? "Soulbound Pioneer" : `Gen ${item.generation}`}
-                      </span>
-                    </div>
+                  <div className="aw-sorobit-traits">
+                    <span className="glass-pill">Tier {item.rankTier}</span>
+                    <span className="glass-pill">XP {item.xpScore}</span>
+                    <span className="glass-pill">Gen {item.generation}</span>
                   </div>
                 </div>
-              </div>
+              </article>
             ))}
           </div>
         ) : (
-          <div style={{ display: "grid", gap: 10 }}>
+          <div style={{ display: "grid", gap: 14 }}>
             <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-              No Sorobits owned by <code>{activeAccount.address.slice(0, 6)}…{activeAccount.address.slice(-6)}</code> yet.
-              Below is Genesis #0 fetched live from the Sorobits contract:
+              No Sorobits owned by{" "}
+              <code>
+                {activeAccount.address.slice(0, 6)}…{activeAccount.address.slice(-6)}
+              </code>{" "}
+              yet. Live {config.network.toUpperCase()} Sorobits SEP-50 Showcase:
             </div>
-            {showcaseGenesis && (
-              <div className="aw-list-row">
-                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                  <div className="aw-pixel-frame">
-                    <img
-                      src={showcaseGenesis.animatedDataUrl}
-                      alt={showcaseGenesis.name}
-                      width={64}
-                      height={64}
-                    />
-                  </div>
-                  <div>
-                    <div style={{ fontWeight: 700, fontSize: 13 }}>{showcaseGenesis.name}</div>
-                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                      {showcaseGenesis.realmName} · Ledger #{showcaseGenesis.bornLedger} ·{" "}
-                      {showcaseGenesis.xpScore} XP
+
+            {showcaseSorobits.length > 0 && (
+              <div className="aw-sorobit-grid">
+                {showcaseSorobits.map((nft) => (
+                  <article key={nft.tokenId} className="glass-card glass-card--vault aw-sorobit-card">
+                    <div className="aw-sorobit-media">
+                      <img
+                        src={nft.animatedDataUrl}
+                        alt={nft.name}
+                        width={144}
+                        height={144}
+                        className="aw-pixel-img"
+                      />
+                      <span className="glass-pill glass-pill--gold aw-sorobit-badge">
+                        {nft.soulbound ? `Soulbound #${nft.tokenId}` : `#${nft.tokenId}`}
+                      </span>
                     </div>
-                    <span className="glass-pill glass-pill--gold" style={{ marginTop: 4 }}>
-                      Live On-Chain Genesis Showcase
-                    </span>
-                  </div>
-                </div>
+                    <div className="aw-sorobit-info">
+                      <div className="aw-sorobit-title">{nft.name}</div>
+                      <div className="aw-sorobit-meta">
+                        <span>{nft.realmName}</span>
+                        <span>Ledger #{nft.bornLedger.toLocaleString()}</span>
+                      </div>
+                      <div className="aw-sorobit-traits">
+                        <span className="glass-pill">Gen {nft.generation}</span>
+                        <span className="glass-pill">Tier {nft.rankTier}</span>
+                        <span className="glass-pill">XP {nft.xpScore}</span>
+                      </div>
+                    </div>
+                  </article>
+                ))}
               </div>
             )}
+
             <a
               href="https://astrogate.pages.dev/sorobits"
               target="_blank"
@@ -223,10 +285,12 @@ export function CollectiblesSheet() {
                 display: "inline-flex",
                 alignItems: "center",
                 justifyContent: "center",
+                gap: 8,
                 textDecoration: "none",
               }}
             >
-              Explore &amp; Mint Sorobits on AstroGate
+              <span>Explore &amp; Mint Sorobits on AstroGate</span>
+              <IconExternalLink size={15} />
             </a>
           </div>
         )}

@@ -6,7 +6,13 @@ import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 
 type MemoKind = TypedMemoInput["kind"];
 
-export function SendSheet({ onClose }: { onClose: () => void }) {
+export function SendSheet({
+  onClose,
+  embedded = false,
+}: {
+  onClose: () => void;
+  embedded?: boolean | undefined;
+}) {
   const { activeAccount, sendPayment, config } = useWallet();
 
   const [destination, setDestination] = useState("");
@@ -66,27 +72,29 @@ export function SendSheet({ onClose }: { onClose: () => void }) {
 
   return (
     <section className="glass-sheet" aria-label="Send Stellar payment">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <AstroNavigatorAvatar
-            seedKey={activeAccount.address}
-            kind={activeAccount.kind}
-            state={confirmedTxHash ? "zenith" : busy ? "warp" : "shield"}
-            size={52}
-          />
-          <div>
-            <div style={{ fontSize: 16, fontWeight: 700 }}>
-              {confirmedTxHash ? "Transaction Confirmed" : `Send from ${activeAccount.label}`}
-            </div>
-            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-              Network: {config.network.toUpperCase()} • Supports G..., M... muxed &amp; typed Memos
+      {!embedded && (
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <AstroNavigatorAvatar
+              seedKey={activeAccount.address}
+              kind={activeAccount.kind}
+              state={confirmedTxHash ? "zenith" : busy ? "warp" : "shield"}
+              size={52}
+            />
+            <div>
+              <div style={{ fontSize: 16, fontWeight: 700 }}>
+                {confirmedTxHash ? "Transaction Confirmed" : `Send from ${activeAccount.label}`}
+              </div>
+              <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                Network: {config.network.toUpperCase()} • Supports G..., M... muxed &amp; typed Memos
+              </div>
             </div>
           </div>
+          <button type="button" className="aw-chip-btn" onClick={onClose}>
+            Close
+          </button>
         </div>
-        <button type="button" className="aw-chip-btn" onClick={onClose}>
-          Close
-        </button>
-      </div>
+      )}
 
       {confirmedTxHash ? (
         <div style={{ display: "grid", gap: 12 }}>

@@ -47,6 +47,19 @@ export interface FetchOwnerSorobitsResult {
   showcaseGenesis: SorobitCollectible | null;
 }
 
+export interface FetchSorobitShowcaseInput {
+  rpcUrls: readonly string[];
+  networkPassphrase: string;
+  contractId: ContractAddress;
+  maxTokens?: number | undefined;
+  fetchFn?: typeof fetch | undefined;
+}
+
+export interface FetchSorobitShowcaseResult {
+  totalSupply: number;
+  tokens: SorobitCollectible[];
+}
+
 const DATA_JSON_PREFIX = "data:application/json;utf8,";
 const DATA_SVG_PREFIX = "data:image/svg+xml;utf8,";
 
@@ -304,4 +317,42 @@ export async function fetchOwnerSorobits(
   }
 
   return { owned, showcaseGenesis };
+}
+
+/**
+ * Queries public on-chain Sorobits (SEP-50) supply and loads sanitized token showcase metadata.
+ */
+export async function fetchSorobitShowcase(
+  input: FetchSorobitShowcaseInput,
+): Promise<FetchSorobitShowcaseResult> {
+  const fetchFn = input.fetchFn ?? fetch;
+  const rawSupply = await simulateContractView<number | bigint>({
+    rpcUrls: input.rpcUrls,
+    networkPassphrase: input.networkPassphrase,
+    contractId: input.contractId,
+    fnName: "total_supply",
+    args: [],
+    fetchFn,
+  }).catch(() => 3);
+
+  const parsedSupply = Number(rawSupply);
+  const totalSupply = Number.isFinite(parsedSupply) && parsedSupply >= 0 ? Math.trunc(parsedSupply) : 3;
+  const limit = Math.max(0, Math.min(totalSupply, input.maxTokens ?? 3));
+
+  const ids = Array.from({ length: limit }, (_, idx) => idx);
+  const tokens = (
+    await Promise.all(
+      ids.map((tokenId) =>
+        fetchSingleSorobit({
+          rpcUrls: input.rpcUrls,
+          networkPassphrase: input.networkPassphrase,
+          contractId: input.contractId,
+          tokenId,
+          fetchFn,
+        }),
+      ),
+    )
+  ).filter((item): item is SorobitCollectible => item !== null);
+
+  return { totalSupply, tokens };
 }

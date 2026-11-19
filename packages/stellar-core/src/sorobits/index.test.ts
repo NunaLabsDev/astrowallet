@@ -3,6 +3,7 @@ import { Keypair, Networks, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import {
   fetchOwnerSorobits,
+  fetchSorobitShowcase,
   parseSorobitTokenUriJson,
   sanitizeOnChainSvg,
 } from "./index.js";
@@ -128,5 +129,91 @@ describe("Sorobits SEP-50 on-chain collectible reader", () => {
     expect(result.owned[0]?.realmName).toBe("Golden Soroban");
     expect(result.owned[0]?.xpScore).toBe(620);
     expect(result.owned[0]?.animatedDataUrl.startsWith("data:image/svg+xml;utf8,")).toBe(true);
+  });
+
+  it("fetches public Sorobits showcase collection via total_supply and token metadata", async () => {
+    const svg =
+      "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' fill='#172C69'/></svg>";
+
+    const recordVal = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("edition"),
+        val: nativeToScVal(1, { type: "u32" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("generation"),
+        val: nativeToScVal(0, { type: "u32" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("rank_tier"),
+        val: nativeToScVal(1, { type: "u32" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("xp_score"),
+        val: nativeToScVal(120, { type: "u32" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("born_ledger"),
+        val: nativeToScVal(5787216, { type: "u32" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("soulbound"),
+        val: nativeToScVal(true, { type: "bool" }),
+      }),
+    ]);
+
+    const showcase = await fetchSorobitShowcase({
+      rpcUrls: ["https://rpc-showcase.example.org"],
+      networkPassphrase: Networks.TESTNET,
+      contractId: SAMPLE_CONTRACT,
+      maxTokens: 2,
+      fetchFn: async (_url, init) => {
+        const reqBody = JSON.parse(String(init?.body ?? "{}")) as {
+          params?: { transaction?: string };
+        };
+        const envelope = xdr.TransactionEnvelope.fromXDR(
+          reqBody.params?.transaction ?? "",
+          "base64",
+        );
+        const invokeOp = envelope.value.tx.operations[0]?.body;
+        const fnName =
+          invokeOp?.type === "invokeHostFunction" &&
+          invokeOp.value.hostFunction.type === "hostFunctionTypeInvokeContract"
+            ? invokeOp.value.hostFunction.value.functionName.toString()
+            : "";
+
+        let returnVal: xdr.ScVal;
+        if (fnName === "total_supply") {
+          returnVal = nativeToScVal(3, { type: "u32" });
+        } else if (fnName === "get_sorobit") {
+          returnVal = recordVal;
+        } else if (fnName === "token_uri") {
+          const uri = `data:application/json;utf8,${JSON.stringify({
+            name: "Sorobit #0 · AGQ01 Pioneer",
+            attributes: [{ trait_type: "Faction", value: "Horizon Signal" }],
+            image: `data:image/svg+xml;utf8,${svg}`,
+          })}`;
+          returnVal = nativeToScVal(uri, { type: "string" });
+        } else {
+          returnVal = nativeToScVal(svg, { type: "string" });
+        }
+
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            result: { results: [{ xdr: scValB64(returnVal) }] },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+
+    expect(showcase.totalSupply).toBe(3);
+    expect(showcase.tokens).toHaveLength(2);
+    expect(showcase.tokens[0]?.name).toBe("Sorobit #0 · AGQ01 Pioneer");
+    expect(showcase.tokens[0]?.realmName).toBe("Horizon Signal");
+    expect(showcase.tokens[0]?.bornLedger).toBe(5787216);
+    expect(showcase.tokens[0]?.animatedDataUrl.startsWith("data:image/svg+xml;utf8,")).toBe(true);
   });
 });

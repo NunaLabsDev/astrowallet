@@ -133,8 +133,21 @@ Because one **SEP-0005** seed phrase manages multiple derived accounts (`m/44'/1
 All traits are composed as **pure client-side `32×32` crisp-pixel (`shape-rendering="crispEdges"`) SVG layers** (`AstroWalletLogo.tsx`, `favicon.svg`, `AstroNavigatorAvatar.tsx`), inspired by the crisp genomic pixel aesthetic of **NunaLabs Sorobits (SEP-50)** while maintaining 100% original AstroWallet vault character IP and zero network requests.
 
 ### C. Live On-Chain Sorobits (SEP-50) Integration
-- Configured purely via `VITE_SOROBITS_CONTRACT_ID` (zero hardcoded contract IDs in source), `CollectiblesSheet` queries `tokens_of`, `get_sorobit`, `token_uri`, and `animated_svg` from the NunaLabs Sorobits contract via Soroban RPC failover (`fetchOwnerSorobits`).
-- Renders verified on-chain `32×32` animated pixel SVG collectibles safely inside `<img src="data:image/svg+xml;utf8,..." />` (`image-rendering: pixelated`) with automatic Genesis #0 live showcase fallback when an address holds 0 Sorobits.
+- Configured purely via `VITE_SOROBITS_CONTRACT_ID` (zero hardcoded contract IDs in source):
+  - `CollectiblesSheet` (`/app?tab=nfts`) queries `tokens_of`, `get_sorobit`, `token_uri`, and `animated_svg` from the NunaLabs Sorobits contract via Soroban RPC failover (`fetchOwnerSorobits`), and automatically loads the multi-token live showcase (`fetchSorobitShowcase`) when an account currently holds `0` Sorobits.
+  - `LandingPage` (`/`) also calls `fetchSorobitShowcase` + `/health` telemetry directly on mount to display live minted on-chain Sorobits alongside interactive Astro Navigator archetypes.
+- Renders verified on-chain `32×32` animated pixel SVG collectibles safely inside `<img src="data:image/svg+xml;utf8,..." />` (`image-rendering: pixelated`).
+
+---
+
+## 6. Two-Surface Product Architecture (`/` Website + `/app` Fintech Vault)
+
+- **Official Website (`/` — `LandingPage.tsx`):** Responsive Liquid Glass landing experience featuring sticky glass navbar, hero split with interactive 6-state Navigator telemetry phone frame and live `/health` status, institutional SEP-0005 / Scan & Shield / Universal PIN + Fingerprint security cards, honest `G...` vs `C...` protocol capability matrix, `@AstroWalletAppBot` Telegram command showcase, and live on-chain Sorobits SEP-50 gallery.
+- **Desktop + Mobile Wallet App (`/app` & `/intent/<id>` — `App.tsx`, `ModalDrawer.tsx`, `OnboardingSheet.tsx`):**
+  - Desktop (`>= 960px`): Persistent Left Glass Sidebar (`AstroWalletLogo`, 5 icon+label tabs: `Wallet`, `NFTs`, `Activity`, `Vault`, `Telegram`, live network badge, `Lock Vault`, `Back to Website`) + two-column balanced dashboard grid.
+  - Mobile (`< 960px`): Compact top header + 5-tab floating Liquid Glass Bottom Dock with crisp SVG icons (`Icons.tsx`).
+  - Guided 2-step vault creation (`3×4` numbered seed grid + backup confirmation → PIN setup) and uncluttered `Wallet` hero balance card with 4 quick actions (`Send`, `Receive`, `Swap`, `Scan & Shield`) and 2×2 Stellar Suite launcher cards opening cleanly inside accessible `ModalDrawer` bottom sheets / desktop modals.
+  - Installed PWA launches directly into `/app` via `manifest.webmanifest` (`start_url: "/app"`).
 
 ### B. Animated + Static State Variants
 

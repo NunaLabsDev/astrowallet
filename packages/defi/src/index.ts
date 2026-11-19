@@ -1,3 +1,4 @@
+import { Asset } from "@stellar/stellar-sdk";
 import type {
   ContractAddress,
   RampPort,
@@ -138,6 +139,33 @@ export function createHorizonPathSwapAdapter(input: {
 }
 
 /**
+ * Converts a Stellar decimal string (up to 7 decimals) into exact 7-decimal stroops BigInt.
+ */
+export function decimalToStroops7(amount: string): bigint {
+  const cleaned = amount.trim();
+  if (!/^\d+(?:\.\d{1,7})?$/.test(cleaned)) {
+    throw new Error("Amount must be a positive decimal with up to 7 fractional digits");
+  }
+  const [wholePart, fracPart = ""] = cleaned.split(".");
+  const stroops =
+    BigInt(wholePart ?? "0") * STROOPS_PER_UNIT + BigInt(fracPart.padEnd(7, "0"));
+  if (stroops <= 0n) {
+    throw new Error("Amount must be greater than zero");
+  }
+  return stroops;
+}
+
+/**
+ * Formats a 7-decimal stroops integer into a trimmed Stellar decimal string.
+ */
+export function stroops7ToDecimal(stroops: bigint | string): string {
+  const value = typeof stroops === "bigint" ? stroops : BigInt(stroops.trim());
+  const whole = value / STROOPS_PER_UNIT;
+  const frac = (value % STROOPS_PER_UNIT).toString().padStart(7, "0").replace(/0+$/, "");
+  return frac ? `${whole.toString()}.${frac}` : whole.toString();
+}
+
+/**
  * Worker-proxied Soroswap Aggregator adapter (keeps sk_ API keys strictly on apps/server).
  */
 export function createSoroswapProxyAdapter(input: {
@@ -159,19 +187,22 @@ export function createSoroswapProxyAdapter(input: {
         throw new Error(`Soroswap proxy quote failed (${res.status})`);
       }
       const data = (await res.json()) as {
+        provider?: string;
         expectedOutputAmount?: string;
         priceImpactPct?: string;
         unsignedXdr?: string;
+        pathAssets?: ReadonlyArray<{ assetCode: string; assetIssuer?: string | undefined }>;
       };
       if (!data.expectedOutputAmount) {
         throw new Error("Invalid quote response from Soroswap proxy");
       }
       return {
-        provider: "soroswap",
+        provider: data.provider ?? "soroswap",
         inputAmount: request.amount,
         expectedOutputAmount: data.expectedOutputAmount,
         priceImpactPct: data.priceImpactPct ?? "0.05",
         unsignedXdr: data.unsignedXdr,
+        pathAssets: data.pathAssets,
       };
     },
   };
@@ -427,4 +458,61 @@ export function createTransakRampAdapter(input: {
       return { url: url.toString() };
     },
   };
+}
+
+/**
+ * Resolves a swap asset identifier ("XLM" or "CODE:G...") to its canonical SAC C... contract id.
+ */
+export function resolveSwapAssetSacId(rawAsset: string, networkPassphrase: string): string {
+  const parsed = parseSwapAssetIdentifier(rawAsset);
+  if (parsed.code === "XLM" && !parsed.issuer) {
+    return Asset.native().contractId(networkPassphrase);
+  }
+  if (!parsed.issuer) {
+    throw new Error(`Issuer is required for non-native asset ${parsed.code}`);
+  }
+  return new Asset(parsed.code, parsed.issuer).contractId(networkPassphrase);
+}
+
+export interface SoroswapQuoteBody {
+  assetIn: string;
+  assetOut: string;
+  amount: string;
+  tradeType: "EXACT_IN";
+  protocols: string[];
+  slippageBps: number;
+}
+
+/**
+ * Builds the Soroswap Aggregator `/quote` payload (SAC contract ids, 7-decimal stroops amount).
+ */
+export function buildSoroswapQuoteBody(
+  request: SwapQuoteRequest,
+  networkPassphrase: string,
+  protocols: readonly string[] = ["soroswap", "sdex", "aqua", "phoenix"],
+): SoroswapQuoteBody {
+  return {
+    assetIn: resolveSwapAssetSacId(request.fromAsset, networkPassphrase),
+    assetOut: resolveSwapAssetSacId(request.toAsset, networkPassphrase),
+    amount: decimalToStroops7(request.amount).toString(),
+    tradeType: "EXACT_IN",
+    protocols: [...protocols],
+    slippageBps: request.slippageBps,
+  };
+}
+
+/**
+ * Extracts the expected output (decimal string) from a Soroswap `/quote` response (stroops).
+ */
+export function parseSoroswapQuoteOutput(data: {
+  amountOut?: string | number | undefined;
+  expectedOutputAmount?: string | undefined;
+}): string | null {
+  if (data.expectedOutputAmount && /^\d+(?:\.\d+)?$/.test(data.expectedOutputAmount)) {
+    return data.expectedOutputAmount;
+  }
+  if (data.amountOut !== undefined && /^\d+$/.test(String(data.amountOut))) {
+    return stroops7ToDecimal(BigInt(String(data.amountOut)));
+  }
+  return null;
 }

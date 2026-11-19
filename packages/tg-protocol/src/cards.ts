@@ -120,17 +120,35 @@ export interface SplitCardInput {
   requesterLabel: string;
   recipientAddress: string;
   network: StellarNetwork;
+  paidCount?: number | undefined;
+  status?: IntentStatus | undefined;
+  txHashes?: readonly string[] | undefined;
 }
 
 export function formatSplitCard(input: SplitCardInput): string {
   const net = escapeTelegramHtml(input.network.toUpperCase());
-  return [
-    `🧾 <b>Group Bill Split</b> · <code>${net}</code>`,
+  const paidCount = input.paidCount ?? 0;
+  const complete = input.status === "confirmed" || paidCount >= input.participantCount;
+  const header = complete
+    ? `✅ <b>Split Fully Paid (${paidCount}/${input.participantCount})</b>`
+    : `🧾 <b>Group Bill Split</b>`;
+
+  const lines = [
+    `${header} · <code>${net}</code>`,
     "",
     `<b>Total:</b> ${escapeTelegramHtml(input.totalAmount)} ${escapeTelegramHtml(input.assetCode)} (${input.participantCount} ways)`,
     `<b>Share per person:</b> ${escapeTelegramHtml(input.amountPerPerson)} ${escapeTelegramHtml(input.assetCode)}`,
+    `<b>Paid:</b> ${paidCount}/${input.participantCount}`,
     `<b>Pay to:</b> ${escapeTelegramHtml(input.requesterLabel)} (<code>${escapeTelegramHtml(shortenAddress(input.recipientAddress))}</code>)`,
-  ].join("\n");
+  ];
+
+  if (input.txHashes && input.txHashes.length > 0) {
+    const latest = input.txHashes[input.txHashes.length - 1];
+    if (latest) {
+      lines.push(`<b>Latest Tx:</b> <code>${escapeTelegramHtml(shortenAddress(latest))}</code>`);
+    }
+  }
+  return lines.join("\n");
 }
 
 export function formatAccountsSummary(
@@ -261,29 +279,42 @@ export interface SwapQuoteCardInput {
   provider: string;
   priceImpactPct: string;
   network: StellarNetwork;
+  status?: IntentStatus | undefined;
+  txHash?: string | undefined;
 }
 
 export function formatSwapQuoteCard(input: SwapQuoteCardInput): string {
   const net = escapeTelegramHtml(input.network.toUpperCase());
-  return [
-    `🔄 <b>Swap Quote</b> · <code>${net}</code>`,
+  const header =
+    input.status === "confirmed" ? "✅ <b>Swap Confirmed</b>" : "🔄 <b>Swap Quote</b>";
+  const lines = [
+    `${header} · <code>${net}</code>`,
     "",
     `<b>Sell:</b> ${escapeTelegramHtml(input.inputAmount)} ${escapeTelegramHtml(input.fromAsset)}`,
     `<b>Receive (est.):</b> ${escapeTelegramHtml(input.expectedOutputAmount)} ${escapeTelegramHtml(input.toAsset)}`,
     `<b>Route:</b> ${escapeTelegramHtml(input.provider)} (impact ~${escapeTelegramHtml(input.priceImpactPct)}%)`,
-    "",
-    "Tap below to review in Scan &amp; Shield and sign with PIN or Fingerprint.",
-  ].join("\n");
+  ];
+
+  if (input.txHash) {
+    lines.push(`<b>Tx Hash:</b> <code>${escapeTelegramHtml(input.txHash)}</code>`);
+  } else {
+    lines.push(
+      "",
+      "Tap below to review in Scan &amp; Shield and sign with PIN or Fingerprint.",
+    );
+  }
+  return lines.join("\n");
 }
 
 export interface ClaimLinkCardInput {
-  status: "open" | "claimed" | "refunded" | "expired";
+  status: "pending_funding" | "open" | "claimed" | "refunded" | "expired";
   amount: string;
   assetCode: string;
   senderLabel: string;
   recipientUsername: string;
   network: StellarNetwork;
   txHash?: string | undefined;
+  claimUrlHint?: string | undefined;
 }
 
 export function formatClaimLinkCard(input: ClaimLinkCardInput): string {
@@ -292,7 +323,13 @@ export function formatClaimLinkCard(input: ClaimLinkCardInput): string {
   const header =
     input.status === "claimed"
       ? "🎁 <b>Claim Link Claimed!</b>"
-      : "🎁 <b>Stellar Claim Link Gift</b>";
+      : input.status === "refunded"
+        ? "↩️ <b>Claim Link Refunded</b>"
+        : input.status === "expired"
+          ? "⌛ <b>Claim Link Expired</b>"
+          : input.status === "pending_funding"
+            ? "⏳ <b>Claim Link Awaiting Escrow Deposit</b>"
+            : "🎁 <b>Stellar Claim Link Ready!</b>";
 
   const lines = [
     `${header} · <code>${net}</code>`,
@@ -302,12 +339,21 @@ export function formatClaimLinkCard(input: ClaimLinkCardInput): string {
     `<b>Reserved for:</b> @${escapeTelegramHtml(cleanRecipient)}`,
   ];
 
-  if (input.status === "open") {
+  if (input.status === "pending_funding") {
     lines.push(
       "",
-      `@${escapeTelegramHtml(cleanRecipient)} can claim this in seconds without a prior wallet (auto-refunds to sender if unclaimed).`,
+      `${escapeTelegramHtml(input.senderLabel)}: tap below to lock funds into Soroban Escrow and generate the secret claim link for @${escapeTelegramHtml(cleanRecipient)}.`,
     );
-  } else if (input.txHash) {
+  } else if (input.status === "open") {
+    lines.push(
+      "",
+      `Escrow funded! Share the generated secret Claim Link with @${escapeTelegramHtml(cleanRecipient)} so they can claim on-chain (auto-refunds after expiry).`,
+    );
+    if (input.claimUrlHint) {
+      lines.push(`<b>Link:</b> ${escapeTelegramHtml(input.claimUrlHint)}`);
+    }
+  }
+  if (input.txHash) {
     lines.push(`<b>Tx:</b> <code>${escapeTelegramHtml(shortenAddress(input.txHash))}</code>`);
   }
 

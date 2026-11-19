@@ -1,9 +1,11 @@
 import { getPublicKeyAsync, signAsync } from "@noble/ed25519";
 import { describe, expect, it } from "vitest";
-import type { ClassicAddress } from "@astrowallet/domain";
+import type { ClassicAddress, ContractAddress } from "@astrowallet/domain";
 import {
   formatConnectChallengeMessage,
+  formatSmartAccountLinkMessage,
   verifyConnectSignature,
+  verifySmartAccountGuardianSignature,
   type ConnectChallengePayload,
 } from "./connect-challenge.js";
 
@@ -86,6 +88,34 @@ describe("SEP-53 connect challenge verification", () => {
         address,
         message,
         signatureBase64: btoa("invalid-sig"),
+      }),
+    ).toBe(false);
+
+    // Smart account C... guardian link proof
+    const smartC = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM" as ContractAddress;
+    const boundMsg = formatSmartAccountLinkMessage(message, smartC);
+    const smartDigest = await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode(`Stellar Signed Message:\n${boundMsg}`),
+    );
+    const smartSig = await signAsync(new Uint8Array(smartDigest), privKey);
+    const smartSigB64 = btoa(String.fromCharCode(...smartSig));
+
+    expect(
+      await verifySmartAccountGuardianSignature({
+        contractAddress: smartC,
+        guardianAddress: address,
+        challengeMessage: message,
+        signatureBase64: smartSigB64,
+      }),
+    ).toBe(true);
+
+    expect(
+      await verifySmartAccountGuardianSignature({
+        contractAddress: smartC,
+        guardianAddress: address,
+        challengeMessage: message,
+        signatureBase64: sigB64, // wrong message binding
       }),
     ).toBe(false);
   });

@@ -1,4 +1,8 @@
-import type { ClassicAddress, StellarNetwork } from "@astrowallet/domain";
+import type {
+  ClassicAddress,
+  ContractAddress,
+  StellarNetwork,
+} from "@astrowallet/domain";
 import { verifyAsync } from "@noble/ed25519";
 import { decodeClassicPublicKey } from "./strkey.js";
 
@@ -89,4 +93,42 @@ export async function verifyConnectSignature(
   } catch {
     return false;
   }
+}
+
+/**
+ * Formats the canonical SEP-53 challenge message proving a Classic G... Recovery Guardian
+ * authorizes linking a paired Soroban Smart Account C... address.
+ */
+export function formatSmartAccountLinkMessage(
+  challengeMessage: string,
+  contractAddress: ContractAddress,
+): string {
+  return `${challengeMessage}:smart:${contractAddress}`;
+}
+
+export interface VerifySmartAccountGuardianSignatureInput {
+  contractAddress: ContractAddress;
+  guardianAddress: ClassicAddress;
+  challengeMessage: string;
+  signatureBase64: string;
+}
+
+/**
+ * Verifies a Soroban Smart Account C... link challenge via its paired Classic G... Guardian's Ed25519 signature.
+ */
+export async function verifySmartAccountGuardianSignature(
+  input: VerifySmartAccountGuardianSignatureInput,
+): Promise<boolean> {
+  if (!/^C[A-Z2-7]{55}$/.test(input.contractAddress)) {
+    return false;
+  }
+  const boundMessage = formatSmartAccountLinkMessage(
+    input.challengeMessage,
+    input.contractAddress,
+  );
+  return verifyConnectSignature({
+    address: input.guardianAddress,
+    message: boundMessage,
+    signatureBase64: input.signatureBase64,
+  });
 }

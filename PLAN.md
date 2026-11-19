@@ -76,6 +76,20 @@
 
 ---
 
+## Post-Phase 4 Security Audit & Production Hardening
+
+Following an internal pre-Mainnet code & security audit, all P0/P1/P2 engineering remediations in the codebase and CI are complete:
+
+- [x] **Claim Escrow V2 (`contracts/claim-escrow/src/lib.rs`):** Front-run-proof ephemeral Ed25519 claim verification (`AW_CLAIM_V2:` domain-separated XDR payload verified 1:1 with `@astrowallet/stellar-core`), Checks-Effects-Interactions ordering, dynamic persistent + instance TTL extension, 30-day max duration (`DurationTooLong`), `cancel_claim`, Soroban events, and 6 Rust tests (including non-mocked auth checks).
+- [x] **Real CAP-46 Smart Accounts & Custody Hardening (`@astrowallet/stellar-core`):** Real `HashIdPreimage::envelopeTypeContractId` counterfactual derivation + `Operation.createCustomContract`, SAC `transfer` routing via Soroban RPC for `C...` destinations, dynamic Horizon `fee_stats()`, 6-char min PIN, HKDF-SHA256 + origin-anchored `rpId` WebAuthn PRF, 5-min inactivity + 60s visibility auto-lock, and progressive PIN cooldown backoff.
+- [x] **Scan & Shield Hardening (`@astrowallet/security-shield`):** Live SEP-42 fetching/caching (`sep42.ts`), `M...` → base `G...` directory/SEP-29 check, recursive `subInvocations` directory lookup, live Soroban simulation `balanceDiffs`, Claimable Balance spam shield (`ClassicToolsSheet`), explicit `window.stellar` SEP-43 consent modal, and lazy Worker Raw XDR inspection (`inspectRawXdrInWorker`).
+- [x] **Server & Bot Hardening (`apps/server`):** D1 migration `0002_production_hardening.sql` (anti-replay unique `tx_hash`, multi-payer `intent_payments`, `processed_alerts` dedup), KV rate limiter (`rate-limit.ts`), policy-gated `/v1/relay/submit` and SSRF-hardened `/v1/proxy/*`, op-level `ExpectedTxMatch` intent confirmation, 2-stage Claim Links, Smart Account Guardian `/connect`, Soroswap SAC/stroops payload + bot `/swap`, exact stroops `/split`, `assetIssuer` resolution, `ChainWatcherDO` bounded batching & `empty_init` fix, and `[env.mainnet]` scaffold.
+- [x] **PWA Shell, Bundle Split & CI (`.github/workflows/ci.yml`, `apps/pwa`):** Global `ErrorBoundary`, `IntentSheet` full support (`claim`, `swap`, `split`, `#k=` hash stripping, pre-sign Scan & Shield), `React.lazy` + `manualChunks`, PNG icons + `sw.js` + strict `_headers` CSP (`'wasm-unsafe-eval'`), and CI Rust `fmt`/`clippy`/`test` + zero `@stellar/stellar-xdr-json` bundle gate.
+- [x] **Testnet Operational Rollout (D1 `0002`, Claim Escrow V2, SEP-42 & Relay Allowlist):** Remote D1 migration `0002_production_hardening.sql` applied, Claim Escrow V2 optimized WASM deployed to Stellar Testnet (`CDEOJ4KCHMCSJY2N6VCHD3UYVFIIJ3ZVG7DRZ6XMLSTTU4US6ITH36BQ`, hash `33ecebddb590eedcf1059a969122c4edf3a9fe092912356d19bd827ce17f61fb`), `SEP42_ASSET_LIST_URLS` (`api.stellar.expert/explorer/testnet/asset-list/top50`) + `RELAY_ALLOWED_CONTRACTS` configured in `wrangler.toml`, and updated Worker + Pages deployed and smoke-tested live on `https://astrowallet-b1o.pages.dev`.
+- [ ] **Remaining Pre-Mainnet Operational Items:** Integrate & pin an audited OpenZeppelin Smart Account WASM (`VITE_SMART_ACCOUNT_WASM_HASH`), add secondary RPC/Horizon failover URLs, attach custom domain + `[env.mainnet]` D1/KV/secrets, enroll Claim Escrow V2 in Soroban Security Audit Bank, optionally wire `@reown/walletkit` cloud QR relay, and run physical mobile device QA.
+
+---
+
 ## Explicitly Deferred to v2 (Out of Scope for v1)
 
 Keep v1 focused and shippable—**do not implement these in v1** (preserve clean `Port` interfaces for drop-in v2 plugins):

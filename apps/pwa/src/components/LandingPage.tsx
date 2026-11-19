@@ -24,7 +24,13 @@ import {
   IconZap,
 } from "./Icons.js";
 
-export type AppDockTab = "wallet" | "nfts" | "activity" | "accounts" | "telegram";
+export type AppDockTab =
+  | "wallet"
+  | "nfts"
+  | "activity"
+  | "dev"
+  | "accounts"
+  | "telegram";
 
 interface LandingPageProps {
   onLaunchApp: (tab?: AppDockTab) => void;
@@ -782,6 +788,13 @@ export function LandingPage({ onLaunchApp }: LandingPageProps) {
               onClick={() => onLaunchApp("wallet")}
             >
               Launch App
+            </button>
+            <button
+              type="button"
+              className="aw-chip-btn"
+              onClick={() => onLaunchApp("dev")}
+            >
+              Dev Lab
             </button>
             <button
               type="button"

@@ -10,18 +10,22 @@ import {
 import {
   defaultCapabilitiesForKind,
   type ClassicAddress,
+  type ContractAddress,
   type LinkedAccount,
   type PwaConfig,
+  type ScanReport,
   type StellarAddress,
 } from "@astrowallet/domain";
 import { scanTransactionEnvelopeXdr } from "@astrowallet/security-shield";
 import {
   attachSep43WindowProvider,
   createSep43Provider,
+  createSorobanDevClient,
   createStellarClient,
   createWalletConnectStellarResponder,
   decryptVaultPayload,
   deleteEncryptedVault,
+  deriveCounterfactualSmartAccount,
   deriveKeyInWorker,
   deriveStellarAccount,
   disableFingerprintUnlock,
@@ -30,16 +34,25 @@ import {
   hasEncryptedVault,
   isFingerprintSupported,
   loadBiometricRecord,
+  loadContacts,
   loadEncryptedVault,
   parseAgVaultBackup,
+  publicKeyToRawHex,
+  saveContacts,
   saveEncryptedVault,
   serializeAgVaultBackup,
   signChallengeMessage,
+  signTransactionXdrEnvelope,
   unlockWithFingerprint,
   validateMnemonicPhrase,
   type ClaimableBalanceRecord,
+  type ContactEntry,
+  type DevTemplateKind,
   type RecentPaymentRecord,
   type SdexOfferRecord,
+  type SorobanInvokeResult,
+  type SorobanSimulationSummary,
+  type SorobanTelemetry,
   type StellarAccountState,
   type TypedMemoInput,
   type VaultAccountMetadata,
@@ -48,6 +61,12 @@ import {
 } from "@astrowallet/stellar-core";
 
 export type VaultStatus = "loading" | "uninitialized" | "locked" | "unlocked";
+
+export interface ToastMessage {
+  id: number;
+  kind: "success" | "info" | "error";
+  message: string;
+}
 
 export interface SendPaymentParams {
   destination: StellarAddress;
@@ -76,6 +95,24 @@ export interface PlaceSdexOfferParams {
   offerId?: string | undefined;
 }
 
+export interface ExecutePathSwapParams {
+  sendAssetCode: string;
+  sendAssetIssuer?: ClassicAddress | undefined;
+  sendAmount: string;
+  destAssetCode: string;
+  destAssetIssuer?: ClassicAddress | undefined;
+  destMin: string;
+  path?: ReadonlyArray<{ assetCode: string; assetIssuer?: string | undefined }> | undefined;
+}
+
+export interface DerivedPublicKeyPreview {
+  index: number;
+  derivationPath: string;
+  publicKey: ClassicAddress;
+  rawHex: string;
+  counterfactualSmartAddress?: string | undefined;
+}
+
 export interface WalletContextValue {
   config: PwaConfig;
   vaultStatus: VaultStatus;
@@ -86,25 +123,40 @@ export interface WalletContextValue {
   recentPayments: readonly RecentPaymentRecord[];
   claimableBalances: readonly ClaimableBalanceRecord[];
   openOffers: readonly SdexOfferRecord[];
+  contacts: readonly ContactEntry[];
+  toast: ToastMessage | null;
   loadingChain: boolean;
   chainError: string | null;
   fingerprintSupported: boolean;
   fingerprintEnrolled: boolean;
 
   setActiveIndex(index: number): void;
+  showToast(message: string, kind?: "success" | "info" | "error"): void;
+  dismissToast(): void;
   createOrImportVault(mnemonic: string, pinOrPassphrase: string, initialLabel?: string): Promise<void>;
   restoreAgVaultJson(rawJson: string, pinOrPassphrase: string): Promise<void>;
   exportAgVaultJson(): Promise<string>;
+  revealMnemonicWithPin(pinOrPassphrase: string): Promise<string>;
   unlockWithPin(pinOrPassphrase: string): Promise<void>;
   unlockWithBiometric(): Promise<void>;
   enableFingerprint(pinOrPassphrase: string): Promise<{ enrolled: boolean; message: string }>;
   disableFingerprint(): Promise<void>;
   addDerivedAccount(label: string, pinOrPassphrase: string): Promise<LinkedAccount>;
+  renameDerivedAccount(index: number, newLabel: string, pinOrPassphrase: string): Promise<void>;
   lockVault(): void;
   wipeLocalVault(): Promise<void>;
+  saveContact(input: {
+    label: string;
+    address: string;
+    defaultMemo?: string | undefined;
+  }): Promise<ContactEntry>;
+  deleteContact(id: string): Promise<void>;
   refreshChainState(): Promise<void>;
   fundActiveTestnetAccount(): Promise<void>;
+  fundAnyTestnetAddress(address: ClassicAddress): Promise<void>;
   sendPayment(params: SendPaymentParams): Promise<{ hash: string; ledger: number }>;
+  executePathSwap(params: ExecutePathSwapParams): Promise<{ hash: string; ledger: number }>;
+  submitAccountDataEntry(name: string, value: string | null): Promise<{ hash: string; ledger: number }>;
   addOrRemoveTrustline(
     assetCode: string,
     assetIssuer: ClassicAddress,
@@ -113,6 +165,34 @@ export interface WalletContextValue {
   reclaimZeroBalanceReserves(): Promise<{ hash: string; ledger: number; reclaimedXlm: string }>;
   claimBalanceById(balanceId: string): Promise<{ hash: string; ledger: number }>;
   placeSdexOffer(params: PlaceSdexOfferParams): Promise<{ hash: string; ledger: number }>;
+  signRawXdrWithShield(
+    xdrBase64: string,
+    allowWarning?: boolean,
+  ): Promise<{ signedXdr: string; scanReport: ScanReport }>;
+  signAndSubmitRawXdrWithShield(
+    xdrBase64: string,
+    allowWarning?: boolean,
+  ): Promise<{
+    hash: string;
+    ledger: number;
+    signedXdr: string;
+    channel: "soroban-rpc" | "horizon";
+  }>;
+  fetchDevTelemetry(): Promise<SorobanTelemetry>;
+  simulateSorobanCall(params: {
+    contractId: ContractAddress;
+    fnName: string;
+    argsJson: string;
+  }): Promise<SorobanSimulationSummary>;
+  invokeSorobanWrite(params: {
+    contractId: ContractAddress;
+    fnName: string;
+    argsJson: string;
+  }): Promise<SorobanInvokeResult>;
+  simulateRawXdr(xdrBase64: string): Promise<SorobanSimulationSummary>;
+  buildDevTemplateXdr(template: DevTemplateKind): Promise<string>;
+  derivePublicKeyPreview(count: number): DerivedPublicKeyPreview[];
+  signActiveSep53Message(message: string): Promise<{ signature: string; signerAddress: ClassicAddress }>;
   handleDappRpcRequest(
     request: WalletConnectStellarRequest,
   ): Promise<WalletConnectStellarResponse>;
@@ -143,6 +223,15 @@ export function WalletProvider({
   children: ReactNode;
 }) {
   const stellarClient = useMemo(() => createStellarClient(config), [config]);
+  const sorobanDevClient = useMemo(
+    () =>
+      createSorobanDevClient({
+        rpcUrls: config.rpcUrls,
+        horizonUrls: config.horizonUrls,
+        networkPassphrase: config.networkPassphrase,
+      }),
+    [config.rpcUrls, config.horizonUrls, config.networkPassphrase],
+  );
 
   const [vaultStatus, setVaultStatus] = useState<VaultStatus>("loading");
   const [unlockedMnemonic, setUnlockedMnemonic] = useState<string | null>(null);
@@ -153,11 +242,33 @@ export function WalletProvider({
   const [recentPayments, setRecentPayments] = useState<RecentPaymentRecord[]>([]);
   const [claimableBalances, setClaimableBalances] = useState<ClaimableBalanceRecord[]>([]);
   const [openOffers, setOpenOffers] = useState<SdexOfferRecord[]>([]);
+  const [contacts, setContacts] = useState<ContactEntry[]>([]);
+  const [toast, setToast] = useState<ToastMessage | null>(null);
+
   const [loadingChain, setLoadingChain] = useState<boolean>(false);
   const [chainError, setChainError] = useState<string | null>(null);
 
   const [fingerprintSupported, setFingerprintSupported] = useState<boolean>(false);
   const [fingerprintEnrolled, setFingerprintEnrolled] = useState<boolean>(false);
+
+  const showToast = useCallback(
+    (message: string, kind: "success" | "info" | "error" = "success") => {
+      setToast({ id: Date.now(), kind, message });
+    },
+    [],
+  );
+
+  const dismissToast = useCallback(() => {
+    setToast(null);
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const timer = setTimeout(() => {
+      setToast(null);
+    }, 4500);
+    return () => clearTimeout(timer);
+  }, [toast]);
 
   const accounts = useMemo(() => toLinkedAccounts(accountMetaList), [accountMetaList]);
   const activeAccount = useMemo(
@@ -168,14 +279,16 @@ export function WalletProvider({
   useEffect(() => {
     let cancelled = false;
     async function init() {
-      const [exists, fpSupported, bioRecord] = await Promise.all([
+      const [exists, fpSupported, bioRecord, storedContacts] = await Promise.all([
         hasEncryptedVault().catch(() => false),
         isFingerprintSupported().catch(() => false),
         loadBiometricRecord().catch(() => null),
+        loadContacts().catch(() => []),
       ]);
       if (cancelled) return;
       setFingerprintSupported(fpSupported);
       setFingerprintEnrolled(bioRecord !== null);
+      setContacts(storedContacts);
       setVaultStatus(exists ? "locked" : "uninitialized");
     }
     void init();
@@ -191,7 +304,7 @@ export function WalletProvider({
     try {
       const [state, payments, claimables, offers] = await Promise.all([
         stellarClient.fetchAccountState(activeAccount.address),
-        stellarClient.fetchRecentPayments(activeAccount.address, 10),
+        stellarClient.fetchRecentPayments(activeAccount.address, 25),
         stellarClient.fetchClaimableBalances(activeAccount.address, 20),
         stellarClient.fetchOpenOffers(activeAccount.address, 20),
       ]);
@@ -218,7 +331,9 @@ export function WalletProvider({
   }, [vaultStatus, activeAccount, refreshChainState]);
 
   const withActiveKeypair = useCallback(
-    async <T,>(fn: (keypair: ReturnType<ReturnType<typeof deriveStellarAccount>["toKeypair"]>) => Promise<T>): Promise<T> => {
+    async <T,>(
+      fn: (keypair: ReturnType<ReturnType<typeof deriveStellarAccount>["toKeypair"]>) => Promise<T>,
+    ): Promise<T> => {
       if (!unlockedMnemonic || !activeAccount) {
         throw new Error("Vault is locked");
       }
@@ -303,8 +418,9 @@ export function WalletProvider({
       setAccountMetaList(initialAccounts);
       setActiveIndex(0);
       setVaultStatus("unlocked");
+      showToast("Sovereign SEP-0005 Vault created locally");
     },
-    [],
+    [showToast],
   );
 
   const unlockWithPin = useCallback(async (pinOrPassphrase: string) => {
@@ -358,8 +474,9 @@ export function WalletProvider({
       setAccountMetaList(decrypted.accounts);
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setVaultStatus("unlocked");
+      showToast("Encrypted .agvault restored locally");
     },
-    [],
+    [showToast],
   );
 
   const exportAgVaultJson = useCallback(async () => {
@@ -368,6 +485,17 @@ export function WalletProvider({
       throw new Error("No encrypted vault present to export");
     }
     return serializeAgVaultBackup(envelope);
+  }, []);
+
+  const revealMnemonicWithPin = useCallback(async (pinOrPassphrase: string): Promise<string> => {
+    const envelope = await loadEncryptedVault();
+    if (!envelope) {
+      throw new Error("No encrypted vault stored on this device");
+    }
+    const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+      deriveKeyFn: deriveKeyInWorker,
+    });
+    return decrypted.mnemonic;
   }, []);
 
   const addDerivedAccount = useCallback(
@@ -413,9 +541,80 @@ export function WalletProvider({
       if (!linked) {
         throw new Error("Failed to construct linked account");
       }
+      showToast(`Derived ${cleanLabel} (m/44'/148'/${nextIndex}')`);
       return linked;
     },
-    [unlockedMnemonic],
+    [unlockedMnemonic, showToast],
+  );
+
+  const renameDerivedAccount = useCallback(
+    async (index: number, newLabel: string, pinOrPassphrase: string) => {
+      const cleaned = newLabel.trim();
+      if (!cleaned) {
+        throw new Error("Account label cannot be empty");
+      }
+      const envelope = await loadEncryptedVault();
+      if (!envelope) {
+        throw new Error("Encrypted vault missing from IndexedDB");
+      }
+      const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+        deriveKeyFn: deriveKeyInWorker,
+      });
+      if (!decrypted.accounts.some((acc) => acc.index === index)) {
+        throw new Error(`Account index ${index} not found in vault`);
+      }
+
+      const updatedAccounts = decrypted.accounts.map((acc) =>
+        acc.index === index ? { ...acc, label: cleaned.slice(0, 32) } : acc,
+      );
+      const updatedEnvelope = await encryptVaultPayload(
+        {
+          mnemonic: decrypted.mnemonic,
+          accounts: updatedAccounts,
+          createdAt: decrypted.createdAt,
+        },
+        pinOrPassphrase,
+        { deriveKeyFn: deriveKeyInWorker },
+      );
+      await saveEncryptedVault(updatedEnvelope);
+      setAccountMetaList(updatedAccounts);
+      showToast(`Renamed account to "${cleaned}"`);
+    },
+    [showToast],
+  );
+
+  const saveContact = useCallback(
+    async (input: { label: string; address: string; defaultMemo?: string | undefined }) => {
+      const cleanLabel = input.label.trim();
+      const cleanAddr = input.address.trim();
+      if (!cleanLabel) throw new Error("Contact label is required");
+      if (!cleanAddr) throw new Error("Contact Stellar address is required");
+
+      const nextEntry: ContactEntry = {
+        id: `c_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        label: cleanLabel.slice(0, 40),
+        address: cleanAddr,
+        defaultMemo: input.defaultMemo?.trim() || undefined,
+        createdAt: Math.floor(Date.now() / 1000),
+      };
+      const filtered = contacts.filter((c) => c.address !== cleanAddr);
+      const updated = [nextEntry, ...filtered].slice(0, 50);
+      await saveContacts(updated);
+      setContacts(updated);
+      showToast(`Saved contact "${nextEntry.label}"`);
+      return nextEntry;
+    },
+    [contacts, showToast],
+  );
+
+  const deleteContact = useCallback(
+    async (id: string) => {
+      const updated = contacts.filter((c) => c.id !== id);
+      await saveContacts(updated);
+      setContacts(updated);
+      showToast("Removed contact", "info");
+    },
+    [contacts, showToast],
   );
 
   const lockVault = useCallback(() => {
@@ -437,7 +636,8 @@ export function WalletProvider({
     setOpenOffers([]);
     setFingerprintEnrolled(false);
     setVaultStatus("uninitialized");
-  }, []);
+    showToast("Local vault wiped from this device", "info");
+  }, [showToast]);
 
   const fundActiveTestnetAccount = useCallback(async () => {
     if (!activeAccount) {
@@ -448,6 +648,7 @@ export function WalletProvider({
     try {
       await stellarClient.fundWithFriendbot(activeAccount.address);
       await refreshChainState();
+      showToast("Funded 10,000 Testnet XLM via Friendbot");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Friendbot funding failed";
       setChainError(msg);
@@ -455,7 +656,18 @@ export function WalletProvider({
     } finally {
       setLoadingChain(false);
     }
-  }, [activeAccount, stellarClient, refreshChainState]);
+  }, [activeAccount, stellarClient, refreshChainState, showToast]);
+
+  const fundAnyTestnetAddress = useCallback(
+    async (address: ClassicAddress) => {
+      await stellarClient.fundWithFriendbot(address);
+      if (activeAccount?.address === address) {
+        await refreshChainState();
+      }
+      showToast(`Funded ${address.slice(0, 6)}…${address.slice(-4)} on Testnet`);
+    },
+    [stellarClient, activeAccount, refreshChainState, showToast],
+  );
 
   const sendPayment = useCallback(
     async (params: SendPaymentParams): Promise<{ hash: string; ledger: number }> => {
@@ -470,10 +682,55 @@ export function WalletProvider({
           typedMemo: params.typedMemo,
         });
         await refreshChainState();
+        showToast(`Sent ${params.amount} ${params.assetCode} cleanly`);
         return result;
       });
     },
-    [withActiveKeypair, stellarClient, refreshChainState],
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+  );
+
+  const executePathSwap = useCallback(
+    async (params: ExecutePathSwapParams): Promise<{ hash: string; ledger: number }> => {
+      return withActiveKeypair(async (keypair) => {
+        const result = await stellarClient.submitPathPaymentStrictSend({
+          sourceKeypair: keypair,
+          sendAsset: {
+            assetCode: params.sendAssetCode,
+            assetIssuer: params.sendAssetIssuer,
+          },
+          sendAmount: params.sendAmount,
+          destAsset: {
+            assetCode: params.destAssetCode,
+            assetIssuer: params.destAssetIssuer,
+          },
+          destMin: params.destMin,
+          path: params.path?.map((hop) => ({
+            assetCode: hop.assetCode,
+            assetIssuer: hop.assetIssuer as ClassicAddress | undefined,
+          })),
+        });
+        await refreshChainState();
+        showToast(`Swapped ${params.sendAmount} ${params.sendAssetCode} → ${params.destAssetCode}`);
+        return result;
+      });
+    },
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+  );
+
+  const submitAccountDataEntry = useCallback(
+    async (name: string, value: string | null): Promise<{ hash: string; ledger: number }> => {
+      return withActiveKeypair(async (keypair) => {
+        const res = await stellarClient.submitManageData({
+          sourceKeypair: keypair,
+          name,
+          value,
+        });
+        await refreshChainState();
+        showToast(`Updated account Data entry "${name}"`);
+        return res;
+      });
+    },
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
   );
 
   const addOrRemoveTrustline = useCallback(
@@ -490,10 +747,13 @@ export function WalletProvider({
           limit,
         });
         await refreshChainState();
+        showToast(
+          limit === "0" ? `Removed ${assetCode} trustline` : `Activated ${assetCode} trustline`,
+        );
         return result;
       });
     },
-    [withActiveKeypair, stellarClient, refreshChainState],
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
   );
 
   const reclaimZeroBalanceReserves = useCallback(async (): Promise<{
@@ -511,9 +771,10 @@ export function WalletProvider({
         trustlines,
       });
       await refreshChainState();
+      showToast(`Reclaimed +${result.reclaimedXlm} XLM reserve`);
       return result;
     });
-  }, [accountState?.reclaimableTrustlines, withActiveKeypair, stellarClient, refreshChainState]);
+  }, [accountState?.reclaimableTrustlines, withActiveKeypair, stellarClient, refreshChainState, showToast]);
 
   const claimBalanceById = useCallback(
     async (balanceId: string): Promise<{ hash: string; ledger: number }> => {
@@ -523,10 +784,11 @@ export function WalletProvider({
           balanceId,
         });
         await refreshChainState();
+        showToast("Claimed balance onto ledger");
         return result;
       });
     },
-    [withActiveKeypair, stellarClient, refreshChainState],
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
   );
 
   const placeSdexOffer = useCallback(
@@ -541,10 +803,162 @@ export function WalletProvider({
           offerId: params.offerId,
         });
         await refreshChainState();
+        showToast("Submitted Classic SDEX order");
         return result;
       });
     },
-    [withActiveKeypair, stellarClient, refreshChainState],
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+  );
+
+  const signRawXdrWithShield = useCallback(
+    async (
+      xdrBase64: string,
+      allowWarning = false,
+    ): Promise<{ signedXdr: string; scanReport: ScanReport }> => {
+      const scan = scanTransactionEnvelopeXdr(xdrBase64.trim(), {
+        networkPassphrase: config.networkPassphrase,
+      });
+      if (scan.report.verdict === "malicious") {
+        throw new Error(
+          `Scan & Shield blocked malicious XDR: ${scan.report.findings[0]?.title ?? "threat detected"}`,
+        );
+      }
+      if (scan.report.verdict === "warning" && !allowWarning) {
+        throw new Error(
+          `Scan & Shield warning: ${scan.report.findings[0]?.title ?? "review required"}. Enable "Allow warnings" to sign explicitly.`,
+        );
+      }
+      return withActiveKeypair(async (keypair) => {
+        const signedXdr = signTransactionXdrEnvelope(
+          xdrBase64.trim(),
+          config.networkPassphrase,
+          keypair,
+        );
+        return { signedXdr, scanReport: scan.report };
+      });
+    },
+    [config.networkPassphrase, withActiveKeypair],
+  );
+
+  const signAndSubmitRawXdrWithShield = useCallback(
+    async (
+      xdrBase64: string,
+      allowWarning = false,
+    ): Promise<{
+      hash: string;
+      ledger: number;
+      signedXdr: string;
+      channel: "soroban-rpc" | "horizon";
+    }> => {
+      const { signedXdr } = await signRawXdrWithShield(xdrBase64, allowWarning);
+      const submitted = await sorobanDevClient.submitRawSignedXdr(signedXdr);
+      await refreshChainState();
+      showToast(`Submitted via ${submitted.channel}`);
+      return {
+        ...submitted,
+        signedXdr,
+      };
+    },
+    [signRawXdrWithShield, sorobanDevClient, refreshChainState, showToast],
+  );
+
+  const fetchDevTelemetry = useCallback(
+    () => sorobanDevClient.fetchNetworkTelemetry(),
+    [sorobanDevClient],
+  );
+
+  const simulateSorobanCall = useCallback(
+    (params: { contractId: ContractAddress; fnName: string; argsJson: string }) =>
+      sorobanDevClient.simulateContractCall({
+        ...params,
+        sourceAddress: activeAccount?.address as ClassicAddress | undefined,
+      }),
+    [sorobanDevClient, activeAccount],
+  );
+
+  const invokeSorobanWrite = useCallback(
+    async (params: {
+      contractId: ContractAddress;
+      fnName: string;
+      argsJson: string;
+    }): Promise<SorobanInvokeResult> => {
+      return withActiveKeypair(async (keypair) => {
+        const res = await sorobanDevClient.invokeContractWrite({
+          sourceKeypair: keypair,
+          ...params,
+        });
+        await refreshChainState();
+        showToast(`Soroban call confirmed in ledger #${res.ledger}`);
+        return res;
+      });
+    },
+    [withActiveKeypair, sorobanDevClient, refreshChainState, showToast],
+  );
+
+  const simulateRawXdr = useCallback(
+    (xdrBase64: string) => sorobanDevClient.simulateRawXdr(xdrBase64),
+    [sorobanDevClient],
+  );
+
+  const buildDevTemplateXdr = useCallback(
+    (template: DevTemplateKind) => {
+      if (!activeAccount) {
+        throw new Error("Unlock your vault to generate a live-sequence XDR template");
+      }
+      return sorobanDevClient.buildTemplateUnsignedXdr({
+        sourceAddress: activeAccount.address as ClassicAddress,
+        template,
+      });
+    },
+    [activeAccount, sorobanDevClient],
+  );
+
+  const derivePublicKeyPreview = useCallback(
+    (count: number): DerivedPublicKeyPreview[] => {
+      if (!unlockedMnemonic) {
+        throw new Error("Unlock vault to inspect SEP-0005 derivation table");
+      }
+      const clamped = Math.max(1, Math.min(10, Math.trunc(count)));
+      const rows: DerivedPublicKeyPreview[] = [];
+      for (let i = 0; i < clamped; i += 1) {
+        const derived = deriveStellarAccount(unlockedMnemonic, i);
+        try {
+          let smartAddr: string | undefined;
+          if (config.smartAccountWasmHash) {
+            try {
+              smartAddr = deriveCounterfactualSmartAccount({
+                guardianAddress: derived.publicKey,
+                wasmHashHex: config.smartAccountWasmHash,
+                networkPassphrase: config.networkPassphrase,
+              }).contractAddress;
+            } catch {
+              smartAddr = undefined;
+            }
+          }
+          rows.push({
+            index: derived.index,
+            derivationPath: derived.derivationPath,
+            publicKey: derived.publicKey,
+            rawHex: publicKeyToRawHex(derived.publicKey),
+            counterfactualSmartAddress: smartAddr,
+          });
+        } finally {
+          derived.zeroize();
+        }
+      }
+      return rows;
+    },
+    [unlockedMnemonic, config.smartAccountWasmHash, config.networkPassphrase],
+  );
+
+  const signActiveSep53Message = useCallback(
+    async (message: string) => {
+      return withActiveKeypair(async (keypair) => ({
+        signature: signChallengeMessage(keypair, message),
+        signerAddress: keypair.publicKey() as ClassicAddress,
+      }));
+    },
+    [withActiveKeypair],
   );
 
   const handleDappRpcRequest = useCallback(
@@ -626,28 +1040,48 @@ export function WalletProvider({
     recentPayments,
     claimableBalances,
     openOffers,
+    contacts,
+    toast,
     loadingChain,
     chainError,
     fingerprintSupported,
     fingerprintEnrolled,
     setActiveIndex,
+    showToast,
+    dismissToast,
     createOrImportVault,
     restoreAgVaultJson,
     exportAgVaultJson,
+    revealMnemonicWithPin,
     unlockWithPin,
     unlockWithBiometric,
     enableFingerprint,
     disableFingerprint,
     addDerivedAccount,
+    renameDerivedAccount,
     lockVault,
     wipeLocalVault,
+    saveContact,
+    deleteContact,
     refreshChainState,
     fundActiveTestnetAccount,
+    fundAnyTestnetAddress,
     sendPayment,
+    executePathSwap,
+    submitAccountDataEntry,
     addOrRemoveTrustline,
     reclaimZeroBalanceReserves,
     claimBalanceById,
     placeSdexOffer,
+    signRawXdrWithShield,
+    signAndSubmitRawXdrWithShield,
+    fetchDevTelemetry,
+    simulateSorobanCall,
+    invokeSorobanWrite,
+    simulateRawXdr,
+    buildDevTemplateXdr,
+    derivePublicKeyPreview,
+    signActiveSep53Message,
     handleDappRpcRequest,
     signConnectChallenge,
   };

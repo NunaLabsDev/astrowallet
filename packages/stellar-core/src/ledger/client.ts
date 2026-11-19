@@ -24,6 +24,7 @@ import {
   buildManageSellOfferOperation,
   buildStellarMemo,
   decodeMuxedAddress,
+  resolveStellarAsset,
   type ClassicAssetInput,
   type TypedMemoInput,
 } from "../classic/index.js";
@@ -113,6 +114,20 @@ export interface StellarClient {
     amount: string;
     price: string;
     offerId?: string | undefined;
+  }): Promise<{ hash: string; ledger: number }>;
+  submitPathPaymentStrictSend(input: {
+    sourceKeypair: Keypair;
+    sendAsset: ClassicAssetInput;
+    sendAmount: string;
+    destination?: StellarAddress | undefined;
+    destAsset: ClassicAssetInput;
+    destMin: string;
+    path?: readonly ClassicAssetInput[] | undefined;
+  }): Promise<{ hash: string; ledger: number }>;
+  submitManageData(input: {
+    sourceKeypair: Keypair;
+    name: string;
+    value: string | null;
   }): Promise<{ hash: string; ledger: number }>;
 }
 
@@ -505,6 +520,45 @@ export function createStellarClient(
     return submitClassicOperations(input.sourceKeypair, [op]);
   }
 
+  async function submitPathPaymentStrictSend(input: {
+    sourceKeypair: Keypair;
+    sendAsset: ClassicAssetInput;
+    sendAmount: string;
+    destination?: StellarAddress | undefined;
+    destAsset: ClassicAssetInput;
+    destMin: string;
+    path?: readonly ClassicAssetInput[] | undefined;
+  }): Promise<{ hash: string; ledger: number }> {
+    const sendAsset = resolveStellarAsset(input.sendAsset);
+    const destAsset = resolveStellarAsset(input.destAsset);
+    const path = (input.path ?? []).map((hop) => resolveStellarAsset(hop));
+    const op = Operation.pathPaymentStrictSend({
+      sendAsset,
+      sendAmount: input.sendAmount,
+      destination: input.destination ?? input.sourceKeypair.publicKey(),
+      destAsset,
+      destMin: input.destMin,
+      path,
+    });
+    return submitClassicOperations(input.sourceKeypair, [op]);
+  }
+
+  async function submitManageData(input: {
+    sourceKeypair: Keypair;
+    name: string;
+    value: string | null;
+  }): Promise<{ hash: string; ledger: number }> {
+    const cleanName = input.name.trim();
+    if (!cleanName || new TextEncoder().encode(cleanName).length > 64) {
+      throw new Error("ManageData key name must be 1 to 64 UTF-8 bytes");
+    }
+    const op = Operation.manageData({
+      name: cleanName,
+      value: input.value,
+    });
+    return submitClassicOperations(input.sourceKeypair, [op]);
+  }
+
   return {
     fetchAccountState,
     fetchRecentPayments,
@@ -516,5 +570,7 @@ export function createStellarClient(
     reclaimZeroBalanceTrustlines,
     claimClaimableBalance,
     submitSdexSellOffer,
+    submitPathPaymentStrictSend,
+    submitManageData,
   };
 }

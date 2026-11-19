@@ -33,9 +33,15 @@ export function parseSwapAssetIdentifier(raw: string): ParsedSwapAsset {
   return { code, issuer: issuer || undefined };
 }
 
+interface HorizonStrictSendPathHop {
+  asset_type: string;
+  asset_code?: string | undefined;
+  asset_issuer?: string | undefined;
+}
+
 interface HorizonStrictSendPathRecord {
   destination_amount: string;
-  path?: unknown[];
+  path?: HorizonStrictSendPathHop[];
 }
 
 /**
@@ -106,11 +112,18 @@ export function createHorizonPathSwapAdapter(input: {
             }
           }
 
+          const pathAssets = (best.path ?? []).map((hop) =>
+            hop.asset_type === "native" || !hop.asset_code
+              ? { assetCode: "XLM" }
+              : { assetCode: hop.asset_code, assetIssuer: hop.asset_issuer },
+          );
+
           return {
             provider: "horizon-path",
             inputAmount: request.amount,
             expectedOutputAmount: best.destination_amount,
             priceImpactPct: "0.10",
+            pathAssets,
           };
         } catch (err) {
           lastErr = err;

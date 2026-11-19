@@ -1646,6 +1646,193 @@ select:focus-visible {
   }
 }
 
+/* ============================================================
+   PRO WALLET UTILITIES, RESERVE BAR, DEV LAB & TOASTS
+   ============================================================ */
+.aw-reserve-panel {
+  display: grid;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.aw-reserve-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.aw-reserve-track {
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(6, 14, 36, 0.72);
+  border: 1px solid rgba(165, 139, 224, 0.22);
+  overflow: hidden;
+  display: flex;
+}
+
+.aw-reserve-fill {
+  height: 100%;
+  transition: width 280ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.aw-reserve-fill--spendable {
+  background: linear-gradient(90deg, var(--aw-trust-emerald), #34d399);
+}
+
+.aw-reserve-fill--reserved {
+  background: linear-gradient(90deg, var(--aw-cosmic-purple), var(--aw-stellar-gold));
+}
+
+.aw-action-alert {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 11px 14px;
+  border-radius: 16px;
+  background: rgba(245, 201, 40, 0.11);
+  border: 1px solid rgba(245, 201, 40, 0.36);
+}
+
+.aw-mini-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(165, 139, 224, 0.3);
+  background: rgba(18, 34, 84, 0.72);
+  color: var(--aw-ink-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  font-family: inherit;
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 140ms ease, color 140ms ease, background-color 140ms ease;
+}
+
+.aw-mini-chip:hover {
+  border-color: var(--aw-stellar-gold);
+  color: var(--aw-ink-primary);
+  background: rgba(28, 54, 128, 0.85);
+}
+
+.aw-dev-tabs {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.aw-dev-kv-grid {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 1fr;
+}
+
+.aw-code-block {
+  margin: 0;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(6, 14, 36, 0.86);
+  border: 1px solid rgba(165, 139, 224, 0.28);
+  color: var(--aw-nebula-lavender);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-x: auto;
+  max-height: 260px;
+}
+
+.aw-seed-grid--blurred .aw-seed-text {
+  filter: blur(6px);
+  user-select: none;
+}
+
+.aw-danger-card {
+  border-color: rgba(239, 68, 68, 0.38);
+  background: rgba(45, 12, 24, 0.38);
+}
+
+.aw-btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 10px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 14px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.aw-toast {
+  position: fixed;
+  top: calc(14px + env(safe-area-inset-top));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 80;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(calc(100vw - 24px), 420px);
+  padding: 10px 14px;
+  border-radius: 999px;
+  background: rgba(10, 20, 54, 0.94);
+  backdrop-filter: blur(18px) saturate(165%);
+  -webkit-backdrop-filter: blur(18px) saturate(165%);
+  border: 1px solid rgba(165, 139, 224, 0.42);
+  color: var(--aw-ink-primary);
+  font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 14px 36px rgba(4, 9, 26, 0.72);
+}
+
+.aw-toast--success {
+  border-color: rgba(16, 185, 129, 0.56);
+}
+
+.aw-toast--error {
+  border-color: rgba(239, 68, 68, 0.62);
+}
+
+.aw-toast-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  border: none;
+  background: rgba(165, 139, 224, 0.2);
+  color: var(--aw-ink-primary);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+@media (min-width: 768px) {
+  .aw-dev-kv-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .aw-toast {
+    top: auto;
+    bottom: 24px;
+    left: auto;
+    right: 24px;
+    transform: none;
+  }
+}
+
 /* Animations */
 @keyframes aw-drawer-up {
   from {

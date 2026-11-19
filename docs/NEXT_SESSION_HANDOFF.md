@@ -1,6 +1,6 @@
 # AstroWallet — Next Session Handoff Guide
 
-> **Current Status:** **Phases 0–4**, the official Stellar Landing Website (`/`), the bank-grade Liquid Glass Wallet App (`/app`), animated crisp-pixel Navigators, live Sorobits SEP-50 integration, Cloudflare live Testnet deployment, and Telegram Super-Bot webhook are **100% live and verified** (`73` Vitest tests + `2` Soroban Rust tests passing).
+> **Current Status:** **Phases 0–4**, the official Stellar Landing Website (`/`), the full-featured Liquid Glass Fintech Wallet (`/app`) for users & developers (**Dev Lab**), animated crisp-pixel Navigators, live Sorobits SEP-50 integration, Cloudflare live Testnet deployment, and Telegram Super-Bot webhook are **100% live and verified** (`76` Vitest tests + `2` Soroban Rust tests passing).
 
 ---
 
@@ -25,8 +25,10 @@
 ## 2. Completed & Verified Milestones
 
 - **Phases 0–4 Complete:** Zero-hardcoding Zod env config (`PwaConfig` + `ServerConfig` with Mainnet Friendbot hard-block), SEP-0005 multi-account Argon2id/AES-GCM-256 IndexedDB vault, mandatory PIN + optional Fingerprint, Scan & Shield zero-WASM pre-sign pipeline, Soroban Smart Accounts (`C...`) + Guardian rotation (`rotate_guardian`), Soroswap + Horizon Path Payments, Claim-Link Escrow Soroban contract (`contracts/claim-escrow/src/lib.rs`), `M...` muxed/typed Memos/LumenWipe/SDEX, Reown/WalletConnect v2 + Wallets Kit v2 + SEP-43, Goldsky/Mercury `POST /webhooks/indexer`, and Circle CCTP (6↔7 decimal guard) + MoonPay/Transak `RampPort`.
-- **Banking-Trust Website (`/`) + Fintech Wallet App (`/app`) (`apps/pwa` & `packages/stellar-core`):**
-  - 60/30/10 Sovereign Navy / Frosted Amethyst / Vault Gold palette, `LandingPage.tsx` at `/` (live `/health` telemetry, interactive 6-state Navigator preview, honest `G...` vs `C...` comparison, `@AstroWalletAppBot` preview, and live on-chain `fetchSorobitShowcase`), and `/app` Wallet Shell (desktop sidebar + mobile icon dock, 2-step guided onboarding with `3×4` seed grid, uncluttered Wallet balance hero + quick actions + `ModalDrawer` tool sheets, and multi-token `CollectiblesSheet` showcase grid).
+- **Banking-Trust Website (`/`) + Fintech Wallet & Dev Lab (`/app`) (`apps/pwa` & `packages/stellar-core`):**
+  - 60/30/10 Sovereign Navy / Frosted Amethyst / Vault Gold palette, `LandingPage.tsx` at `/` (live `/health` telemetry, interactive 6-state Navigator preview, honest `G...` vs `C...` comparison, `@AstroWalletAppBot` preview, and live on-chain `fetchSorobitShowcase`), and `/app` Wallet Shell (desktop sidebar + mobile icon dock, 2-step guided onboarding with `3×4` seed grid, uncluttered Wallet balance hero + Spendable vs Reserved bar + quick actions + `ModalDrawer` tool sheets, multi-token `CollectiblesSheet` showcase grid).
+  - **Full User Execution Suite:** Multi-asset `SendSheet` (`25%/50%/MAX`, SEP-0002 Federation resolve, SEP-0007 URI parse, Contacts quick-picker, Camera QR scanner, live pre-send Scan & Shield, Explorer links via `VITE_EXPLORER_BASE_URL`), `SwapSheet` (Soroswap + live Horizon Strict-Send path swap execution with slippage tolerance & hops preview), `ReceiveSheet` (`G...`, `SEP-0007` Payment Request QR, `M...` Muxed QR + Web Share), Activity filtering + Explorer/Tx copy, and Vault management (Contacts book, Account Rename, PIN-gated Reveal Seed Phrase, and Wipe Vault danger zone).
+  - **Stellar & Soroban Dev Lab (`/app?tab=dev`):** Live RPC telemetry, Testnet Faucet, interactive Soroban Contract Read/Write Caller, XDR Inspector/Template Generator/Sign-Only/Broadcaster, SEP-53 Sign & Verify, Raw Ed25519 Hex & SEP-0005 derivation table, On-chain `ManageData` editor, and dApp Bridge.
   - Custody posture strip (`Self-Custodial SEP-0005 · Argon2id IndexedDB · 0 Server Keys`), `32×32` crisp-pixel `AstroWalletLogo` & `favicon.svg`, and `32×32` pixel `AstroNavigatorAvatar` across 6 animated behavioral states (`float`, `shield`, `warp`, `vault`, `comms`, `zenith`).
 
 ---

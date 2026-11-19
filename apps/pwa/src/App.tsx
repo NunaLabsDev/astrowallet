@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import { StellarAddressSchema } from "@astrowallet/domain";
 import { deriveCounterfactualSmartAccount } from "@astrowallet/stellar-core";
 import { AccountSwitcher } from "./components/AccountSwitcher.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
@@ -6,6 +7,7 @@ import { AstroWalletLogo } from "./components/AstroWalletLogo.js";
 import { ClassicToolsSheet } from "./components/ClassicToolsSheet.js";
 import { CollectiblesSheet } from "./components/CollectiblesSheet.js";
 import { DappConnectSheet } from "./components/DappConnectSheet.js";
+import { DevLabSheet } from "./components/DevLabSheet.js";
 import {
   IconAccounts,
   IconActivity,
@@ -14,8 +16,12 @@ import {
   IconBridge,
   IconCheck,
   IconChevronRight,
+  IconClose,
+  IconCode,
   IconCopy,
+  IconEdit,
   IconExternalLink,
+  IconEye,
   IconFingerprint,
   IconGlobe,
   IconKey,
@@ -29,6 +35,8 @@ import {
   IconSwap,
   IconTelegram,
   IconTools,
+  IconTrash,
+  IconUserPlus,
   IconWallet,
   IconZap,
 } from "./components/Icons.js";
@@ -58,14 +66,23 @@ type ActiveDrawer =
   | "tools"
   | "ramp"
   | "dapp"
+  | "revealSeed"
   | null;
 
 type RouteView = "landing" | "app";
+type ActivityFilter = "all" | "received" | "sent";
+
+interface SendPrefill {
+  assetCode?: string | undefined;
+  assetIssuer?: string | undefined;
+  destination?: string | undefined;
+}
 
 const VALID_TABS: readonly AppDockTab[] = [
   "wallet",
   "nfts",
   "activity",
+  "dev",
   "accounts",
   "telegram",
 ];
@@ -108,17 +125,17 @@ function drawerMetadata(
     case "send":
       return {
         title: "Send Payment",
-        subtitle: `Stellar ${network.toUpperCase()} · Supports G..., M... muxed & typed Memos`,
+        subtitle: `Stellar ${network.toUpperCase()} · Multi-Asset, G.../M.../C..., Federation & QR`,
       };
     case "receive":
       return {
         title: "Receive Stellar Assets",
-        subtitle: `Non-custodial G... address · ${network.toUpperCase()}`,
+        subtitle: `Standard G..., SEP-0007 Payment Request & M... Muxed · ${network.toUpperCase()}`,
       };
     case "swap":
       return {
         title: "Swap & Path Router",
-        subtitle: "Soroswap Soroban AMM + Classic Horizon Path",
+        subtitle: "Soroswap Soroban AMM + Live Horizon Path Execution",
       };
     case "scan":
       return {
@@ -128,7 +145,7 @@ function drawerMetadata(
     case "tools":
       return {
         title: "Classic Tools & Reserves",
-        subtitle: "SDEX offers, Trustlines, CAP-27 M..., LumenWipe reclaim",
+        subtitle: "SDEX offers, Trustlines, CAP-27 M..., Claimables & LumenWipe",
       };
     case "ramp":
       return {
@@ -139,6 +156,11 @@ function drawerMetadata(
       return {
         title: "Connect dApp",
         subtitle: "WalletConnect v2 / Reown & SEP-43 Provider",
+      };
+    case "revealSeed":
+      return {
+        title: "Reveal Recovery Phrase",
+        subtitle: "Verify PIN locally to decrypt your SEP-0005 mnemonic",
       };
   }
 }
@@ -151,6 +173,8 @@ function renderDockIcon(tab: AppDockTab) {
       return <IconNft size={19} />;
     case "activity":
       return <IconActivity size={19} />;
+    case "dev":
+      return <IconCode size={19} />;
     case "accounts":
       return <IconAccounts size={19} />;
     case "telegram":
@@ -158,13 +182,126 @@ function renderDockIcon(tab: AppDockTab) {
   }
 }
 
-const DOCK_ITEMS: ReadonlyArray<{ id: AppDockTab; label: string }> = [
+const SIDEBAR_ITEMS: ReadonlyArray<{ id: AppDockTab; label: string }> = [
   { id: "wallet", label: "Wallet" },
   { id: "nfts", label: "NFTs" },
   { id: "activity", label: "Activity" },
+  { id: "dev", label: "Dev Lab" },
   { id: "accounts", label: "Vault" },
   { id: "telegram", label: "Telegram" },
 ];
+
+const MOBILE_DOCK_ITEMS: ReadonlyArray<{ id: AppDockTab; label: string }> = [
+  { id: "wallet", label: "Wallet" },
+  { id: "nfts", label: "NFTs" },
+  { id: "activity", label: "Activity" },
+  { id: "dev", label: "Dev Lab" },
+  { id: "accounts", label: "Vault" },
+];
+
+function RevealSeedModalContent({ onDone }: { onDone: () => void }) {
+  const { revealMnemonicWithPin, showToast } = useWallet();
+  const [pin, setPin] = useState("");
+  const [revealed, setRevealed] = useState<string | null>(null);
+  const [unblurred, setUnblurred] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleReveal = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!pin) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const phrase = await revealMnemonicWithPin(pin);
+      setRevealed(phrase);
+      setPin("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Invalid PIN");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCopy = async () => {
+    if (!revealed) return;
+    try {
+      await navigator.clipboard.writeText(revealed);
+      showToast("Recovery phrase copied — clear clipboard after storing", "info");
+    } catch {
+      // Clipboard unavailable
+    }
+  };
+
+  if (!revealed) {
+    return (
+      <form onSubmit={handleReveal} style={{ display: "grid", gap: 12 }}>
+        <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+          Never share your 12/24 recovery words with anyone. Anyone holding these words controls
+          all derived accounts.
+        </div>
+        <div>
+          <label className="aw-label" htmlFor="reveal-seed-pin">
+            Confirm Vault PIN / Passphrase
+          </label>
+          <input
+            id="reveal-seed-pin"
+            type="password"
+            className="aw-input"
+            placeholder="Enter Vault PIN"
+            value={pin}
+            onChange={(e) => setPin(e.target.value)}
+          />
+        </div>
+        {error && <div className="aw-banner aw-banner--danger">{error}</div>}
+        <button type="submit" className="aw-btn-primary" disabled={busy || pin.length < 4}>
+          <IconEye size={15} />
+          <span>{busy ? "Decrypting Vault..." : "Verify PIN & Reveal Seed"}</span>
+        </button>
+      </form>
+    );
+  }
+
+  const words = revealed.split(" ");
+  return (
+    <div style={{ display: "grid", gap: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+        <button
+          type="button"
+          className="aw-chip-btn"
+          onClick={() => setUnblurred((v) => !v)}
+        >
+          <IconEye size={13} />
+          <span>{unblurred ? "Hide Words" : "Reveal Clear Text"}</span>
+        </button>
+        <button type="button" className="aw-chip-btn" onClick={() => void handleCopy()}>
+          <IconCopy size={13} />
+          <span>Copy Phrase</span>
+        </button>
+      </div>
+
+      <div className={`aw-seed-grid ${unblurred ? "" : "aw-seed-grid--blurred"}`}>
+        {words.map((word, idx) => (
+          <div key={`${idx}-${word}`} className="aw-seed-word">
+            <span className="aw-seed-index">{String(idx + 1).padStart(2, "0")}</span>
+            <span className="aw-seed-text">{word}</span>
+          </div>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        className="aw-btn-secondary"
+        onClick={() => {
+          setRevealed(null);
+          onDone();
+        }}
+      >
+        Hide &amp; Close
+      </button>
+    </div>
+  );
+}
 
 function WalletShell({
   initialTab,
@@ -184,6 +321,10 @@ function WalletShell({
     activeAccount,
     accountState,
     recentPayments,
+    claimableBalances,
+    contacts,
+    toast,
+    dismissToast,
     loadingChain,
     chainError,
     fingerprintSupported,
@@ -191,17 +332,46 @@ function WalletShell({
     enableFingerprint,
     disableFingerprint,
     exportAgVaultJson,
+    renameDerivedAccount,
+    saveContact,
+    deleteContact,
     lockVault,
+    wipeLocalVault,
     refreshChainState,
     fundActiveTestnetAccount,
+    claimBalanceById,
+    reclaimZeroBalanceReserves,
+    showToast,
   } = useWallet();
 
   const [activeTab, setActiveTab] = useState<AppDockTab>(initialTab);
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(null);
+  const [sendPrefill, setSendPrefill] = useState<SendPrefill>({});
+  const [swapFromPrefill, setSwapFromPrefill] = useState<string | undefined>(undefined);
+
   const [copiedAddr, setCopiedAddr] = useState(false);
+  const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
+  const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
+  const [actionBusy, setActionBusy] = useState(false);
+
+  // Vault controls state
   const [fpPin, setFpPin] = useState("");
   const [fpStatusMsg, setFpStatusMsg] = useState<string | null>(null);
   const [exportedVault, setExportedVault] = useState<string | null>(null);
+
+  const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
+  const [renameLabel, setRenameLabel] = useState("");
+  const [renamePin, setRenamePin] = useState("");
+  const [renameError, setRenameError] = useState<string | null>(null);
+
+  const [contactAdding, setContactAdding] = useState(false);
+  const [newContactLabel, setNewContactLabel] = useState("");
+  const [newContactAddr, setNewContactAddr] = useState("");
+  const [newContactMemo, setNewContactMemo] = useState("");
+  const [contactError, setContactError] = useState<string | null>(null);
+
+  const [wipeConfirmArmed, setWipeConfirmArmed] = useState(false);
+
   const [webPushStatus, setWebPushStatus] = useState<string>(() => {
     if (typeof Notification === "undefined") return "unsupported";
     return Notification.permission;
@@ -222,6 +392,28 @@ function WalletShell({
   const primaryXlmBalance =
     accountState?.balances.find((b) => b.assetCode === "XLM")?.balance ?? "0.0000000";
 
+  const reserveStats = useMemo(() => {
+    const total = Math.max(0, Number(primaryXlmBalance));
+    const reserved = accountState?.funded ? Number(accountState.minReserveXlm) : 0;
+    const spendable = accountState?.funded
+      ? Math.max(0, Number(accountState.spendableXlm))
+      : 0;
+    const reclaimable = accountState?.funded ? Number(accountState.reclaimableXlm) : 0;
+    const denom = Math.max(total, spendable + reserved, 1);
+    const spendPct = Math.min(100, Math.round((spendable / denom) * 100));
+    const reservedPct = Math.min(100 - spendPct, Math.round((reserved / denom) * 100));
+    return { total, reserved, spendable, reclaimable, spendPct, reservedPct };
+  }, [primaryXlmBalance, accountState]);
+
+  const filteredPayments = useMemo(() => {
+    if (!activeAccount) return [];
+    return recentPayments.filter((p) => {
+      if (activityFilter === "all") return true;
+      const inbound = p.to === activeAccount.address;
+      return activityFilter === "received" ? inbound : !inbound;
+    });
+  }, [recentPayments, activeAccount, activityFilter]);
+
   const pairedSmartAccount = useMemo(() => {
     if (!activeAccount || !config.smartAccountWasmHash) return null;
     try {
@@ -235,6 +427,16 @@ function WalletShell({
     }
   }, [activeAccount, config.smartAccountWasmHash, config.networkPassphrase]);
 
+  const openSendWith = (prefill: SendPrefill = {}) => {
+    setSendPrefill(prefill);
+    setActiveDrawer("send");
+  };
+
+  const openSwapWith = (fromAsset?: string) => {
+    setSwapFromPrefill(fromAsset);
+    setActiveDrawer("swap");
+  };
+
   const handleCopyAddress = async () => {
     if (!activeAccount) return;
     try {
@@ -243,6 +445,40 @@ function WalletShell({
       setTimeout(() => setCopiedAddr(false), 1800);
     } catch {
       // Clipboard unavailable
+    }
+  };
+
+  const handleCopyTxHash = async (txHash: string) => {
+    try {
+      await navigator.clipboard.writeText(txHash);
+      setCopiedTxId(txHash);
+      setTimeout(() => setCopiedTxId(null), 1600);
+    } catch {
+      // Clipboard unavailable
+    }
+  };
+
+  const handleQuickClaimFirst = async () => {
+    const first = claimableBalances[0];
+    if (!first) return;
+    setActionBusy(true);
+    try {
+      await claimBalanceById(first.id);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to claim balance", "error");
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
+  const handleQuickReclaim = async () => {
+    setActionBusy(true);
+    try {
+      await reclaimZeroBalanceReserves();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Failed to reclaim reserve", "error");
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -264,6 +500,43 @@ function WalletShell({
       setExportedVault(json);
     } catch (err) {
       setFpStatusMsg(err instanceof Error ? err.message : "Export failed");
+    }
+  };
+
+  const handleRenameSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (renamingIndex === null) return;
+    setRenameError(null);
+    try {
+      await renameDerivedAccount(renamingIndex, renameLabel, renamePin);
+      setRenamingIndex(null);
+      setRenameLabel("");
+      setRenamePin("");
+    } catch (err) {
+      setRenameError(err instanceof Error ? err.message : "Rename failed");
+    }
+  };
+
+  const handleSaveContactSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setContactError(null);
+    const parsedAddr = StellarAddressSchema.safeParse(newContactAddr.trim());
+    if (!parsedAddr.success) {
+      setContactError("Enter a valid G..., C..., or M... Stellar address.");
+      return;
+    }
+    try {
+      await saveContact({
+        label: newContactLabel,
+        address: parsedAddr.data,
+        defaultMemo: newContactMemo || undefined,
+      });
+      setNewContactLabel("");
+      setNewContactAddr("");
+      setNewContactMemo("");
+      setContactAdding(false);
+    } catch (err) {
+      setContactError(err instanceof Error ? err.message : "Failed to save contact");
     }
   };
 
@@ -322,7 +595,7 @@ function WalletShell({
           </div>
 
           <nav className="aw-sidebar-nav" aria-label="App sections">
-            {DOCK_ITEMS.map((item) => (
+            {SIDEBAR_ITEMS.map((item) => (
               <button
                 key={item.id}
                 type="button"
@@ -389,6 +662,14 @@ function WalletShell({
               </button>
 
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="aw-chip-btn"
+                  aria-label="Open Telegram Bot Tab"
+                  onClick={() => selectTab("telegram")}
+                >
+                  <IconTelegram size={14} />
+                </button>
                 <span
                   className={
                     config.network === "testnet"
@@ -429,7 +710,7 @@ function WalletShell({
             )}
 
             {vaultStatus === "loading" && (
-              <section className="glass-card aw-center-card" style={{ textAlign: "center", padding: 32 }}>
+              <section className="glass-card" style={{ textAlign: "center", padding: 32 }}>
                 Opening encrypted IndexedDB vault...
               </section>
             )}
@@ -452,7 +733,7 @@ function WalletShell({
 
                 {activeTab === "wallet" && (
                   <div className="aw-wallet-stack">
-                    {/* Hero Balance & Quick Actions Card */}
+                    {/* Hero Balance, Spendable Reserve Bar & Quick Actions */}
                     <section className="glass-card glass-card--vault aw-hero-balance-card">
                       <div className="aw-balance-top">
                         <div className="aw-pixel-frame">
@@ -484,22 +765,43 @@ function WalletShell({
                           </div>
 
                           <div className="aw-balance-figure tabular-nums">
-                            {Number(primaryXlmBalance).toFixed(2)}{" "}
+                            {reserveStats.total.toFixed(2)}{" "}
                             <span style={{ fontSize: 16, fontWeight: 600, color: "var(--aw-stellar-gold)" }}>
                               XLM
                             </span>
                           </div>
 
-                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                            {accountState?.funded
-                              ? `Min reserve: ${accountState.minReserveXlm} XLM · ${accountState.subentryCount} subentries`
-                              : `Unfunded account on ${config.network.toUpperCase()} ledger`}
-                          </div>
+                          {accountState?.funded ? (
+                            <div className="aw-reserve-panel">
+                              <div className="aw-reserve-labels tabular-nums">
+                                <span style={{ color: "var(--aw-trust-emerald)" }}>
+                                  Spendable: {reserveStats.spendable.toFixed(2)} XLM
+                                </span>
+                                <span style={{ color: "var(--aw-ink-secondary)" }}>
+                                  Reserved: {reserveStats.reserved.toFixed(2)} XLM ({accountState.subentryCount} entries)
+                                </span>
+                              </div>
+                              <div className="aw-reserve-track" aria-hidden="true">
+                                <div
+                                  className="aw-reserve-fill aw-reserve-fill--spendable"
+                                  style={{ width: `${reserveStats.spendPct}%` }}
+                                />
+                                <div
+                                  className="aw-reserve-fill aw-reserve-fill--reserved"
+                                  style={{ width: `${reserveStats.reservedPct}%` }}
+                                />
+                              </div>
+                            </div>
+                          ) : (
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                              Unfunded account on {config.network.toUpperCase()} ledger
+                            </div>
+                          )}
                         </div>
                       </div>
 
                       {chainError && (
-                        <div className="aw-banner aw-banner--danger" style={{ marginTop: 12 }}>
+                        <div className="aw-banner aw-banner--danger" style={{ marginTop: 4 }}>
                           {chainError}
                         </div>
                       )}
@@ -511,7 +813,7 @@ function WalletShell({
                           <button
                             type="button"
                             className="aw-btn-gold"
-                            style={{ width: "100%", marginTop: 14 }}
+                            style={{ width: "100%" }}
                             disabled={loadingChain}
                             onClick={() => void fundActiveTestnetAccount()}
                           >
@@ -524,12 +826,56 @@ function WalletShell({
                           </button>
                         )}
 
+                      {/* Actionable On-Chain Banners */}
+                      {claimableBalances.length > 0 && (
+                        <div className="aw-action-alert">
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 13 }}>
+                              {claimableBalances.length} Incoming Claimable Balance
+                              {claimableBalances.length > 1 ? "s" : ""}
+                            </div>
+                            <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                              Next: {claimableBalances[0]?.amount} {claimableBalances[0]?.assetCode}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="aw-chip-btn"
+                            disabled={actionBusy}
+                            onClick={() => void handleQuickClaimFirst()}
+                          >
+                            Claim First
+                          </button>
+                        </div>
+                      )}
+
+                      {reserveStats.reclaimable > 0 && (
+                        <div className="aw-action-alert">
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 13, color: "var(--aw-stellar-gold)" }}>
+                              +{accountState?.reclaimableXlm} XLM Reclaimable Reserve
+                            </div>
+                            <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                              Empty trustlines holding unnecessary 0.5 XLM base reserves
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="aw-chip-btn"
+                            disabled={actionBusy}
+                            onClick={() => void handleQuickReclaim()}
+                          >
+                            Reclaim XLM
+                          </button>
+                        </div>
+                      )}
+
                       {/* 4 Quick Actions */}
                       <div className="aw-quick-actions">
                         <button
                           type="button"
                           className="aw-action-tile aw-action-tile--primary"
-                          onClick={() => setActiveDrawer("send")}
+                          onClick={() => openSendWith()}
                         >
                           <span className="aw-action-circle">
                             <IconSend size={18} />
@@ -551,7 +897,7 @@ function WalletShell({
                         <button
                           type="button"
                           className="aw-action-tile"
-                          onClick={() => setActiveDrawer("swap")}
+                          onClick={() => openSwapWith()}
                         >
                           <span className="aw-action-circle">
                             <IconSwap size={18} />
@@ -574,25 +920,36 @@ function WalletShell({
 
                     {/* Balanced Desktop 2-Column Dashboard Grid */}
                     <div className="aw-wallet-grid">
-                      {/* Left: Asset Balances Card */}
+                      {/* Left: Multi-Asset Balances Card */}
                       <section className="glass-card" style={{ display: "grid", gap: 12, alignContent: "start" }}>
                         <div
                           style={{
                             display: "flex",
                             justifyContent: "space-between",
                             alignItems: "center",
+                            gap: 8,
+                            flexWrap: "wrap",
                           }}
                         >
                           <span style={{ fontWeight: 700, fontSize: 15 }}>On-Chain Balances</span>
-                          <button
-                            type="button"
-                            className="aw-chip-btn"
-                            disabled={loadingChain}
-                            onClick={() => void refreshChainState()}
-                          >
-                            <IconRefresh size={13} />
-                            <span>{loadingChain ? "Syncing..." : "Refresh"}</span>
-                          </button>
+                          <div style={{ display: "flex", gap: 6 }}>
+                            <button
+                              type="button"
+                              className="aw-chip-btn"
+                              onClick={() => setActiveDrawer("tools")}
+                            >
+                              + Trustline
+                            </button>
+                            <button
+                              type="button"
+                              className="aw-chip-btn"
+                              disabled={loadingChain}
+                              onClick={() => void refreshChainState()}
+                            >
+                              <IconRefresh size={13} />
+                              <span>{loadingChain ? "Syncing..." : "Refresh"}</span>
+                            </button>
+                          </div>
                         </div>
 
                         {accountState?.balances && accountState.balances.length > 0 ? (
@@ -610,13 +967,43 @@ function WalletShell({
                                     <div style={{ fontWeight: 700, fontSize: 14 }}>{b.assetCode}</div>
                                     <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
                                       {b.assetIssuer
-                                        ? `Issuer ${b.assetIssuer.slice(0, 6)}…${b.assetIssuer.slice(-4)}`
+                                        ? `${b.assetIssuer.slice(0, 6)}…${b.assetIssuer.slice(-4)}`
                                         : "Native Stellar Lumen"}
                                     </div>
                                   </div>
                                 </div>
-                                <div className="tabular-nums" style={{ fontWeight: 700, fontSize: 15 }}>
-                                  {b.balance}
+
+                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                  <div style={{ textAlign: "right" }}>
+                                    <div className="tabular-nums" style={{ fontWeight: 700, fontSize: 14 }}>
+                                      {Number(b.balance).toFixed(4)}
+                                    </div>
+                                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", marginTop: 4 }}>
+                                      <button
+                                        type="button"
+                                        className="aw-mini-chip"
+                                        onClick={() =>
+                                          openSendWith({
+                                            assetCode: b.assetCode,
+                                            assetIssuer: b.assetIssuer,
+                                          })
+                                        }
+                                      >
+                                        Send
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="aw-mini-chip"
+                                        onClick={() =>
+                                          openSwapWith(
+                                            b.assetIssuer ? `${b.assetCode}:${b.assetIssuer}` : b.assetCode,
+                                          )
+                                        }
+                                      >
+                                        Swap
+                                      </button>
+                                    </div>
+                                  </div>
                                 </div>
                               </div>
                             ))}
@@ -632,12 +1019,12 @@ function WalletShell({
                         )}
                       </section>
 
-                      {/* Right: Stellar Suite Tools 2x2 Launcher */}
+                      {/* Right: Stellar Suite Tools 2x2 Launcher + Dev/Telegram Shortcuts */}
                       <section className="glass-card" style={{ display: "grid", gap: 12, alignContent: "start" }}>
                         <div>
                           <div style={{ fontWeight: 700, fontSize: 15 }}>Stellar Suite &amp; Tools</div>
                           <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                            Launch swaps, security firewall, SDEX reserves &amp; bridges
+                            Execute swaps, security scans, SDEX offers &amp; bridges
                           </div>
                         </div>
 
@@ -645,7 +1032,7 @@ function WalletShell({
                           <button
                             type="button"
                             className="aw-tool-card"
-                            onClick={() => setActiveDrawer("swap")}
+                            onClick={() => openSwapWith()}
                           >
                             <div className="aw-tool-card-top">
                               <span className="aw-tool-icon aw-tool-icon--purple">
@@ -654,7 +1041,7 @@ function WalletShell({
                               <IconChevronRight size={16} />
                             </div>
                             <div className="aw-tool-title">Swap &amp; Path Router</div>
-                            <div className="aw-tool-sub">Soroswap AMM + Horizon</div>
+                            <div className="aw-tool-sub">Soroswap + Horizon Path</div>
                           </button>
 
                           <button
@@ -702,6 +1089,27 @@ function WalletShell({
                             <div className="aw-tool-sub">Circle CCTP &amp; Fiat</div>
                           </button>
                         </div>
+
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            className="aw-chip-btn"
+                            style={{ flex: 1 }}
+                            onClick={() => selectTab("dev")}
+                          >
+                            <IconCode size={13} />
+                            <span>Open Dev Lab</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="aw-chip-btn"
+                            style={{ flex: 1 }}
+                            onClick={() => selectTab("telegram")}
+                          >
+                            <IconTelegram size={13} />
+                            <span>Telegram Bot</span>
+                          </button>
+                        </div>
                       </section>
                     </div>
                   </div>
@@ -717,6 +1125,7 @@ function WalletShell({
                         justifyContent: "space-between",
                         alignItems: "center",
                         gap: 10,
+                        flexWrap: "wrap",
                       }}
                     >
                       <div>
@@ -738,15 +1147,44 @@ function WalletShell({
                       </button>
                     </div>
 
-                    {recentPayments.length === 0 ? (
+                    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                      {(
+                        [
+                          ["all", "All"],
+                          ["received", "Received"],
+                          ["sent", "Sent"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          className="aw-chip-btn"
+                          aria-pressed={activityFilter === id}
+                          onClick={() => setActivityFilter(id)}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+
+                    {filteredPayments.length === 0 ? (
                       <div className="aw-empty-state">
                         <div style={{ fontWeight: 600, fontSize: 14 }}>
-                          No recent transactions on {config.network.toUpperCase()}
+                          No {activityFilter === "all" ? "" : `${activityFilter} `}transactions on{" "}
+                          {config.network.toUpperCase()}
                         </div>
                         <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                          Receive XLM or test a transfer to inspect live ledger telemetry here.
+                          Receive XLM or test a payment to inspect live ledger confirmations here.
                         </div>
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "center", marginTop: 6 }}>
+                        <div
+                          style={{
+                            display: "flex",
+                            gap: 8,
+                            flexWrap: "wrap",
+                            justifyContent: "center",
+                            marginTop: 6,
+                          }}
+                        >
                           <button
                             type="button"
                             className="aw-btn-secondary"
@@ -772,10 +1210,10 @@ function WalletShell({
                         </div>
                       </div>
                     ) : (
-                      recentPayments.map((p) => {
+                      filteredPayments.map((p) => {
                         const inbound = p.to === activeAccount.address;
                         return (
-                          <div key={p.id} className="aw-list-row">
+                          <div key={p.id} className="aw-list-row" style={{ flexWrap: "wrap" }}>
                             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                               <span
                                 className={
@@ -797,11 +1235,13 @@ function WalletShell({
                                 <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
                                   {inbound
                                     ? `From ${p.from.slice(0, 6)}…${p.from.slice(-4)}`
-                                    : `To ${p.to.slice(0, 6)}…${p.to.slice(-4)}`}
+                                    : `To ${p.to.slice(0, 6)}…${p.to.slice(-4)}`}{" "}
+                                  · {new Date(p.createdAt).toLocaleString()}
                                 </div>
                               </div>
                             </div>
-                            <div style={{ textAlign: "right" }}>
+
+                            <div style={{ display: "grid", justifyItems: "end", gap: 4 }}>
                               <div
                                 className="tabular-nums"
                                 style={{
@@ -814,9 +1254,25 @@ function WalletShell({
                                 {inbound ? "+" : "-"}
                                 {p.amount} {p.assetCode}
                               </div>
-                              <span className="glass-pill" style={{ fontSize: 10, padding: "2px 8px" }}>
-                                Settled
-                              </span>
+                              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                                <button
+                                  type="button"
+                                  className="aw-mini-chip"
+                                  onClick={() => void handleCopyTxHash(p.txHash)}
+                                >
+                                  {copiedTxId === p.txHash ? "Copied Hash" : "Copy Tx"}
+                                </button>
+                                {config.explorerBaseUrl && (
+                                  <a
+                                    href={`${config.explorerBaseUrl.replace(/\/+$/, "")}/tx/${p.txHash}`}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="aw-mini-chip"
+                                  >
+                                    Explorer ↗
+                                  </a>
+                                )}
+                              </div>
                             </div>
                           </div>
                         );
@@ -825,8 +1281,11 @@ function WalletShell({
                   </section>
                 )}
 
+                {activeTab === "dev" && <DevLabSheet />}
+
                 {activeTab === "accounts" && (
                   <div style={{ display: "grid", gap: 14 }}>
+                    {/* Derived Accounts + Rename */}
                     <section className="glass-card" style={{ display: "grid", gap: 14 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                         <div>
@@ -843,29 +1302,90 @@ function WalletShell({
                       </div>
 
                       <div style={{ display: "grid", gap: 8 }}>
-                        {accounts.map((acc) => (
-                          <div key={acc.id} className="aw-list-row">
-                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <AstroNavigatorAvatar
-                                seedKey={acc.address}
-                                kind={acc.kind}
-                                state="float"
-                                size={36}
-                              />
-                              <div>
-                                <div style={{ fontWeight: 700, fontSize: 13 }}>{acc.label}</div>
-                                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                                  <code>
-                                    {acc.address.slice(0, 10)}…{acc.address.slice(-8)}
-                                  </code>
+                        {accounts.map((acc) => {
+                          const idx = acc.derivationIndex ?? 0;
+                          return (
+                            <div key={acc.id} style={{ display: "grid", gap: 8 }}>
+                              <div className="aw-list-row">
+                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                  <AstroNavigatorAvatar
+                                    seedKey={acc.address}
+                                    kind={acc.kind}
+                                    state="float"
+                                    size={36}
+                                  />
+                                  <div>
+                                    <div style={{ fontWeight: 700, fontSize: 13 }}>{acc.label}</div>
+                                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                                      <code>
+                                        {acc.address.slice(0, 10)}…{acc.address.slice(-8)}
+                                      </code>
+                                    </div>
+                                  </div>
+                                </div>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                  <span className="glass-pill">m/44&apos;/148&apos;/{idx}&apos;</span>
+                                  <button
+                                    type="button"
+                                    className="aw-mini-chip"
+                                    onClick={() => {
+                                      setRenamingIndex(idx);
+                                      setRenameLabel(acc.label);
+                                      setRenamePin("");
+                                      setRenameError(null);
+                                    }}
+                                  >
+                                    <IconEdit size={12} />
+                                    <span>Rename</span>
+                                  </button>
                                 </div>
                               </div>
+
+                              {renamingIndex === idx && (
+                                <form
+                                  onSubmit={(e) => void handleRenameSubmit(e)}
+                                  className="aw-banner"
+                                  style={{ display: "grid", gap: 8 }}
+                                >
+                                  <div className="aw-two-col-inputs">
+                                    <input
+                                      type="text"
+                                      className="aw-input"
+                                      placeholder="New Account Label"
+                                      maxLength={32}
+                                      value={renameLabel}
+                                      onChange={(e) => setRenameLabel(e.target.value)}
+                                    />
+                                    <input
+                                      type="password"
+                                      className="aw-input"
+                                      placeholder="Vault PIN"
+                                      value={renamePin}
+                                      onChange={(e) => setRenamePin(e.target.value)}
+                                    />
+                                  </div>
+                                  {renameError && (
+                                    <div style={{ fontSize: 12, color: "var(--aw-danger-crimson)" }}>
+                                      {renameError}
+                                    </div>
+                                  )}
+                                  <div style={{ display: "flex", gap: 8 }}>
+                                    <button type="submit" className="aw-btn-primary">
+                                      Save Label
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="aw-btn-secondary"
+                                      onClick={() => setRenamingIndex(null)}
+                                    >
+                                      Cancel
+                                    </button>
+                                  </div>
+                                </form>
+                              )}
                             </div>
-                            <span className="glass-pill">
-                              m/44&apos;/148&apos;/{acc.derivationIndex ?? 0}&apos;
-                            </span>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
 
                       {/* Optional Fingerprint Convenience */}
@@ -913,16 +1433,29 @@ function WalletShell({
                         {fpStatusMsg && <div className="aw-banner">{fpStatusMsg}</div>}
                       </div>
 
-                      {/* Encrypted AGVAULT Export */}
+                      {/* Reveal Recovery Seed & Export AGVAULT */}
                       <div className="aw-vault-divider">
-                        <button
-                          type="button"
-                          className="aw-btn-secondary"
-                          onClick={() => void handleExportVault()}
-                        >
-                          <IconKey size={15} />
-                          <span>Export Encrypted .agvault Backup</span>
-                        </button>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>
+                          Seed Sovereignty &amp; Encrypted Backups
+                        </div>
+                        <div className="aw-two-col-inputs">
+                          <button
+                            type="button"
+                            className="aw-btn-secondary"
+                            onClick={() => setActiveDrawer("revealSeed")}
+                          >
+                            <IconEye size={15} />
+                            <span>Reveal Recovery Phrase</span>
+                          </button>
+                          <button
+                            type="button"
+                            className="aw-btn-secondary"
+                            onClick={() => void handleExportVault()}
+                          >
+                            <IconKey size={15} />
+                            <span>Export .agvault Backup</span>
+                          </button>
+                        </div>
                         {exportedVault && (
                           <textarea
                             readOnly
@@ -963,6 +1496,102 @@ function WalletShell({
                       </div>
                     </section>
 
+                    {/* Address Book / Contacts Manager */}
+                    <section className="glass-card" style={{ display: "grid", gap: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                        <div>
+                          <div style={{ fontWeight: 700, fontSize: 15 }}>
+                            Local Address Book ({contacts.length})
+                          </div>
+                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                            Quick recipients saved encrypted-device locally in IndexedDB
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="aw-chip-btn"
+                          onClick={() => setContactAdding((v) => !v)}
+                        >
+                          <IconUserPlus size={13} />
+                          <span>{contactAdding ? "Cancel" : "Add Contact"}</span>
+                        </button>
+                      </div>
+
+                      {contactAdding && (
+                        <form onSubmit={(e) => void handleSaveContactSubmit(e)} style={{ display: "grid", gap: 8 }}>
+                          <div className="aw-two-col-inputs">
+                            <input
+                              type="text"
+                              className="aw-input"
+                              placeholder="Contact Name"
+                              maxLength={40}
+                              value={newContactLabel}
+                              onChange={(e) => setNewContactLabel(e.target.value)}
+                            />
+                            <input
+                              type="text"
+                              className="aw-input"
+                              placeholder="Default Memo (Optional)"
+                              maxLength={28}
+                              value={newContactMemo}
+                              onChange={(e) => setNewContactMemo(e.target.value)}
+                            />
+                          </div>
+                          <input
+                            type="text"
+                            className="aw-input"
+                            placeholder="G..., M..., or C... Stellar Address"
+                            value={newContactAddr}
+                            onChange={(e) => setNewContactAddr(e.target.value)}
+                          />
+                          {contactError && <div className="aw-banner aw-banner--danger">{contactError}</div>}
+                          <button type="submit" className="aw-btn-primary">
+                            Save Contact
+                          </button>
+                        </form>
+                      )}
+
+                      {contacts.length === 0 ? (
+                        <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                          No saved contacts yet. Add frequent Stellar recipients above or directly when
+                          sending a payment.
+                        </div>
+                      ) : (
+                        <div style={{ display: "grid", gap: 8 }}>
+                          {contacts.map((c) => (
+                            <div key={c.id} className="aw-list-row">
+                              <div>
+                                <div style={{ fontWeight: 700, fontSize: 13 }}>{c.label}</div>
+                                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                                  <code>
+                                    {c.address.slice(0, 8)}…{c.address.slice(-6)}
+                                  </code>
+                                  {c.defaultMemo ? ` · Memo: ${c.defaultMemo}` : ""}
+                                </div>
+                              </div>
+                              <div style={{ display: "flex", gap: 6 }}>
+                                <button
+                                  type="button"
+                                  className="aw-mini-chip"
+                                  onClick={() => openSendWith({ destination: c.address })}
+                                >
+                                  Send
+                                </button>
+                                <button
+                                  type="button"
+                                  className="aw-mini-chip"
+                                  aria-label={`Delete ${c.label}`}
+                                  onClick={() => void deleteContact(c.id)}
+                                >
+                                  <IconTrash size={12} />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </section>
+
                     {/* dApp Connection Launcher Card */}
                     <section className="glass-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                       <div>
@@ -982,6 +1611,48 @@ function WalletShell({
                         <span>Open dApp Signer</span>
                         <IconChevronRight size={16} />
                       </button>
+                    </section>
+
+                    {/* Danger Zone: Local Vault Wipe */}
+                    <section className="glass-card aw-danger-card" style={{ display: "grid", gap: 10 }}>
+                      <div style={{ fontWeight: 700, fontSize: 14, color: "#FCA5A5" }}>
+                        Danger Zone · Local Device Reset
+                      </div>
+                      <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                        Removes encrypted vault and biometric wrapping keys from this browser&apos;s
+                        IndexedDB. Make sure you backed up your 12-word recovery phrase first.
+                      </div>
+                      {!wipeConfirmArmed ? (
+                        <button
+                          type="button"
+                          className="aw-chip-btn"
+                          style={{ width: "fit-content", borderColor: "rgba(239, 68, 68, 0.5)", color: "#FCA5A5" }}
+                          onClick={() => setWipeConfirmArmed(true)}
+                        >
+                          <IconTrash size={13} />
+                          <span>Wipe Local Vault from Device</span>
+                        </button>
+                      ) : (
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            className="aw-btn-danger"
+                            onClick={() => {
+                              setWipeConfirmArmed(false);
+                              void wipeLocalVault();
+                            }}
+                          >
+                            Confirm Permanent Local Wipe
+                          </button>
+                          <button
+                            type="button"
+                            className="aw-btn-secondary"
+                            onClick={() => setWipeConfirmArmed(false)}
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      )}
                     </section>
                   </div>
                 )}
@@ -1066,7 +1737,7 @@ function WalletShell({
 
       {/* Bottom Floating Apple Liquid Glass Dock (Mobile) */}
       <nav className="glass-dock" aria-label="Primary mobile navigation">
-        {DOCK_ITEMS.map((item) => (
+        {MOBILE_DOCK_ITEMS.map((item) => (
           <button
             key={item.id}
             type="button"
@@ -1080,6 +1751,25 @@ function WalletShell({
         ))}
       </nav>
 
+      {/* Global Liquid Glass Toast Notification */}
+      {toast && (
+        <div
+          className={`aw-toast aw-toast--${toast.kind}`}
+          role="status"
+          aria-live="polite"
+        >
+          <span>{toast.message}</span>
+          <button
+            type="button"
+            className="aw-toast-close"
+            aria-label="Dismiss notification"
+            onClick={dismissToast}
+          >
+            <IconClose size={14} />
+          </button>
+        </div>
+      )}
+
       {/* Unified Liquid Glass Modal Drawer */}
       <ModalDrawer
         open={activeDrawer !== null && currentDrawerMeta !== null}
@@ -1088,16 +1778,25 @@ function WalletShell({
         onClose={() => setActiveDrawer(null)}
       >
         {activeDrawer === "send" && (
-          <SendSheet embedded onClose={() => setActiveDrawer(null)} />
+          <SendSheet
+            embedded
+            initialAssetCode={sendPrefill.assetCode}
+            initialAssetIssuer={sendPrefill.assetIssuer}
+            initialDestination={sendPrefill.destination}
+            onClose={() => setActiveDrawer(null)}
+          />
         )}
         {activeDrawer === "receive" && (
           <ReceiveSheet embedded onClose={() => setActiveDrawer(null)} />
         )}
-        {activeDrawer === "swap" && <SwapSheet />}
+        {activeDrawer === "swap" && <SwapSheet initialFromAsset={swapFromPrefill} />}
         {activeDrawer === "scan" && <ScanShieldSheet />}
         {activeDrawer === "tools" && <ClassicToolsSheet />}
         {activeDrawer === "ramp" && <RampSheet />}
         {activeDrawer === "dapp" && <DappConnectSheet />}
+        {activeDrawer === "revealSeed" && (
+          <RevealSeedModalContent onDone={() => setActiveDrawer(null)} />
+        )}
       </ModalDrawer>
     </div>
   );

@@ -292,3 +292,87 @@ export function IconPlug(props: IconProps) {
     </SvgBase>
   );
 }
+
+export function IconCode(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <path d="m8 9-4 3 4 3" />
+      <path d="m16 9 4 3-4 3" />
+      <path d="m14 5-4 14" />
+    </SvgBase>
+  );
+}
+
+export function IconTerminal(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <rect x="3" y="4" width="18" height="16" rx="2.5" />
+      <path d="m7 9 3 3-3 3" />
+      <path d="M12 15h5" />
+    </SvgBase>
+  );
+}
+
+export function IconQr(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <rect x="4" y="4" width="6" height="6" rx="1" />
+      <rect x="14" y="4" width="6" height="6" rx="1" />
+      <rect x="4" y="14" width="6" height="6" rx="1" />
+      <path d="M14 14h2v2h-2z" fill="currentColor" stroke="none" />
+      <path d="M18 14h2v6h-4v-2" />
+    </SvgBase>
+  );
+}
+
+export function IconUserPlus(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <circle cx="9.5" cy="8" r="3.5" />
+      <path d="M3 19.5a6.5 6.5 0 0 1 13 0" />
+      <path d="M19 8v6" />
+      <path d="M16 11h6" />
+    </SvgBase>
+  );
+}
+
+export function IconTrash(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <path d="M4 7h16" />
+      <path d="M10 11v6" />
+      <path d="M14 11v6" />
+      <path d="M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+      <path d="M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7" />
+    </SvgBase>
+  );
+}
+
+export function IconEye(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" />
+      <circle cx="12" cy="12" r="2.6" />
+    </SvgBase>
+  );
+}
+
+export function IconEdit(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <path d="M12 20h9" />
+      <path d="m16.5 3.5 4 4L7 21H3v-4L16.5 3.5Z" />
+    </SvgBase>
+  );
+}
+
+export function IconFlip(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <path d="M8 4v14l-3-3" />
+      <path d="M8 18l3-3" />
+      <path d="M16 20V6l-3 3" />
+      <path d="M16 6l3 3" />
+    </SvgBase>
+  );
+}

@@ -135,6 +135,7 @@ const RawPwaEnvSchema = z
       ContractAddressSchema.optional(),
     ),
     VITE_SEP42_ASSET_LIST_URLS: parseUrlCsv("VITE_SEP42_ASSET_LIST_URLS", false),
+    VITE_EXPLORER_BASE_URL: OptionalUrlSchema("VITE_EXPLORER_BASE_URL"),
     VITE_REOWN_PROJECT_ID: OptionalNonEmptyStringSchema,
   })
   .superRefine((env, ctx) => {
@@ -160,6 +161,7 @@ export interface PwaConfig {
   claimEscrowContractId?: string | undefined;
   sorobitsContractId?: string | undefined;
   sep42AssetListUrls: string[];
+  explorerBaseUrl?: string | undefined;
   reownProjectId?: string | undefined;
 }
 
@@ -178,6 +180,7 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     claimEscrowContractId: parsed.VITE_CLAIM_ESCROW_CONTRACT_ID,
     sorobitsContractId: parsed.VITE_SOROBITS_CONTRACT_ID,
     sep42AssetListUrls: parsed.VITE_SEP42_ASSET_LIST_URLS,
+    explorerBaseUrl: parsed.VITE_EXPLORER_BASE_URL,
     reownProjectId: parsed.VITE_REOWN_PROJECT_ID,
   };
 }

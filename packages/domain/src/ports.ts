@@ -53,6 +53,7 @@ export interface SwapQuote {
   expectedOutputAmount: string;
   priceImpactPct: string;
   unsignedXdr?: string | undefined;
+  pathAssets?: ReadonlyArray<{ assetCode: string; assetIssuer?: string | undefined }> | undefined;
 }
 
 export interface SwapPort {

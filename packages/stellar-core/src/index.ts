@@ -1,5 +1,6 @@
 export * from "./classic/index.js";
 export * from "./dapp/index.js";
+export * from "./dev-lab/index.js";
 export * from "./ledger/client.js";
 export * from "./network.js";
 export * from "./sep0005.js";

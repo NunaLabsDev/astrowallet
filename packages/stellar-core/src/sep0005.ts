@@ -60,6 +60,15 @@ function toBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function fromBase64(b64: string): Uint8Array {
+  const binary = atob(b64.trim());
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    out[i] = binary.charCodeAt(i);
+  }
+  return out;
+}
+
 /**
  * Derives a Stellar Classic Ed25519 account following SEP-0005 (m/44'/148'/index').
  */
@@ -147,4 +156,30 @@ export function signChallengeMessage(keypair: Keypair, message: string): string 
   const digest = sha256(payload);
   const sig = keypair.sign(digest);
   return toBase64(sig);
+}
+
+/**
+ * Verifies a SEP-53 signed message signature against an Ed25519 Classic public key.
+ */
+export function verifyChallengeMessage(
+  publicKey: ClassicAddress,
+  message: string,
+  signatureBase64: string,
+): boolean {
+  try {
+    const kp = Keypair.fromPublicKey(publicKey);
+    const payload = new TextEncoder().encode(`${SEP53_PREFIX}${message}`);
+    const digest = sha256(payload);
+    return kp.verify(digest, fromBase64(signatureBase64));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Returns the lowercase 32-byte raw Ed25519 public key hex representation for a G... address.
+ */
+export function publicKeyToRawHex(publicKey: ClassicAddress): string {
+  const raw = Keypair.fromPublicKey(publicKey).rawPublicKey();
+  return Array.from(raw, (b) => b.toString(16).padStart(2, "0")).join("");
 }

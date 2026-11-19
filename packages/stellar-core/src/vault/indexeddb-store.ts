@@ -5,6 +5,15 @@ const DB_VERSION = 1;
 const STORE_NAME = "vault";
 const PRIMARY_VAULT_KEY = "primary_vault";
 const BIOMETRIC_WRAP_KEY = "biometric_wrap";
+const CONTACTS_KEY = "contacts_v1";
+
+export interface ContactEntry {
+  id: string;
+  label: string;
+  address: string;
+  defaultMemo?: string | undefined;
+  createdAt: number;
+}
 
 export interface BiometricWrapRecord {
   credentialIdB64: string;
@@ -115,4 +124,13 @@ export async function loadBiometricRecord(): Promise<BiometricWrapRecord | null>
 
 export async function clearBiometricRecord(): Promise<void> {
   await idbDelete(BIOMETRIC_WRAP_KEY);
+}
+
+export async function loadContacts(): Promise<ContactEntry[]> {
+  const list = await idbGet<ContactEntry[]>(CONTACTS_KEY);
+  return Array.isArray(list) ? list : [];
+}
+
+export async function saveContacts(contacts: readonly ContactEntry[]): Promise<void> {
+  await idbPut(CONTACTS_KEY, [...contacts]);
 }

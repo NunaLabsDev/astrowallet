@@ -173,6 +173,10 @@ export function createIndexerRoutes(deps: IndexerRoutesDeps = {}): Hono<IndexerR
       const matches = watchedByAddress.get(ev.to);
       if (!matches) continue;
       for (const recipient of matches) {
+        const dedupKey = `alert:${config.network}:${ev.txHash.toLowerCase()}:${recipient.address}:${recipient.telegramUserId}`;
+        const claimed = await repo.claimAlertDedupKey(dedupKey);
+        if (!claimed) continue;
+
         const ok = await sendTelegramMessage(
           {
             botToken: config.tgBotToken,

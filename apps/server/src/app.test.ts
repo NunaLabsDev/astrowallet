@@ -1,19 +1,37 @@
 import type {
   ClassicAddress,
   ClaimLink,
+  ContractAddress,
   IntentStatus,
   SignedIntent,
   TelegramUserBinding,
 } from "@astrowallet/domain";
 import {
+  deriveClaimId,
   formatConnectChallengeMessage,
+  formatSmartAccountLinkMessage,
   signIntentToken,
   type ConnectChallengePayload,
 } from "@astrowallet/tg-protocol";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import type { ServerRepository, TelegramUserRecord } from "./db/repository.js";
-import { fetchLiveAccountReserveInfo } from "./stellar-verifier.js";
+import { resetMemoryRateLimits } from "./rate-limit.js";
+import {
+  fetchLiveAccountReserveInfo,
+  verifyTransactionConfirmed,
+} from "./stellar-verifier.js";
+
+const BENIGN_PAYMENT_TX_XDR =
+  "AAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGQAAAAAAAAAAgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAQAAAADjcmgwoLYMtfUshEz/zU7tZeulwVXomyZBFWJyTnHlRAAAAAAAAAAABfXhAAAAAAAAAAAA";
+const MALICIOUS_MERGE_TX_XDR =
+  "AAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGQAAAAAAAAAAgAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAACAAAAADjcmgwoLYMtfUshEz/zU7tZeulwVXomyZBFWJyTnHlRAAAAAAAAAAA";
+const SOROBAN_HOST_FN_CONTRACT =
+  "CADQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQP5KR" as ContractAddress;
+const OTHER_CONTRACT =
+  "CAEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQTD2L" as ContractAddress;
+const SOROBAN_HOST_FN_XDR =
+  "AAAAAAAAAAEHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAAAAh0cmFuc2ZlcgAAAAA=";
 
 const TEST_ENV = {
   STELLAR_NETWORK: "testnet",
@@ -89,6 +107,8 @@ function createMemoryRepo(): ServerRepository {
   const bindings = new Map<string, TelegramUserBinding[]>();
   const intents = new Map<string, SignedIntent>();
   const claims = new Map<string, ClaimLink>();
+  const splitPayments = new Map<string, Array<{ txHash: string; amount: string }>>();
+  const dedupKeys = new Set<string>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -212,10 +232,56 @@ function createMemoryRepo(): ServerRepository {
       claims.set(claimId, next);
       return next;
     },
+    async isTxHashUsed(txHash) {
+      const normalized = txHash.toLowerCase();
+      for (const it of intents.values()) {
+        if (it.txHash?.toLowerCase() === normalized) return true;
+      }
+      for (const list of splitPayments.values()) {
+        if (list.some((item) => item.txHash.toLowerCase() === normalized)) return true;
+      }
+      return false;
+    },
+    async recordSplitPayment({ intentId, txHash, amount }) {
+      const list = splitPayments.get(intentId) ?? [];
+      list.push({ txHash: txHash.toLowerCase(), amount });
+      splitPayments.set(intentId, list);
+      return { paidCount: list.length };
+    },
+    async countSplitPayments(intentId) {
+      return (splitPayments.get(intentId) ?? []).length;
+    },
+    async listSplitPaymentTxHashes(intentId) {
+      return (splitPayments.get(intentId) ?? []).map((item) => item.txHash);
+    },
+    async claimAlertDedupKey(dedupKey) {
+      if (dedupKeys.has(dedupKey)) return false;
+      dedupKeys.add(dedupKey);
+      return true;
+    },
+    async findRecentPendingIntent({ creatorTelegramUserId, actionType, payloadJson, sinceUnix }) {
+      const now = Math.floor(Date.now() / 1000);
+      for (const it of intents.values()) {
+        if (
+          it.creatorTelegramUserId === creatorTelegramUserId &&
+          it.actionType === actionType &&
+          it.payloadJson === payloadJson &&
+          it.status === "pending" &&
+          it.createdAt >= sinceUnix &&
+          it.expiresAt > now
+        ) {
+          return it;
+        }
+      }
+      return null;
+    },
   };
 }
 
 describe("apps/server Phase 0 + Phase 1 endpoints", () => {
+  beforeEach(() => {
+    resetMemoryRateLimits();
+  });
   it("responds 200 on /health and enforces CORS allowlist", async () => {
     const app = createApp();
     const res = await app.request("/health", { method: "GET" }, TEST_ENV);
@@ -501,15 +567,18 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(scanRes.status).toBe(200);
 
-    // Phase 2 OpenZeppelin Channels relay proxy
+    // Phase 2 OpenZeppelin Channels relay proxy (Origin + valid benign XDR)
     const relayRes = await app.request(
       "/v1/relay/submit",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Origin: TEST_ENV.PWA_ORIGIN,
+        },
         body: JSON.stringify({
           mode: "feebump",
-          signedTxXdrBase64: "AAAAAgAAAABex3TestXdrPayloadBase64String==",
+          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
         }),
       },
       {
@@ -616,8 +685,8 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(hmacJson.processed).toBe(1);
     expect(hmacJson.alertsSent).toBe(1);
 
-    // Valid shared secret header -> 200
-    const secretRes = await app.request(
+    // Replay of same txHash with valid shared secret header -> 200 but deduped (0 alertsSent)
+    const replaySecretRes = await app.request(
       "/webhooks/indexer",
       {
         method: "POST",
@@ -629,7 +698,37 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       },
       envWithIndexer,
     );
+    expect(replaySecretRes.status).toBe(200);
+    const replayJson = (await replaySecretRes.json()) as { alertsSent: number };
+    expect(replayJson.alertsSent).toBe(0);
+
+    // Distinct event with valid shared secret header -> 200 + second alert
+    const distinctPayload = JSON.stringify({
+      events: [
+        {
+          txHash: "f".repeat(64),
+          from: "GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOOHSUJUJ6",
+          to: signer.address,
+          amount: "12.0",
+          assetCode: "XLM",
+        },
+      ],
+    });
+    const secretRes = await app.request(
+      "/webhooks/indexer",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Indexer-Secret": envWithIndexer.INDEXER_WEBHOOK_SECRET,
+        },
+        body: distinctPayload,
+      },
+      envWithIndexer,
+    );
     expect(secretRes.status).toBe(200);
+    const secretJson = (await secretRes.json()) as { alertsSent: number };
+    expect(secretJson.alertsSent).toBe(1);
     expect(sentAlerts).toHaveLength(2);
     expect(sentAlerts[0]?.chat_id).toBe("888999");
     expect(sentAlerts[0]?.text).toContain("42.5 USDC");
@@ -668,5 +767,578 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(reserve.summary?.spendableXlm).toBe("45.5000000");
     expect(reserve.summary?.reclaimableXlm).toBe("0.5");
     expect(reserve.summary?.reclaimableTrustlines).toHaveLength(1);
+  });
+
+  it("enforces relay policy gates: Origin/intentAuth, Scan & Shield XDR, contract allowlist, and rate limits", async () => {
+    const repo = createMemoryRepo();
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (url) => {
+        if (String(url).includes("channels.openzeppelin.com")) {
+          return new Response(
+            JSON.stringify({ hash: "d".repeat(64), status: "submitted" }),
+            { status: 200 },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    const relayEnv = {
+      ...TEST_ENV,
+      OZ_CHANNELS_API_URL: "https://channels.openzeppelin.com/testnet",
+      RELAY_ALLOWED_CONTRACTS: SOROBAN_HOST_FN_CONTRACT,
+      RELAY_RATE_LIMIT_PER_MIN: "6",
+    };
+
+    // 1. Unauthenticated request (neither Origin nor intentAuth) -> 403
+    const unauthRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+        }),
+      },
+      relayEnv,
+    );
+    expect(unauthRes.status).toBe(403);
+
+    // 2. Malicious accountMerge XDR -> 403 Scan & Shield block
+    const maliciousRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: TEST_ENV.PWA_ORIGIN,
+        },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: MALICIOUS_MERGE_TX_XDR,
+        }),
+      },
+      relayEnv,
+    );
+    expect(maliciousRes.status).toBe(403);
+
+    // 3. Malformed XDR -> 400
+    const badXdrRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: TEST_ENV.PWA_ORIGIN,
+        },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: "not_valid_xdr_base64_string",
+        }),
+      },
+      relayEnv,
+    );
+    expect(badXdrRes.status).toBe(400);
+
+    // 4. Valid intentAuth without Origin -> 200
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = now + 300;
+    const intentId = "it_relay_01";
+    const sig = await signIntentToken(
+      { intentId, network: "testnet", telegramUserId: "9001", expiresAt },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId,
+      network: "testnet",
+      creatorTelegramUserId: "9001",
+      actionType: "pay",
+      payloadJson: "{}",
+      hmacSig: sig,
+      status: "pending",
+      expiresAt,
+      createdAt: now,
+    });
+    const intentRelayRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          intentAuth: { intentId, sig },
+        }),
+      },
+      relayEnv,
+    );
+    expect(intentRelayRes.status).toBe(200);
+
+    // 5. Soroban contract allowlist enforcement (403 when disallowed, 200 when allowed)
+    const disallowedRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: TEST_ENV.PWA_ORIGIN,
+        },
+        body: JSON.stringify({
+          mode: "soroban",
+          funcXdrBase64: SOROBAN_HOST_FN_XDR,
+        }),
+      },
+      { ...relayEnv, RELAY_ALLOWED_CONTRACTS: OTHER_CONTRACT },
+    );
+    expect(disallowedRes.status).toBe(403);
+
+    const allowedSorobanRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: TEST_ENV.PWA_ORIGIN,
+        },
+        body: JSON.stringify({
+          mode: "soroban",
+          funcXdrBase64: SOROBAN_HOST_FN_XDR,
+        }),
+      },
+      relayEnv,
+    );
+    expect(allowedSorobanRes.status).toBe(200);
+
+    // 6. Rate limit enforcement -> 7th request in window returns 429
+    const limitedRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: TEST_ENV.PWA_ORIGIN,
+        },
+        body: JSON.stringify({
+          mode: "soroban",
+          funcXdrBase64: SOROBAN_HOST_FN_XDR,
+        }),
+      },
+      relayEnv,
+    );
+    expect(limitedRes.status).toBe(429);
+  });
+
+  it("blocks SSRF private/local domains on /v1/proxy/stellar-toml", async () => {
+    const app = createApp();
+    for (const domain of ["localhost", "127.0.0.1", "169.254.169.254", "internal.local"]) {
+      const res = await app.request(
+        `/v1/proxy/stellar-toml?domain=${encodeURIComponent(domain)}`,
+        { method: "GET" },
+        TEST_ENV,
+      );
+      expect(res.status).toBe(400);
+    }
+  });
+
+  it("enforces anti-replay txHash checks and Horizon op-level intent matching", async () => {
+    const repo = createMemoryRepo();
+    const app = createApp({
+      createRepo: () => repo,
+      verifyTxFn: async () => ({ confirmed: true, ledger: 42 }),
+    });
+
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = now + 300;
+    const sharedHash = "1".repeat(64);
+
+    for (const intentId of ["it_replay_a", "it_replay_b"]) {
+      const sig = await signIntentToken(
+        { intentId, network: "testnet", telegramUserId: "7001", expiresAt },
+        TEST_ENV.INTENT_HMAC_SECRET,
+      );
+      await repo.createSignedIntent({
+        intentId,
+        network: "testnet",
+        creatorTelegramUserId: "7001",
+        actionType: "pay",
+        payloadJson: JSON.stringify({ amount: "5", assetCode: "XLM" }),
+        hmacSig: sig,
+        status: "pending",
+        expiresAt,
+        createdAt: now,
+      });
+    }
+
+    const intentA = (await repo.getSignedIntent("it_replay_a"))!;
+    const intentB = (await repo.getSignedIntent("it_replay_b"))!;
+
+    const firstConfirm = await app.request(
+      `/v1/intents/${intentA.intentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sig: intentA.hmacSig, txHash: sharedHash }),
+      },
+      TEST_ENV,
+    );
+    expect(firstConfirm.status).toBe(200);
+
+    const replayConfirm = await app.request(
+      `/v1/intents/${intentB.intentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sig: intentB.hmacSig, txHash: sharedHash }),
+      },
+      TEST_ENV,
+    );
+    expect(replayConfirm.status).toBe(409);
+
+    const dest = (await generateTestSigner()).address;
+    const oldCheck = await verifyTransactionConfirmed(
+      { horizonUrls: [TEST_ENV.HORIZON_URLS] },
+      "2".repeat(64),
+      async (url) => {
+        if (String(url).includes("/transactions/")) {
+          return new Response(
+            JSON.stringify({
+              successful: true,
+              ledger: 100,
+              created_at: new Date((now - 3600) * 1000).toISOString(),
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+      { destination: dest, amount: "10", assetCode: "XLM", minCreatedAtUnix: now },
+    );
+    expect(oldCheck.confirmed).toBe(false);
+
+    const mismatchCheck = await verifyTransactionConfirmed(
+      { horizonUrls: [TEST_ENV.HORIZON_URLS] },
+      "3".repeat(64),
+      async (url) => {
+        if (String(url).endsWith("/operations?limit=50")) {
+          return new Response(
+            JSON.stringify({
+              _embedded: {
+                records: [
+                  {
+                    type: "payment",
+                    to: dest,
+                    amount: "2.0000000",
+                    asset_type: "native",
+                  },
+                ],
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            successful: true,
+            ledger: 101,
+            created_at: new Date(now * 1000).toISOString(),
+          }),
+          { status: 200 },
+        );
+      },
+      { destination: dest, amount: "10", assetCode: "XLM", minCreatedAtUnix: now },
+    );
+    expect(mismatchCheck.confirmed).toBe(false);
+  });
+
+  it("verifies Smart Account C... Guardian signatures on /v1/intents/:id/connect", async () => {
+    const repo = createMemoryRepo();
+    const app = createApp({ createRepo: () => repo });
+    const guardian = await generateTestSigner();
+
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = now + 300;
+    const intentId = "it_smart_connect_01";
+    const challenge: ConnectChallengePayload = {
+      challengeId: "ch_smart_01",
+      network: "testnet",
+      telegramUserId: "555777",
+      usernameLower: "carol",
+      issuedAt: now,
+      expiresAt,
+    };
+    const message = formatConnectChallengeMessage(challenge);
+    const sig = await signIntentToken(
+      { intentId, network: "testnet", telegramUserId: "555777", expiresAt },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId,
+      network: "testnet",
+      creatorTelegramUserId: "555777",
+      actionType: "connect",
+      payloadJson: JSON.stringify({ challenge, message }),
+      hmacSig: sig,
+      status: "pending",
+      expiresAt,
+      createdAt: now,
+    });
+
+    const wrongSmartSigRes = await app.request(
+      `/v1/intents/${intentId}/connect`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig,
+          accounts: [
+            {
+              address: SOROBAN_HOST_FN_CONTRACT,
+              kind: "smart",
+              label: "Smart Account",
+              guardianAddress: guardian.address,
+              signatureBase64: await guardian.signChallenge(message),
+            },
+          ],
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(wrongSmartSigRes.status).toBe(401);
+
+    const boundMessage = formatSmartAccountLinkMessage(message, SOROBAN_HOST_FN_CONTRACT);
+    const validSmartRes = await app.request(
+      `/v1/intents/${intentId}/connect`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig,
+          accounts: [
+            {
+              address: guardian.address,
+              kind: "classic",
+              label: "Primary",
+              isDefault: true,
+              signatureBase64: await guardian.signChallenge(message),
+            },
+            {
+              address: SOROBAN_HOST_FN_CONTRACT,
+              kind: "smart",
+              label: "Smart Account",
+              guardianAddress: guardian.address,
+              signatureBase64: await guardian.signChallenge(boundMessage),
+            },
+          ],
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(validSmartRes.status).toBe(200);
+    const linked = await repo.listLinkedAddresses("555777");
+    expect(linked).toHaveLength(2);
+    expect(linked.some((a) => a.kind === "smart" && a.address === SOROBAN_HOST_FN_CONTRACT)).toBe(
+      true,
+    );
+  });
+
+  it("tracks multi-payer /split intents and edits Telegram progress until fully paid", async () => {
+    const repo = createMemoryRepo();
+    const editedCards: Array<{ text: string; reply_markup?: unknown }> = [];
+    const app = createApp({
+      createRepo: () => repo,
+      verifyTxFn: async () => ({ confirmed: true, ledger: 777 }),
+      telegramApiDeps: {
+        fetchFn: async (_url, init) => {
+          editedCards.push(
+            JSON.parse(String(init?.body ?? "{}")) as { text: string; reply_markup?: unknown },
+          );
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+      },
+    });
+
+    const dest = (await generateTestSigner()).address;
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = now + 300;
+    const intentId = "it_split_01";
+    const sig = await signIntentToken(
+      { intentId, network: "testnet", telegramUserId: "333444", expiresAt },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
+    await repo.createSignedIntent({
+      intentId,
+      network: "testnet",
+      creatorTelegramUserId: "333444",
+      actionType: "split",
+      payloadJson: JSON.stringify({
+        amount: "10",
+        totalAmount: "20",
+        participantCount: 2,
+        assetCode: "XLM",
+        destination: dest,
+        recipientLabel: "@alice",
+      }),
+      hmacSig: sig,
+      chatId: "-100222",
+      messageId: "55",
+      status: "pending",
+      expiresAt,
+      createdAt: now,
+    });
+
+    const pay1 = await app.request(
+      `/v1/intents/${intentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sig, txHash: "a1".repeat(32) }),
+      },
+      TEST_ENV,
+    );
+    expect(pay1.status).toBe(200);
+    const json1 = (await pay1.json()) as { status: string; paidCount: number };
+    expect(json1.status).toBe("pending");
+    expect(json1.paidCount).toBe(1);
+    expect(editedCards[0]?.text).toContain("Paid:</b> 1/2");
+    expect(editedCards[0]?.reply_markup).toBeDefined();
+
+    const pay2 = await app.request(
+      `/v1/intents/${intentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sig, txHash: "b2".repeat(32) }),
+      },
+      TEST_ENV,
+    );
+    expect(pay2.status).toBe(200);
+    const json2 = (await pay2.json()) as { status: string; paidCount: number };
+    expect(json2.status).toBe("confirmed");
+    expect(json2.paidCount).toBe(2);
+    expect(editedCards[1]?.text).toContain("Split Fully Paid (2/2)");
+  });
+
+  it("handles 2-stage Claim Link escrow funding and claiming while blocking txHash replay", async () => {
+    const repo = createMemoryRepo();
+    const sender = await generateTestSigner();
+    const editedCards: string[] = [];
+    const seenInvokes: Array<{ fn?: string; arg0?: string }> = [];
+
+    const app = createApp({
+      createRepo: () => repo,
+      verifyTxFn: async (_cfg, _hash, expected) => {
+        seenInvokes.push({
+          fn: expected?.sorobanInvoke?.functionName,
+          arg0: expected?.sorobanInvoke?.firstArgHex,
+        });
+        return { confirmed: true, ledger: 888 };
+      },
+      telegramApiDeps: {
+        fetchFn: async (_url, init) => {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+          if (parsed.text) editedCards.push(parsed.text);
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+      },
+    });
+
+    const envWithEscrow = {
+      ...TEST_ENV,
+      CLAIM_ESCROW_CONTRACT_ID: SOROBAN_HOST_FN_CONTRACT,
+    };
+
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = now + 86_400;
+    const intentId = "it_claim_01";
+    const expectedClaimId = await deriveClaimId(intentId);
+    const sig = await signIntentToken(
+      { intentId, network: "testnet", telegramUserId: "444555", expiresAt },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
+    await repo.createSignedIntent({
+      intentId,
+      network: "testnet",
+      creatorTelegramUserId: "444555",
+      actionType: "claim",
+      payloadJson: JSON.stringify({
+        amount: "25",
+        assetCode: "XLM",
+        recipientUsername: "newfriend",
+        senderLabel: "@alice",
+        claimId: expectedClaimId,
+        escrowContractId: SOROBAN_HOST_FN_CONTRACT,
+      }),
+      hmacSig: sig,
+      chatId: "-100333",
+      messageId: "88",
+      status: "pending",
+      expiresAt,
+      createdAt: now,
+    });
+
+    const fundTxHash = "c3".repeat(32);
+    const fundRes = await app.request(
+      `/v1/intents/${intentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig,
+          txHash: fundTxHash,
+          stage: "funded",
+          senderAddress: sender.address,
+        }),
+      },
+      envWithEscrow,
+    );
+    expect(fundRes.status).toBe(200);
+    const fundJson = (await fundRes.json()) as { status: string; stage: string; claimId: string };
+    expect(fundJson.status).toBe("signed");
+    expect(fundJson.stage).toBe("funded");
+    expect(fundJson.claimId).toBe(expectedClaimId);
+    expect(seenInvokes[0]).toEqual({ fn: "create_claim", arg0: expectedClaimId });
+    expect((await repo.getClaimLink(expectedClaimId))?.status).toBe("open");
+    expect(editedCards[0]).toContain("Stellar Claim Link Ready");
+
+    // Replaying funding txHash as claim txHash must fail with 409
+    const replayClaimRes = await app.request(
+      `/v1/intents/${intentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig,
+          txHash: fundTxHash,
+          stage: "claimed",
+        }),
+      },
+      envWithEscrow,
+    );
+    expect(replayClaimRes.status).toBe(409);
+
+    const claimRes = await app.request(
+      `/v1/intents/${intentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig,
+          txHash: "d4".repeat(32),
+          stage: "claimed",
+        }),
+      },
+      envWithEscrow,
+    );
+    expect(claimRes.status).toBe(200);
+    const claimJson = (await claimRes.json()) as { status: string; stage: string };
+    expect(claimJson.status).toBe("confirmed");
+    expect(claimJson.stage).toBe("claimed");
+    expect(seenInvokes[1]).toEqual({ fn: "claim", arg0: expectedClaimId });
+    expect((await repo.getClaimLink(expectedClaimId))?.status).toBe("claimed");
+    expect(editedCards[1]).toContain("Claim Link Claimed");
   });
 });

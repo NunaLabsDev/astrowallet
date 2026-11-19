@@ -1,5 +1,7 @@
 import {
+  buildSoroswapQuoteBody,
   createHorizonPathSwapAdapter,
+  parseSoroswapQuoteOutput,
 } from "@astrowallet/defi";
 import {
   StellarAddressSchema,
@@ -8,11 +10,13 @@ import {
 import {
   createSecurityShield,
   decodeTransactionEnvelope,
+  extractBaseDestination,
   type DirectoryTagEntry,
 } from "@astrowallet/security-shield";
 import type { KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { z } from "zod";
+import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
 import type { FetchLike } from "../stellar-verifier.js";
 
 export interface ProxyRoutesDeps {
@@ -34,6 +38,10 @@ const SwapQuoteBodySchema = z.object({
   toAsset: z.string().min(1).max(80),
   amount: z.string().regex(/^\d+(\.\d{1,7})?$/),
   slippageBps: z.number().int().min(1).max(5000).default(50),
+  sourceAddress: z
+    .string()
+    .regex(/^G[A-Z2-7]{55}$/)
+    .optional(),
 });
 
 const ScanBodySchema = z.object({
@@ -42,6 +50,29 @@ const ScanBodySchema = z.object({
 
 const SAFE_PUBLIC_DOMAIN_REGEX =
   /^(?!-)[a-z0-9-]{1,63}(?<!-)(?:\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/i;
+const BLOCKED_DOMAIN_SUFFIXES = [
+  ".local",
+  ".internal",
+  ".localhost",
+  ".arpa",
+  ".home",
+  ".lan",
+  ".corp",
+  ".test",
+  ".invalid",
+];
+const STELLAR_TOML_MAX_BYTES = 128 * 1024;
+
+export function isSafePublicDomain(domain: string): boolean {
+  if (!SAFE_PUBLIC_DOMAIN_REGEX.test(domain)) return false;
+  if (domain === "localhost") return false;
+  if (BLOCKED_DOMAIN_SUFFIXES.some((suffix) => domain.endsWith(suffix))) return false;
+  const labels = domain.split(".");
+  const tld = labels[labels.length - 1] ?? "";
+  // Reject IPv4 literals and all-numeric TLDs
+  if (/^\d+$/.test(tld)) return false;
+  return true;
+}
 
 export async function lookupDirectoryTag(
   config: ServerConfig,
@@ -49,7 +80,8 @@ export async function lookupDirectoryTag(
   address: string,
   fetchFn: FetchLike = fetch,
 ): Promise<DirectoryTagEntry | null> {
-  const cacheKey = `dir:${config.network}:${address}`;
+  const baseAddress = extractBaseDestination(address);
+  const cacheKey = `dir:${config.network}:${baseAddress}`;
   if (cache) {
     const hit = await cache.get(cacheKey);
     if (hit) {
@@ -68,7 +100,7 @@ export async function lookupDirectoryTag(
   const netSlug = config.network === "mainnet" ? "public" : "testnet";
   const base = config.stellarExpertApiBase.replace(/\/+$/, "");
   const res = await fetchFn(
-    `${base}/explorer/${netSlug}/directory/${encodeURIComponent(address)}`,
+    `${base}/explorer/${netSlug}/directory/${encodeURIComponent(baseAddress)}`,
     { headers: { Accept: "application/json" } },
   );
   if (res.status === 404 || !res.ok) {
@@ -81,7 +113,7 @@ export async function lookupDirectoryTag(
     tags?: string[];
   };
   const entry: DirectoryTagEntry = {
-    address: raw.address ?? address,
+    address: raw.address ?? baseAddress,
     name: raw.name,
     tags: Array.isArray(raw.tags) ? raw.tags : [],
     memoRequired: Array.isArray(raw.tags) && raw.tags.includes("exchange"),
@@ -98,12 +130,13 @@ export async function lookupSep29MemoRequired(
   address: string,
   fetchFn: FetchLike = fetch,
 ): Promise<boolean> {
-  if (!address.startsWith("G")) return false;
+  const baseAddress = extractBaseDestination(address);
+  if (!baseAddress.startsWith("G")) return false;
   for (const base of config.horizonUrls) {
     const cleanBase = base.replace(/\/+$/, "");
     try {
       const res = await fetchFn(
-        `${cleanBase}/accounts/${encodeURIComponent(address)}`,
+        `${cleanBase}/accounts/${encodeURIComponent(baseAddress)}`,
         { headers: { Accept: "application/json" } },
       );
       if (res.status === 404) return false;
@@ -123,6 +156,22 @@ export async function lookupSep29MemoRequired(
 export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEnv> {
   const router = new Hono<ProxyRouteEnv>();
   const fetchFn = deps.fetchFn ?? fetch;
+
+  router.use("*", async (c, next) => {
+    const config = c.get("config");
+    const limit = await checkRateLimit({
+      cache: c.env.CACHE,
+      scope: "proxy",
+      clientKey: clientKeyFromHeaders(c.req.raw.headers),
+      limitPerMin: config.proxyRateLimitPerMin,
+    });
+    if (!limit.allowed) {
+      c.header("Retry-After", String(limit.retryAfterSeconds));
+      return c.json({ error: "Proxy rate limit exceeded" }, 429);
+    }
+    await next();
+    return undefined;
+  });
 
   router.get("/directory/:address", async (c) => {
     const config = c.get("config");
@@ -144,11 +193,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
 
   router.get("/stellar-toml", async (c) => {
     const domain = (c.req.query("domain") ?? "").trim().toLowerCase();
-    if (
-      !SAFE_PUBLIC_DOMAIN_REGEX.test(domain) ||
-      domain.endsWith(".local") ||
-      domain.endsWith(".internal")
-    ) {
+    if (!isSafePublicDomain(domain)) {
       return c.json({ error: "Invalid public issuer domain" }, 400);
     }
 
@@ -160,14 +205,28 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       }
     }
 
-    const res = await fetchFn(`https://${domain}/.well-known/stellar.toml`, {
-      headers: { Accept: "text/plain" },
-    });
+    let res: Response;
+    try {
+      res = await fetchFn(`https://${domain}/.well-known/stellar.toml`, {
+        headers: { Accept: "text/plain" },
+        redirect: "error",
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {
+      return c.json({ error: `Unable to fetch stellar.toml from ${domain}` }, 502);
+    }
     if (!res.ok) {
       return c.json({ error: `Unable to fetch stellar.toml from ${domain}` }, 502);
     }
 
+    const declaredLength = Number(res.headers.get("Content-Length") ?? "0");
+    if (Number.isFinite(declaredLength) && declaredLength > STELLAR_TOML_MAX_BYTES) {
+      return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
+    }
     const text = await res.text();
+    if (new TextEncoder().encode(text).length > STELLAR_TOML_MAX_BYTES) {
+      return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
+    }
     if (c.env.CACHE) {
       await c.env.CACHE.put(cacheKey, text, { expirationTtl: 900 });
     }
@@ -189,32 +248,44 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     if (config.soroswapApiBase && config.soroswapApiKey) {
       try {
         const cleanBase = config.soroswapApiBase.replace(/\/+$/, "");
-        const res = await fetchFn(
-          `${cleanBase}/quote?network=${config.network}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${config.soroswapApiKey}`,
-            },
-            body: JSON.stringify(reqBody),
-          },
-        );
+        const quoteBody = buildSoroswapQuoteBody(reqBody, config.networkPassphrase);
+        const authHeaders = {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${config.soroswapApiKey}`,
+        };
+        const res = await fetchFn(`${cleanBase}/quote?network=${config.network}`, {
+          method: "POST",
+          headers: authHeaders,
+          body: JSON.stringify(quoteBody),
+          signal: AbortSignal.timeout(8000),
+        });
         if (res.ok) {
           const data = (await res.json()) as {
-            amountOut?: string;
+            amountOut?: string | number;
             expectedOutputAmount?: string;
             priceImpactPct?: string;
-            rawTrade?: { xdr?: string };
           };
-          const out = data.expectedOutputAmount ?? data.amountOut;
+          const out = parseSoroswapQuoteOutput(data);
           if (out) {
+            let unsignedXdr: string | undefined;
+            if (reqBody.sourceAddress) {
+              const buildRes = await fetchFn(`${cleanBase}/quote/build?network=${config.network}`, {
+                method: "POST",
+                headers: authHeaders,
+                body: JSON.stringify({ quote: data, from: reqBody.sourceAddress }),
+                signal: AbortSignal.timeout(8000),
+              }).catch(() => null);
+              if (buildRes?.ok) {
+                const built = (await buildRes.json()) as { xdr?: string };
+                unsignedXdr = built.xdr;
+              }
+            }
             return c.json({
               provider: "soroswap",
               inputAmount: reqBody.amount,
-              expectedOutputAmount: String(out),
+              expectedOutputAmount: out,
               priceImpactPct: data.priceImpactPct ?? "0.05",
-              unsignedXdr: data.rawTrade?.xdr,
+              unsignedXdr,
             });
           }
         }
@@ -257,7 +328,8 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       rpcUrls: config.rpcUrls,
       horizonUrls: config.horizonUrls,
       stellarExpertApiBase: config.stellarExpertApiBase,
-      sep42AssetListUrls: [],
+      sep42AssetListUrls: config.sep42AssetListUrls,
+      fetchFn,
       directoryLookup: (addr) => lookupDirectoryTag(config, c.env.CACHE, addr, fetchFn),
       memoRequiredLookup: (addr) => lookupSep29MemoRequired(config, addr, fetchFn),
     });

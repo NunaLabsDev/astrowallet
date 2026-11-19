@@ -7,6 +7,7 @@ import { fetchIncomingPaymentsSince } from "../stellar-verifier.js";
 import { sendTelegramMessage } from "../telegram-api.js";
 
 const POLL_INTERVAL_MS = 5_000;
+const BATCH_SIZE = 15;
 
 interface WatcherStatus {
   lastLedger: number;
@@ -83,7 +84,17 @@ export class ChainWatcherDO {
       return;
     }
 
-    for (const entry of watched) {
+    const savedOffset = (await this.state.storage.get<number>("batch_offset")) ?? 0;
+    const start = savedOffset >= watched.length ? 0 : savedOffset;
+    const batch = watched.slice(start, start + BATCH_SIZE);
+    const nextOffset = start + BATCH_SIZE >= watched.length ? 0 : start + BATCH_SIZE;
+    await this.state.storage.put("batch_offset", nextOffset);
+
+    for (const entry of batch) {
+      if (entry.address.startsWith("C")) {
+        continue;
+      }
+
       const cursorKey = `pay_cursor:${config.network}:${entry.address}`;
       const savedCursor = await this.state.storage.get<string>(cursorKey);
 
@@ -91,12 +102,13 @@ export class ChainWatcherDO {
         if (!savedCursor) {
           // Initialize baseline cursor without replaying historical transactions
           const recent = await fetchIncomingPaymentsSince(config, entry.address, undefined, 20);
-          const latestToken = recent[recent.length - 1]?.pagingToken ?? "now";
+          const latestToken = recent[recent.length - 1]?.pagingToken ?? "empty_init";
           await this.state.storage.put(cursorKey, latestToken);
           continue;
         }
 
-        const effectiveCursor = savedCursor === "now" ? undefined : savedCursor;
+        const effectiveCursor =
+          savedCursor === "empty_init" || savedCursor === "now" ? undefined : savedCursor;
         const incoming = await fetchIncomingPaymentsSince(
           config,
           entry.address,
@@ -107,7 +119,9 @@ export class ChainWatcherDO {
         let newestCursor = savedCursor;
         for (const ev of incoming) {
           newestCursor = ev.pagingToken;
-          if (savedCursor === "now") {
+          const dedupKey = `alert:${config.network}:${ev.txHash.toLowerCase()}:${entry.address}:${entry.telegramUserId}`;
+          const claimed = await repo.claimAlertDedupKey(dedupKey);
+          if (!claimed) {
             continue;
           }
           await sendTelegramMessage({

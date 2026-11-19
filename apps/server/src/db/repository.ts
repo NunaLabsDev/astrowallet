@@ -2,6 +2,7 @@ import type {
   AccountKind,
   ClaimLink,
   ContractAddress,
+  IntentActionType,
   IntentStatus,
   SignedIntent,
   StellarAddress,
@@ -68,6 +69,25 @@ export interface ServerRepository {
     claimId: string,
     status: ClaimLink["status"],
   ): Promise<ClaimLink | null>;
+
+  /** True when `txHash` is already bound to any intent or split payment (anti-replay). */
+  isTxHashUsed(txHash: string): Promise<boolean>;
+  recordSplitPayment(input: {
+    intentId: string;
+    payerAddress?: string | undefined;
+    txHash: string;
+    amount: string;
+  }): Promise<{ paidCount: number }>;
+  countSplitPayments(intentId: string): Promise<number>;
+  listSplitPaymentTxHashes(intentId: string): Promise<readonly string[]>;
+  /** Returns true the first time a dedup key is claimed, false on repeats. */
+  claimAlertDedupKey(dedupKey: string): Promise<boolean>;
+  findRecentPendingIntent(input: {
+    creatorTelegramUserId: string;
+    actionType: IntentActionType;
+    payloadJson: string;
+    sinceUnix: number;
+  }): Promise<SignedIntent | null>;
 }
 
 interface RawUserRow {
@@ -474,6 +494,85 @@ export function createD1Repository(db: D1Database): ServerRepository {
         .bind(status, claimId)
         .run();
       return this.getClaimLink(claimId);
+    },
+
+    async isTxHashUsed(txHash) {
+      const normalized = txHash.toLowerCase();
+      const intentRow = await db
+        .prepare("SELECT 1 AS hit FROM signed_intents WHERE lower(tx_hash) = ? LIMIT 1")
+        .bind(normalized)
+        .first<{ hit: number }>();
+      if (intentRow) return true;
+      const payRow = await db
+        .prepare("SELECT 1 AS hit FROM intent_payments WHERE lower(tx_hash) = ? LIMIT 1")
+        .bind(normalized)
+        .first<{ hit: number }>();
+      return Boolean(payRow);
+    },
+
+    async recordSplitPayment({ intentId, payerAddress, txHash, amount }) {
+      const now = Math.floor(Date.now() / 1000);
+      await db
+        .prepare(
+          `INSERT INTO intent_payments (id, intent_id, payer_address, tx_hash, amount, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          `${intentId}:${txHash.slice(0, 16)}`,
+          intentId,
+          payerAddress ?? null,
+          txHash.toLowerCase(),
+          amount,
+          now,
+        )
+        .run();
+      return { paidCount: await this.countSplitPayments(intentId) };
+    },
+
+    async countSplitPayments(intentId) {
+      const row = await db
+        .prepare("SELECT COUNT(*) AS n FROM intent_payments WHERE intent_id = ?")
+        .bind(intentId)
+        .first<{ n: number }>();
+      return row?.n ?? 0;
+    },
+
+    async listSplitPaymentTxHashes(intentId) {
+      const result = await db
+        .prepare(
+          "SELECT tx_hash FROM intent_payments WHERE intent_id = ? ORDER BY created_at ASC",
+        )
+        .bind(intentId)
+        .all<{ tx_hash: string }>();
+      return (result.results ?? []).map((r) => r.tx_hash);
+    },
+
+    async claimAlertDedupKey(dedupKey) {
+      const now = Math.floor(Date.now() / 1000);
+      const res = await db
+        .prepare("INSERT OR IGNORE INTO processed_alerts (dedup_key, created_at) VALUES (?, ?)")
+        .bind(dedupKey, now)
+        .run();
+      return (res.meta?.changes ?? 0) > 0;
+    },
+
+    async findRecentPendingIntent({ creatorTelegramUserId, actionType, payloadJson, sinceUnix }) {
+      const row = await db
+        .prepare(
+          `SELECT * FROM signed_intents
+           WHERE creator_tg_id = ? AND action_type = ? AND payload_json = ?
+             AND status = 'pending' AND created_at >= ? AND expires_at > ?
+           ORDER BY created_at DESC LIMIT 1`,
+        )
+        .bind(
+          creatorTelegramUserId,
+          actionType,
+          payloadJson,
+          sinceUnix,
+          Math.floor(Date.now() / 1000),
+        )
+        .first<RawIntentRow>();
+      return row ? mapIntentRow(row) : null;
     },
   };
 }

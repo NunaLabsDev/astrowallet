@@ -43,6 +43,8 @@ function createPhase4MemoryRepo(): ServerRepository {
   const bindings = new Map<string, TelegramUserBinding[]>();
   const intents = new Map<string, SignedIntent>();
   const claims = new Map<string, ClaimLink>();
+  const splitPayments = new Map<string, Array<{ txHash: string; amount: string }>>();
+  const dedupKeys = new Set<string>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -117,6 +119,49 @@ function createPhase4MemoryRepo(): ServerRepository {
       const next = { ...prev, status };
       claims.set(claimId, next);
       return next;
+    },
+    async isTxHashUsed(txHash) {
+      const normalized = txHash.toLowerCase();
+      for (const it of intents.values()) {
+        if (it.txHash?.toLowerCase() === normalized) return true;
+      }
+      for (const list of splitPayments.values()) {
+        if (list.some((item) => item.txHash.toLowerCase() === normalized)) return true;
+      }
+      return false;
+    },
+    async recordSplitPayment({ intentId, txHash, amount }) {
+      const list = splitPayments.get(intentId) ?? [];
+      list.push({ txHash: txHash.toLowerCase(), amount });
+      splitPayments.set(intentId, list);
+      return { paidCount: list.length };
+    },
+    async countSplitPayments(intentId) {
+      return (splitPayments.get(intentId) ?? []).length;
+    },
+    async listSplitPaymentTxHashes(intentId) {
+      return (splitPayments.get(intentId) ?? []).map((item) => item.txHash);
+    },
+    async claimAlertDedupKey(dedupKey) {
+      if (dedupKeys.has(dedupKey)) return false;
+      dedupKeys.add(dedupKey);
+      return true;
+    },
+    async findRecentPendingIntent({ creatorTelegramUserId, actionType, payloadJson, sinceUnix }) {
+      const now = Math.floor(Date.now() / 1000);
+      for (const it of intents.values()) {
+        if (
+          it.creatorTelegramUserId === creatorTelegramUserId &&
+          it.actionType === actionType &&
+          it.payloadJson === payloadJson &&
+          it.status === "pending" &&
+          it.createdAt >= sinceUnix &&
+          it.expiresAt > now
+        ) {
+          return it;
+        }
+      }
+      return null;
     },
   };
 }

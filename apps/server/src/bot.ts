@@ -1,13 +1,24 @@
-import { createHorizonPathSwapAdapter } from "@astrowallet/defi";
 import {
+  buildSoroswapQuoteBody,
+  createHorizonPathSwapAdapter,
+  decimalToStroops7,
+  parseSoroswapQuoteOutput,
+  stroops7ToDecimal,
+} from "@astrowallet/defi";
+import {
+  ClassicAddressSchema,
   StellarAddressSchema,
   type IntentActionType,
   type ServerConfig,
   type SignedIntent,
 } from "@astrowallet/domain";
-import { createSecurityShield } from "@astrowallet/security-shield";
+import {
+  createSecurityShield,
+  fetchSep42VerifiedAssets,
+} from "@astrowallet/security-shield";
 import {
   buildIntentDeepLink,
+  deriveClaimId,
   formatAccountsSummary,
   formatBalancesSummary,
   formatClaimLinkCard,
@@ -24,6 +35,7 @@ import {
   type AccountReserveEntry,
   type ConnectChallengePayload,
 } from "@astrowallet/tg-protocol";
+import type { KVNamespace } from "@cloudflare/workers-types";
 import { Bot, InlineKeyboard } from "grammy";
 import type { ServerRepository } from "./db/repository.js";
 import { lookupDirectoryTag, lookupSep29MemoRequired } from "./routes/proxy.js";
@@ -35,6 +47,7 @@ import {
 
 export interface BotDependencies {
   fetchFn?: FetchLike | undefined;
+  cache?: KVNamespace | undefined;
 }
 
 function generateId(prefix: string): string {
@@ -45,6 +58,7 @@ async function createAndSignIntent(
   config: ServerConfig,
   repo: ServerRepository,
   input: {
+    intentId?: string | undefined;
     creatorTelegramUserId: string;
     actionType: IntentActionType;
     payload: Record<string, unknown>;
@@ -54,7 +68,7 @@ async function createAndSignIntent(
 ): Promise<{ intent: SignedIntent; deepLink: string }> {
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + (input.ttlSeconds ?? 300);
-  const intentId = generateId("it");
+  const intentId = input.intentId ?? generateId("it");
   const hmacSig = await signIntentToken(
     {
       intentId,
@@ -98,6 +112,17 @@ function parseAssetCode(raw: string): string | null {
   const upper = raw.trim().toUpperCase();
   if (!/^[A-Z0-9]{1,12}$/.test(upper)) return null;
   return upper;
+}
+
+function divideAmountExact(totalAmount: string, count: number): string | null {
+  try {
+    const totalStroops = decimalToStroops7(totalAmount);
+    const shareStroops = totalStroops / BigInt(count);
+    if (shareStroops <= 0n) return null;
+    return stroops7ToDecimal(shareStroops);
+  } catch {
+    return null;
+  }
 }
 
 async function resolveRecipient(
@@ -155,6 +180,89 @@ export function createTelegramBot(
   const bot = new Bot(config.tgBotToken);
   const networkBadge = config.network.toUpperCase();
   const fetchFn = deps.fetchFn ?? fetch;
+
+  bot.use(async (ctx, next) => {
+    if (ctx.from?.username) {
+      const tgId = String(ctx.from.id);
+      const usernameLower = ctx.from.username.toLowerCase();
+      const existing = await repo.getUserById(tgId).catch(() => null);
+      if (existing && existing.usernameLower !== usernameLower) {
+        await repo
+          .upsertTelegramUser({ telegramUserId: tgId, usernameLower })
+          .catch(() => undefined);
+      }
+    }
+    await next();
+  });
+
+  async function resolveCommandAsset(
+    raw: string,
+    lookupAddress: string | undefined,
+  ): Promise<
+    | { ok: true; assetCode: string; assetIssuer?: string | undefined }
+    | { ok: false; message: string }
+  > {
+    const [rawCode = "", rawIssuer, ...extra] = raw.trim().split(":");
+    if (extra.length > 0) {
+      return { ok: false, message: "Invalid asset format (use XLM or CODE:G...ISSUER)." };
+    }
+    const assetCode = parseAssetCode(rawCode);
+    if (!assetCode) {
+      return {
+        ok: false,
+        message: "Invalid asset code (example: XLM or USDC:G...ISSUER).",
+      };
+    }
+
+    if (rawIssuer !== undefined) {
+      if (assetCode === "XLM") {
+        return { ok: false, message: "Native XLM does not require an issuer." };
+      }
+      const parsedIssuer = ClassicAddressSchema.safeParse(rawIssuer.trim());
+      if (!parsedIssuer.success) {
+        return {
+          ok: false,
+          message: `Invalid issuer for ${assetCode}. Expected a Classic G... address.`,
+        };
+      }
+      return { ok: true, assetCode, assetIssuer: parsedIssuer.data };
+    }
+
+    if (assetCode === "XLM") {
+      return { ok: true, assetCode: "XLM" };
+    }
+
+    if (lookupAddress?.startsWith("G")) {
+      try {
+        const live = await fetchLiveAccountBalances(config, lookupAddress, fetchFn);
+        const match = live.balances.find(
+          (b) => b.assetCode.toUpperCase() === assetCode && b.assetIssuer,
+        );
+        if (match?.assetIssuer) {
+          return { ok: true, assetCode, assetIssuer: match.assetIssuer };
+        }
+      } catch {
+        // Fall through to SEP-42 lookup
+      }
+    }
+
+    if (config.sep42AssetListUrls.length > 0) {
+      try {
+        const verified = await fetchSep42VerifiedAssets(config.sep42AssetListUrls, { fetchFn });
+        const match = verified.find((v) => v.code.toUpperCase() === assetCode);
+        if (match) {
+          return { ok: true, assetCode, assetIssuer: match.issuer };
+        }
+      } catch {
+        // Fall through to explicit issuer instruction
+      }
+    }
+
+    return {
+      ok: false,
+      message: `Specify issuer for ${assetCode} as <code>${assetCode}:G...ISSUER</code> (or hold a trustline on your linked Classic account).`,
+    };
+  }
 
   bot.command("start", async (ctx) => {
     const keyboard = new InlineKeyboard().url(
@@ -323,13 +431,23 @@ export function createTelegramBot(
     }
 
     const amount = parsePositiveAmount(args[0] ?? "");
-    const assetCode = parseAssetCode(args[1] ?? "");
-    if (!amount || !assetCode) {
+    if (!amount) {
       await ctx.reply("Invalid amount or asset code (example: <code>/pay 10 XLM @alice</code>)", {
         parse_mode: "HTML",
       });
       return;
     }
+
+    const senderAccounts = await repo.listLinkedAddresses(tgId);
+    const senderDefault =
+      senderAccounts.find((a) => a.isDefault && a.address.startsWith("G")) ??
+      senderAccounts.find((a) => a.address.startsWith("G"));
+    const assetRes = await resolveCommandAsset(args[1] ?? "", senderDefault?.address);
+    if (!assetRes.ok) {
+      await ctx.reply(assetRes.message, { parse_mode: "HTML" });
+      return;
+    }
+    const { assetCode, assetIssuer } = assetRes;
 
     const rawRecipient = (args[2] ?? "").trim();
     const resolved = await resolveRecipient(repo, rawRecipient);
@@ -337,7 +455,17 @@ export function createTelegramBot(
       // Viral Telegram Claim Link flow when recipient is an unregistered @username
       if (rawRecipient.startsWith("@") && /^@[A-Za-z0-9_]{5,32}$/.test(rawRecipient)) {
         const recipientHandle = rawRecipient.slice(1).toLowerCase();
+        if (!config.claimEscrowContractId) {
+          await ctx.reply(
+            `@${recipientHandle} has not linked an AstroWallet yet, and Claim Link Escrow is not configured on this server. Ask them to run /connect first.`,
+          );
+          return;
+        }
+
+        const intentId = generateId("it");
+        const claimId = await deriveClaimId(intentId);
         const { intent, deepLink } = await createAndSignIntent(config, repo, {
+          intentId,
           creatorTelegramUserId: tgId,
           actionType: "claim",
           chatId: String(ctx.chat.id),
@@ -345,18 +473,21 @@ export function createTelegramBot(
           payload: {
             amount,
             assetCode,
+            ...(assetIssuer ? { assetIssuer } : {}),
             recipientUsername: recipientHandle,
             senderLabel: username,
+            claimId,
+            escrowContractId: config.claimEscrowContractId,
           },
         });
 
         const keyboard = new InlineKeyboard().url(
-          `Fund & Claim ${amount} ${assetCode}`,
+          `Fund Escrow (${amount} ${assetCode})`,
           deepLink,
         );
         const sent = await ctx.reply(
           formatClaimLinkCard({
-            status: "open",
+            status: "pending_funding",
             amount,
             assetCode,
             senderLabel: username,
@@ -384,6 +515,7 @@ export function createTelegramBot(
       payload: {
         amount,
         assetCode,
+        ...(assetIssuer ? { assetIssuer } : {}),
         destination: resolved.address,
         recipientLabel: resolved.label,
         senderLabel: username,
@@ -421,8 +553,7 @@ export function createTelegramBot(
     const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
 
     const amount = parsePositiveAmount(args[0] ?? "");
-    const assetCode = parseAssetCode(args[1] ?? "");
-    if (!amount || !assetCode) {
+    if (!amount || !(args[1] ?? "").trim()) {
       await ctx.reply("Usage: <code>/request &lt;amount&gt; &lt;asset&gt; [note]</code>", {
         parse_mode: "HTML",
       });
@@ -436,6 +567,13 @@ export function createTelegramBot(
       return;
     }
 
+    const assetRes = await resolveCommandAsset(args[1] ?? "", targetAcc.address);
+    if (!assetRes.ok) {
+      await ctx.reply(assetRes.message, { parse_mode: "HTML" });
+      return;
+    }
+    const { assetCode, assetIssuer } = assetRes;
+
     const memo = args.length > 2 ? args.slice(2).join(" ").slice(0, 28) : undefined;
     const { intent, deepLink } = await createAndSignIntent(config, repo, {
       creatorTelegramUserId: tgId,
@@ -444,6 +582,7 @@ export function createTelegramBot(
       payload: {
         amount,
         assetCode,
+        ...(assetIssuer ? { assetIssuer } : {}),
         destination: targetAcc.address,
         recipientLabel: username,
         senderLabel: "Any Payer",
@@ -478,9 +617,8 @@ export function createTelegramBot(
     const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
 
     const totalAmount = parsePositiveAmount(args[0] ?? "");
-    const assetCode = parseAssetCode(args[1] ?? "");
     const count = Number(args[2]);
-    if (!totalAmount || !assetCode || !Number.isInteger(count) || count < 2 || count > 50) {
+    if (!totalAmount || !(args[1] ?? "").trim() || !Number.isInteger(count) || count < 2 || count > 50) {
       await ctx.reply("Usage: <code>/split &lt;total&gt; &lt;asset&gt; &lt;2..50&gt;</code>", {
         parse_mode: "HTML",
       });
@@ -494,7 +632,18 @@ export function createTelegramBot(
       return;
     }
 
-    const share = (Number(totalAmount) / count).toFixed(2);
+    const assetRes = await resolveCommandAsset(args[1] ?? "", targetAcc.address);
+    if (!assetRes.ok) {
+      await ctx.reply(assetRes.message, { parse_mode: "HTML" });
+      return;
+    }
+    const { assetCode, assetIssuer } = assetRes;
+
+    const share = divideAmountExact(totalAmount, count);
+    if (!share) {
+      await ctx.reply("Split amount per participant is too small.");
+      return;
+    }
     const { intent, deepLink } = await createAndSignIntent(config, repo, {
       creatorTelegramUserId: tgId,
       actionType: "split",
@@ -504,6 +653,7 @@ export function createTelegramBot(
         totalAmount,
         participantCount: count,
         assetCode,
+        ...(assetIssuer ? { assetIssuer } : {}),
         destination: targetAcc.address,
         recipientLabel: username,
         senderLabel: "Group Member",
@@ -636,8 +786,9 @@ export function createTelegramBot(
       rpcUrls: config.rpcUrls,
       horizonUrls: config.horizonUrls,
       stellarExpertApiBase: config.stellarExpertApiBase,
-      sep42AssetListUrls: [],
-      directoryLookup: (addr) => lookupDirectoryTag(config, undefined, addr, fetchFn),
+      sep42AssetListUrls: config.sep42AssetListUrls,
+      fetchFn,
+      directoryLookup: (addr) => lookupDirectoryTag(config, deps.cache, addr, fetchFn),
       memoRequiredLookup: (addr) => lookupSep29MemoRequired(config, addr, fetchFn),
     });
 
@@ -688,18 +839,90 @@ export function createTelegramBot(
     }
 
     try {
-      const swapAdapter = createHorizonPathSwapAdapter({
-        horizonUrls: config.horizonUrls,
-        fetchFn,
-      });
-      const quote = await swapAdapter.getQuote({
-        fromAsset,
-        toAsset,
-        amount,
-        slippageBps: 50,
-      });
+      let quote:
+        | {
+            inputAmount: string;
+            expectedOutputAmount: string;
+            provider: string;
+            priceImpactPct: string;
+            unsignedXdr?: string | undefined;
+          }
+        | undefined;
 
-      const { deepLink } = await createAndSignIntent(config, repo, {
+      if (config.soroswapApiBase && config.soroswapApiKey) {
+        try {
+          const cleanBase = config.soroswapApiBase.replace(/\/+$/, "");
+          const quoteBody = buildSoroswapQuoteBody(
+            { fromAsset, toAsset, amount, slippageBps: 50 },
+            config.networkPassphrase,
+          );
+          const authHeaders = {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${config.soroswapApiKey}`,
+          };
+          const res = await fetchFn(`${cleanBase}/quote?network=${config.network}`, {
+            method: "POST",
+            headers: authHeaders,
+            body: JSON.stringify(quoteBody),
+            signal: AbortSignal.timeout(8000),
+          });
+          if (res.ok) {
+            const data = (await res.json()) as {
+              amountOut?: string | number;
+              expectedOutputAmount?: string;
+              priceImpactPct?: string;
+            };
+            const out = parseSoroswapQuoteOutput(data);
+            if (out) {
+              let unsignedXdr: string | undefined;
+              const linked = await repo.listLinkedAddresses(tgId);
+              const defaultClassic =
+                linked.find(
+                  (a) => a.isDefault && a.kind === "classic" && a.address.startsWith("G"),
+                ) ?? linked.find((a) => a.kind === "classic" && a.address.startsWith("G"));
+              if (defaultClassic) {
+                const buildRes = await fetchFn(
+                  `${cleanBase}/quote/build?network=${config.network}`,
+                  {
+                    method: "POST",
+                    headers: authHeaders,
+                    body: JSON.stringify({ quote: data, from: defaultClassic.address }),
+                    signal: AbortSignal.timeout(8000),
+                  },
+                ).catch(() => null);
+                if (buildRes?.ok) {
+                  const built = (await buildRes.json()) as { xdr?: string };
+                  unsignedXdr = built.xdr;
+                }
+              }
+              quote = {
+                inputAmount: amount,
+                expectedOutputAmount: out,
+                provider: "soroswap",
+                priceImpactPct: data.priceImpactPct ?? "0.05",
+                unsignedXdr,
+              };
+            }
+          }
+        } catch {
+          // Fall through to Horizon Path Payments
+        }
+      }
+
+      if (!quote) {
+        const swapAdapter = createHorizonPathSwapAdapter({
+          horizonUrls: config.horizonUrls,
+          fetchFn,
+        });
+        quote = await swapAdapter.getQuote({
+          fromAsset,
+          toAsset,
+          amount,
+          slippageBps: 50,
+        });
+      }
+
+      const { intent, deepLink } = await createAndSignIntent(config, repo, {
         creatorTelegramUserId: tgId,
         actionType: "swap",
         chatId: String(ctx.chat.id),
@@ -719,7 +942,7 @@ export function createTelegramBot(
         deepLink,
       );
 
-      await ctx.reply(
+      const sent = await ctx.reply(
         formatSwapQuoteCard({
           fromAsset,
           toAsset,
@@ -731,6 +954,11 @@ export function createTelegramBot(
         }),
         { parse_mode: "HTML", reply_markup: keyboard },
       );
+
+      await repo.attachIntentMessageRef(intent.intentId, {
+        chatId: String(sent.chat.id),
+        messageId: String(sent.message_id),
+      });
     } catch (err) {
       await ctx.reply(
         `Swap quote unavailable: ${err instanceof Error ? err.message : "No route found"}`,
@@ -751,17 +979,34 @@ export function createTelegramBot(
       if (amount && assetCode) {
         const resolved = await resolveRecipient(repo, parts[3] ?? "");
         if (resolved.ok) {
-          const { intent, deepLink } = await createAndSignIntent(config, repo, {
+          const now = Math.floor(Date.now() / 1000);
+          const payload = {
+            amount,
+            assetCode,
+            destination: resolved.address,
+            recipientLabel: resolved.label,
+            senderLabel: username,
+          };
+          const existing = await repo.findRecentPendingIntent({
             creatorTelegramUserId: tgId,
             actionType: "pay",
-            payload: {
-              amount,
-              assetCode,
-              destination: resolved.address,
-              recipientLabel: resolved.label,
-              senderLabel: username,
-            },
+            payloadJson: JSON.stringify(payload),
+            sinceUnix: now - 60,
           });
+          const { intent, deepLink } = existing
+            ? {
+                intent: existing,
+                deepLink: buildIntentDeepLink(
+                  config.pwaOrigin,
+                  existing.intentId,
+                  existing.hmacSig,
+                ),
+              }
+            : await createAndSignIntent(config, repo, {
+                creatorTelegramUserId: tgId,
+                actionType: "pay",
+                payload,
+              });
 
           const keyboard = new InlineKeyboard().url(
             "Sign with PIN / Fingerprint",

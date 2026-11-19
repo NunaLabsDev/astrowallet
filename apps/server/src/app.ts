@@ -104,8 +104,19 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
     return undefined;
   };
 
+  const attachOptionalRepo = async (c: Context<AppEnv>, next: Next) => {
+    if (deps.createRepo) {
+      c.set("repo", deps.createRepo(c.env));
+    } else if (c.env.DB) {
+      c.set("repo", createD1Repository(c.env.DB));
+    }
+    await next();
+    return undefined;
+  };
+
   app.use("/tg/webhook", attachRepo);
   app.use("/v1/intents/*", attachRepo);
+  app.use("/v1/relay/*", attachOptionalRepo);
   app.use("/webhooks/indexer", attachRepo);
   app.use("/webhooks/indexer/*", attachRepo);
 
@@ -125,7 +136,10 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
       );
     }
 
-    const bot = createTelegramBot(config, repo, { fetchFn: deps.fetchFn });
+    const bot = createTelegramBot(config, repo, {
+      fetchFn: deps.fetchFn,
+      cache: c.env.CACHE,
+    });
     const handler = webhookCallback(bot, "hono");
     return handler(c);
   });

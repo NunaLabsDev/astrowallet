@@ -3,6 +3,10 @@ import {
   type AccountReserveSummary,
   type ServerConfig,
 } from "@astrowallet/domain";
+import {
+  decodeTransactionEnvelope,
+  extractBaseDestination,
+} from "@astrowallet/security-shield";
 
 export type FetchLike = typeof fetch;
 
@@ -35,6 +39,25 @@ export type TxVerificationResult =
   | { confirmed: true; ledger: number }
   | { confirmed: false; reason: string };
 
+/** Intent-derived expectations a confirmed transaction must satisfy (anti-spoof / anti-replay). */
+export interface ExpectedTxMatch {
+  destination?: string | undefined;
+  amount?: string | undefined;
+  assetCode?: string | undefined;
+  assetIssuer?: string | undefined;
+  memo?: string | undefined;
+  minCreatedAtUnix?: number | undefined;
+  allowSorobanRpcFallback?: boolean | undefined;
+  /** Requires a Soroban `invokeHostFunction` on `contractId.functionName` (optionally with first arg hex). */
+  sorobanInvoke?:
+    | {
+        contractId: string;
+        functionName: string;
+        firstArgHex?: string | undefined;
+      }
+    | undefined;
+}
+
 interface HorizonBalanceJson {
   asset_type: string;
   asset_code?: string;
@@ -53,6 +76,28 @@ interface HorizonAccountJson {
 interface HorizonTxJson {
   successful?: boolean;
   ledger?: number;
+  created_at?: string;
+  memo?: string;
+  memo_type?: string;
+  envelope_xdr?: string;
+}
+
+interface NormalizedTx {
+  ledger: number;
+  createdAtUnix?: number | undefined;
+  memo?: string | undefined;
+  envelopeXdr?: string | undefined;
+}
+
+interface HorizonOpRecordJson {
+  type?: string;
+  to?: string;
+  account?: string;
+  amount?: string;
+  starting_balance?: string;
+  asset_type?: string;
+  asset_code?: string;
+  asset_issuer?: string;
 }
 
 interface HorizonPaymentRecordJson {
@@ -157,24 +202,221 @@ export async function fetchLiveAccountReserveInfo(
   return { funded: true, summary };
 }
 
+function decimalToStroops(amount: string): bigint | null {
+  const cleaned = amount.trim();
+  if (!/^\d+(?:\.\d{1,7})?$/.test(cleaned)) return null;
+  const [whole, frac = ""] = cleaned.split(".");
+  return BigInt(whole ?? "0") * 10_000_000n + BigInt(frac.padEnd(7, "0"));
+}
+
+function opMatchesExpectation(op: HorizonOpRecordJson, expected: ExpectedTxMatch): boolean {
+  const wantedDest = expected.destination ? extractBaseDestination(expected.destination) : undefined;
+  const wantedStroops = expected.amount ? decimalToStroops(expected.amount) : null;
+  const wantedCode = (expected.assetCode ?? "XLM").toUpperCase();
+  const isNativeWanted = wantedCode === "XLM" && !expected.assetIssuer;
+
+  let dest: string | undefined;
+  let amount: string | undefined;
+  let native = false;
+  let code: string | undefined;
+  let issuer: string | undefined;
+
+  if (
+    op.type === "payment" ||
+    op.type === "path_payment_strict_send" ||
+    op.type === "path_payment_strict_receive"
+  ) {
+    dest = op.to;
+    amount = op.amount;
+    native = op.asset_type === "native";
+    code = op.asset_code;
+    issuer = op.asset_issuer;
+  } else if (op.type === "create_account") {
+    dest = op.account;
+    amount = op.starting_balance;
+    native = true;
+  } else {
+    return false;
+  }
+
+  if (wantedDest && dest !== wantedDest) return false;
+  if (isNativeWanted) {
+    if (!native) return false;
+  } else {
+    if (native) return false;
+    if ((code ?? "").toUpperCase() !== wantedCode) return false;
+    if (expected.assetIssuer && issuer !== expected.assetIssuer) return false;
+  }
+  if (wantedStroops !== null) {
+    const got = amount ? decimalToStroops(amount) : null;
+    if (got === null || got < wantedStroops) return false;
+  }
+  return true;
+}
+
+async function fetchSorobanTx(
+  rpcUrls: readonly string[],
+  txHash: string,
+  fetchFn: FetchLike,
+): Promise<{ failed: true; reason: string } | { failed: false; tx: NormalizedTx } | null> {
+  for (const rpcUrl of rpcUrls) {
+    try {
+      const res = await fetchFn(rpcUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getTransaction",
+          params: { hash: txHash },
+        }),
+      });
+      if (!res.ok) continue;
+      const body = (await res.json()) as {
+        result?: {
+          status?: string;
+          ledger?: number;
+          createdAt?: string;
+          envelopeXdr?: string;
+        };
+      };
+      const status = body.result?.status;
+      if (status === "SUCCESS") {
+        const created = body.result?.createdAt ? Number(body.result.createdAt) : Number.NaN;
+        return {
+          failed: false,
+          tx: {
+            ledger: body.result?.ledger ?? 0,
+            createdAtUnix: Number.isFinite(created) ? created : undefined,
+            envelopeXdr: body.result?.envelopeXdr,
+          },
+        };
+      }
+      if (status === "FAILED") {
+        return { failed: true, reason: "Transaction failed on-chain" };
+      }
+      return { failed: true, reason: "Transaction not found yet" };
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
 export async function verifyTransactionConfirmed(
-  config: Pick<ServerConfig, "horizonUrls">,
+  config: Pick<ServerConfig, "horizonUrls"> & {
+    rpcUrls?: readonly string[] | undefined;
+    networkPassphrase?: string | undefined;
+  },
   txHash: string,
   fetchFn: FetchLike = fetch,
+  expected?: ExpectedTxMatch,
 ): Promise<TxVerificationResult> {
   const response = await fetchFromHorizonFailover(
     config.horizonUrls,
     `/transactions/${encodeURIComponent(txHash)}`,
     fetchFn,
   );
+
+  let tx: NormalizedTx;
+  let horizonSourced = false;
   if (response.status === 404) {
-    return { confirmed: false, reason: "Transaction not found on Horizon yet" };
+    if (expected?.allowSorobanRpcFallback && config.rpcUrls?.length) {
+      const soroban = await fetchSorobanTx(config.rpcUrls, txHash, fetchFn);
+      if (soroban?.failed) return { confirmed: false, reason: soroban.reason };
+      if (soroban && !soroban.failed) {
+        tx = soroban.tx;
+      } else {
+        return { confirmed: false, reason: "Transaction not found on Horizon yet" };
+      }
+    } else {
+      return { confirmed: false, reason: "Transaction not found on Horizon yet" };
+    }
+  } else {
+    const raw = (await response.json()) as HorizonTxJson;
+    if (raw.successful !== true) {
+      return { confirmed: false, reason: "Transaction failed on-chain" };
+    }
+    horizonSourced = true;
+    const createdMs = raw.created_at ? Date.parse(raw.created_at) : Number.NaN;
+    tx = {
+      ledger: raw.ledger ?? 0,
+      createdAtUnix: Number.isFinite(createdMs) ? Math.floor(createdMs / 1000) : undefined,
+      memo: raw.memo,
+      envelopeXdr: raw.envelope_xdr,
+    };
   }
-  const tx = (await response.json()) as HorizonTxJson;
-  if (tx.successful !== true) {
-    return { confirmed: false, reason: "Transaction failed on-chain" };
+
+  if (expected?.minCreatedAtUnix !== undefined) {
+    if (tx.createdAtUnix === undefined) {
+      return { confirmed: false, reason: "Transaction timestamp unavailable" };
+    }
+    if (tx.createdAtUnix < expected.minCreatedAtUnix - 120) {
+      return {
+        confirmed: false,
+        reason: "Transaction predates this intent (replay of a historical tx hash rejected)",
+      };
+    }
   }
-  return { confirmed: true, ledger: tx.ledger ?? 0 };
+
+  if (expected?.memo !== undefined && expected.memo !== "") {
+    if (tx.memo !== expected.memo) {
+      return { confirmed: false, reason: "Transaction memo does not match the intent memo" };
+    }
+  }
+
+  if (expected?.sorobanInvoke) {
+    if (!tx.envelopeXdr || !config.networkPassphrase) {
+      return { confirmed: false, reason: "Unable to inspect Soroban invocation for this transaction" };
+    }
+    let matched = false;
+    try {
+      const decoded = decodeTransactionEnvelope(tx.envelopeXdr, config.networkPassphrase);
+      matched = decoded.operations.some(
+        (op) =>
+          op.soroban?.contractId === expected.sorobanInvoke?.contractId &&
+          op.soroban?.functionName === expected.sorobanInvoke?.functionName &&
+          (expected.sorobanInvoke?.firstArgHex === undefined ||
+            op.soroban?.args[0]?.toLowerCase() === expected.sorobanInvoke.firstArgHex.toLowerCase()),
+      );
+    } catch {
+      matched = false;
+    }
+    if (!matched) {
+      return {
+        confirmed: false,
+        reason: "Transaction does not invoke the expected escrow contract call for this intent",
+      };
+    }
+  }
+
+  const checkOps =
+    horizonSourced &&
+    expected?.destination !== undefined &&
+    expected.amount !== undefined &&
+    !expected.destination.startsWith("C");
+  if (checkOps && expected) {
+    const opsRes = await fetchFromHorizonFailover(
+      config.horizonUrls,
+      `/transactions/${encodeURIComponent(txHash)}/operations?limit=50`,
+      fetchFn,
+    );
+    if (opsRes.status === 404) {
+      return { confirmed: false, reason: "Transaction operations not found" };
+    }
+    const opsBody = (await opsRes.json()) as {
+      _embedded?: { records?: HorizonOpRecordJson[] };
+    };
+    const records = opsBody._embedded?.records ?? [];
+    if (!records.some((op) => opMatchesExpectation(op, expected))) {
+      return {
+        confirmed: false,
+        reason: "Transaction does not pay the destination, asset and amount required by this intent",
+      };
+    }
+  }
+
+  return { confirmed: true, ledger: tx.ledger };
 }
 
 export async function fetchIncomingPaymentsSince(
@@ -209,7 +451,14 @@ export async function fetchIncomingPaymentsSince(
 
   for (const rec of records) {
     if (!rec.paging_token || !rec.transaction_hash) continue;
-    if (rec.type === "payment" && rec.to === address && rec.from && rec.amount) {
+    if (
+      (rec.type === "payment" ||
+        rec.type === "path_payment_strict_send" ||
+        rec.type === "path_payment_strict_receive") &&
+      rec.to === address &&
+      rec.from &&
+      rec.amount
+    ) {
       events.push({
         pagingToken: rec.paging_token,
         txHash: rec.transaction_hash,

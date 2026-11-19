@@ -1,0 +1,27 @@
+{
+  "name": "@astrowallet/stellar-core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@astrowallet/domain": "workspace:*",
+    "@noble/hashes": "^2.4.0",
+    "@scure/bip39": "^2.4.0",
+    "@stellar/stellar-sdk": "^17.4.0",
+    "hash-wasm": "^4.13.0",
+    "zod": "^3.25.0"
+  }
+}

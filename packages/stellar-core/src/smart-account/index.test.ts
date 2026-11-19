@@ -1,0 +1,82 @@
+import type { ClassicAddress } from "@astrowallet/domain";
+import { Keypair } from "@stellar/stellar-sdk";
+import { describe, expect, it } from "vitest";
+import {
+  buildGuardianRecoveryRotationOperation,
+  buildSacTransferOperation,
+  deriveCounterfactualSmartAccount,
+  resolveSacContractId,
+} from "./index.js";
+
+const GUARDIAN_G =
+  "GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOOHSUJUJ6" as const;
+const SAMPLE_WASM_HASH = "a".repeat(64);
+const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
+
+describe("Counterfactual Smart Account (C...) & 1-Tap SAC Bridge", () => {
+  it("derives deterministic C... contract address bound to G... Recovery Guardian", () => {
+    const sa1 = deriveCounterfactualSmartAccount({
+      guardianAddress: GUARDIAN_G,
+      wasmHashHex: SAMPLE_WASM_HASH,
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+    const sa2 = deriveCounterfactualSmartAccount({
+      guardianAddress: GUARDIAN_G,
+      wasmHashHex: SAMPLE_WASM_HASH,
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+
+    expect(sa1.contractAddress).toMatch(/^C[A-Z2-7]{55}$/);
+    expect(sa1.contractAddress).toBe(sa2.contractAddress);
+    expect(sa1.guardianAddress).toBe(GUARDIAN_G);
+    expect(sa1.capabilities.supportsGaslessSoroban).toBe(true);
+    expect(sa1.capabilities.canSignClassicSdex).toBe(false);
+  });
+
+  it("resolves canonical SAC contract IDs and builds 1-tap G... <-> C... SAC transfers", () => {
+    const xlmSac = resolveSacContractId({
+      assetCode: "XLM",
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+    expect(xlmSac).toMatch(/^C[A-Z2-7]{55}$/);
+
+    const sa = deriveCounterfactualSmartAccount({
+      guardianAddress: GUARDIAN_G,
+      wasmHashHex: SAMPLE_WASM_HASH,
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+
+    const op = buildSacTransferOperation({
+      sacContractId: xlmSac,
+      fromAddress: GUARDIAN_G,
+      toAddress: sa.contractAddress,
+      amountStroops: 100_000_000n,
+    });
+    expect(op).toBeDefined();
+  });
+
+  it("builds rotate_guardian invocation and rejects identical guardian rotation", () => {
+    const newGuardian = Keypair.random().publicKey() as ClassicAddress;
+    const sa = deriveCounterfactualSmartAccount({
+      guardianAddress: GUARDIAN_G,
+      wasmHashHex: SAMPLE_WASM_HASH,
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+
+    const rotateOp = buildGuardianRecoveryRotationOperation({
+      contractAddress: sa.contractAddress,
+      currentGuardianAddress: GUARDIAN_G,
+      newGuardianAddress: newGuardian,
+      newPasskeyPubKeyHex: "04ab12",
+    });
+    expect(rotateOp.body.type).toBe("invokeHostFunction");
+
+    expect(() =>
+      buildGuardianRecoveryRotationOperation({
+        contractAddress: sa.contractAddress,
+        currentGuardianAddress: GUARDIAN_G,
+        newGuardianAddress: GUARDIAN_G,
+      }),
+    ).toThrow(/must differ/i);
+  });
+});

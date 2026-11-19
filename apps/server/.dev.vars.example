@@ -1,0 +1,23 @@
+# Local Wrangler Secrets & Environment Template (NEVER commit .dev.vars)
+STELLAR_NETWORK=testnet
+STELLAR_NETWORK_PASSPHRASE=Test SDF Network ; September 2015
+STELLAR_RPC_URLS=https://soroban-testnet.stellar.org
+HORIZON_URLS=https://horizon-testnet.stellar.org
+PWA_ORIGIN=http://localhost:5173
+ALLOWED_ORIGINS=http://localhost:5173
+FRIENDBOT_URL=https://friendbot.stellar.org
+
+# Optional Phase 2 proxy endpoints
+# STELLAR_EXPERT_API_BASE=https://api.stellar.expert
+# OZ_CHANNELS_API_URL=https://channels.openzeppelin.com/testnet
+# SOROSWAP_API_BASE=https://api.soroswap.finance
+
+# Required secrets (use `wrangler secret put` in deployment)
+TG_BOT_TOKEN=replace_with_dedicated_testnet_bot_token
+TG_WEBHOOK_SECRET=replace_with_at_least_16_char_random_secret
+INTENT_HMAC_SECRET=replace_with_at_least_32_char_random_hmac_secret
+
+# Optional Phase 2/3 secrets
+# OZ_CHANNELS_API_KEY=
+# SOROSWAP_API_KEY=
+# INDEXER_WEBHOOK_SECRET=

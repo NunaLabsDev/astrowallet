@@ -1,0 +1,26 @@
+{
+  "name": "@astrowallet/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src"
+  },
+  "dependencies": {
+    "@astrowallet/defi": "workspace:*",
+    "@astrowallet/domain": "workspace:*",
+    "@astrowallet/security-shield": "workspace:*",
+    "@astrowallet/tg-protocol": "workspace:*",
+    "grammy": "^1.36.0",
+    "hono": "^4.7.10",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250508.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.16.0"
+  }
+}

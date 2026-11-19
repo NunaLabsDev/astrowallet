@@ -1,0 +1,33 @@
+:root {
+  /* Official 5-Color Brand Palette — Calibrated for 60/30/10 Banking-Trust Psychology */
+  --aw-solar-blaze: #F15A24;       /* rgb(241, 90, 36) — Intentional CTA action energy (10%) */
+  --aw-stellar-gold: #F5C928;      /* rgb(245, 201, 40) — Verified vault seals & reserves (10%) */
+  --aw-cosmic-purple: #8050C8;     /* rgb(128, 80, 200) — Soroban C... & Smart Vault layer (30%) */
+  --aw-nebula-lavender: #A58BE0;   /* rgb(165, 139, 224) — Specular glass rims & secondary labels (30%) */
+  --aw-deep-space-navy: #172C69;   /* rgb(23, 44, 105) — Sovereign banking foundation (60%) */
+
+  /* Sovereign Banking Depth & High-Contrast Inks */
+  --aw-space-void: #060E24;
+  --aw-navy-mid: #0D1B44;
+  --aw-ink-primary: #F8FAFF;
+  --aw-ink-secondary: #C4CBE6;
+  --aw-ink-muted: #8E99C2;
+  --aw-ink-on-gold: #0B1433;
+  --aw-ink-on-orange: #FFFFFF;
+
+  /* Institutional Glass & Security Posture Tokens */
+  --aw-glass-rim-lavender: rgba(165, 139, 224, 0.26);
+  --aw-glass-rim-gold: rgba(245, 201, 40, 0.42);
+  --aw-trust-emerald: #10B981;
+  --aw-safe-emerald: #10B981;
+  --aw-danger-crimson: #EF4444;
+
+  /* Calibrated Gradients */
+  --aw-cta-grad: linear-gradient(135deg, #DE4A16 0%, #F15A24 100%);
+  --aw-grad-aurora: linear-gradient(135deg, #F15A24 0%, #8050C8 55%, #172C69 100%);
+  --aw-grad-orb-glow:
+    radial-gradient(circle at 15% 8%, rgba(128, 80, 200, 0.24), transparent 44%),
+    radial-gradient(circle at 86% 18%, rgba(23, 44, 105, 0.52), transparent 52%),
+    radial-gradient(circle at 75% 84%, rgba(241, 90, 36, 0.12), transparent 48%),
+    radial-gradient(circle at 22% 90%, rgba(245, 201, 40, 0.08), transparent 45%);
+}

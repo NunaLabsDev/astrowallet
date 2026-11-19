@@ -1,0 +1,13 @@
+title = "AstroWallet Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow documentation, example templates, and deterministic unit test fixtures"
+paths = [
+  '''\.env\.example$''',
+  '''\.dev\.vars\.example$''',
+  '''\.test\.ts$''',
+  '''\.test\.tsx$''',
+]

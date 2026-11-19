@@ -1,0 +1,65 @@
+name = "astrowallet-server"
+main = "src/index.ts"
+workers_dev = false
+compatibility_date = "2026-04-01"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "astrowallet"
+database_id = "12b7f77d-5467-44a6-a4b3-11ccd63a315c"
+migrations_dir = "migrations"
+
+[[kv_namespaces]]
+binding = "CACHE"
+id = "3389ff9f05414c219d912e82a7a84baa"
+
+[[durable_objects.bindings]]
+name = "CHAIN_WATCHER"
+class_name = "ChainWatcherDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ChainWatcherDO"]
+
+[vars]
+STELLAR_NETWORK = "testnet"
+STELLAR_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
+STELLAR_RPC_URLS = "https://soroban-testnet.stellar.org"
+HORIZON_URLS = "https://horizon-testnet.stellar.org"
+PWA_ORIGIN = "https://astrowallet-b1o.pages.dev"
+ALLOWED_ORIGINS = "https://astrowallet-b1o.pages.dev,http://localhost:5173"
+FRIENDBOT_URL = "https://friendbot.stellar.org"
+STELLAR_EXPERT_API_BASE = "https://api.stellar.expert"
+OZ_CHANNELS_API_URL = "https://channels.openzeppelin.com/testnet"
+SOROSWAP_API_BASE = "https://api.soroswap.finance"
+
+[env.testnet]
+name = "astrowallet-server"
+workers_dev = false
+
+[[env.testnet.d1_databases]]
+binding = "DB"
+database_name = "astrowallet"
+database_id = "12b7f77d-5467-44a6-a4b3-11ccd63a315c"
+migrations_dir = "migrations"
+
+[[env.testnet.kv_namespaces]]
+binding = "CACHE"
+id = "3389ff9f05414c219d912e82a7a84baa"
+
+[[env.testnet.durable_objects.bindings]]
+name = "CHAIN_WATCHER"
+class_name = "ChainWatcherDO"
+
+[env.testnet.vars]
+STELLAR_NETWORK = "testnet"
+STELLAR_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
+STELLAR_RPC_URLS = "https://soroban-testnet.stellar.org"
+HORIZON_URLS = "https://horizon-testnet.stellar.org"
+PWA_ORIGIN = "https://astrowallet-b1o.pages.dev"
+ALLOWED_ORIGINS = "https://astrowallet-b1o.pages.dev,http://localhost:5173"
+FRIENDBOT_URL = "https://friendbot.stellar.org"
+STELLAR_EXPERT_API_BASE = "https://api.stellar.expert"
+OZ_CHANNELS_API_URL = "https://channels.openzeppelin.com/testnet"
+SOROSWAP_API_BASE = "https://api.soroswap.finance"

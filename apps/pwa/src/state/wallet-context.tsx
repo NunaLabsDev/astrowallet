@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -16,7 +17,12 @@ import {
   type ScanReport,
   type StellarAddress,
 } from "@astrowallet/domain";
-import { scanTransactionEnvelopeXdr } from "@astrowallet/security-shield";
+import {
+  fetchSep42VerifiedAssets,
+  scanTransactionEnvelopeXdr,
+  type VerifiedAssetEntry,
+} from "@astrowallet/security-shield";
+import { formatSmartAccountLinkMessage } from "@astrowallet/tg-protocol";
 import {
   attachSep43WindowProvider,
   createSep43Provider,
@@ -68,6 +74,14 @@ export interface ToastMessage {
   message: string;
 }
 
+export interface PendingDappConsent {
+  id: number;
+  method: string;
+  origin?: string | undefined;
+  summary: string;
+  scanReport?: ScanReport | undefined;
+}
+
 export interface SendPaymentParams {
   destination: StellarAddress;
   amount: string;
@@ -77,13 +91,22 @@ export interface SendPaymentParams {
   typedMemo?: TypedMemoInput | undefined;
 }
 
-export interface SignedConnectAccountProof {
-  address: ClassicAddress;
-  kind: "classic";
-  label: string;
-  isDefault: boolean;
-  signatureBase64: string;
-}
+export type SignedConnectAccountProof =
+  | {
+      address: ClassicAddress;
+      kind: "classic";
+      label: string;
+      isDefault: boolean;
+      signatureBase64: string;
+    }
+  | {
+      address: ContractAddress;
+      kind: "smart";
+      label: string;
+      isDefault: boolean;
+      guardianAddress: ClassicAddress;
+      signatureBase64: string;
+    };
 
 export interface PlaceSdexOfferParams {
   sellingCode: string;
@@ -129,6 +152,10 @@ export interface WalletContextValue {
   chainError: string | null;
   fingerprintSupported: boolean;
   fingerprintEnrolled: boolean;
+  verifiedAssets: readonly VerifiedAssetEntry[];
+  pendingDappConsent: PendingDappConsent | null;
+
+  resolveDappConsent(approved: boolean): void;
 
   setActiveIndex(index: number): void;
   showToast(message: string, kind?: "success" | "info" | "error"): void;
@@ -199,10 +226,43 @@ export interface WalletContextValue {
   signConnectChallenge(
     message: string,
     selectedIndices: readonly number[],
+    includePairedSmartAccount?: boolean,
   ): Promise<SignedConnectAccountProof[]>;
+  fundClaimEscrow(params: {
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    amount: string;
+    assetCode: string;
+    assetIssuer?: string | undefined;
+    expiresAtUnix: number;
+  }): Promise<{
+    hash: string;
+    ledger: number;
+    claimSecretSeedHex: string;
+    expiresAtUnix: number;
+  }>;
+  claimFromEscrow(params: {
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    claimSecretSeedHex: string;
+  }): Promise<{ hash: string; ledger: number }>;
 }
 
 const WalletContext = createContext<WalletContextValue | null>(null);
+
+function resolveWebAuthnRpId(pwaOrigin: string): string | undefined {
+  if (typeof window === "undefined") return undefined;
+  const currentHost = window.location.hostname;
+  try {
+    const configuredHost = new URL(pwaOrigin).hostname;
+    if (currentHost === configuredHost || currentHost.endsWith(`.${configuredHost}`)) {
+      return configuredHost;
+    }
+  } catch {
+    // Fallback to active browser hostname
+  }
+  return currentHost || undefined;
+}
 
 function toLinkedAccounts(metaList: readonly VaultAccountMetadata[]): LinkedAccount[] {
   return metaList.map((meta) => ({
@@ -250,6 +310,18 @@ export function WalletProvider({
 
   const [fingerprintSupported, setFingerprintSupported] = useState<boolean>(false);
   const [fingerprintEnrolled, setFingerprintEnrolled] = useState<boolean>(false);
+  const [verifiedAssets, setVerifiedAssets] = useState<readonly VerifiedAssetEntry[]>([]);
+  const [pendingDappConsent, setPendingDappConsent] = useState<PendingDappConsent | null>(null);
+  const dappConsentResolverRef = useRef<((approved: boolean) => void) | null>(null);
+
+  const resolveDappConsent = useCallback((approved: boolean) => {
+    const resolver = dappConsentResolverRef.current;
+    dappConsentResolverRef.current = null;
+    setPendingDappConsent(null);
+    if (resolver) {
+      resolver(approved);
+    }
+  }, []);
 
   const showToast = useCallback(
     (message: string, kind: "success" | "info" | "error" = "success") => {
@@ -297,6 +369,22 @@ export function WalletProvider({
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    if (config.sep42AssetListUrls.length === 0) {
+      setVerifiedAssets([]);
+      return undefined;
+    }
+    void fetchSep42VerifiedAssets(config.sep42AssetListUrls)
+      .then((assets) => {
+        if (!cancelled) setVerifiedAssets(assets);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [config.sep42AssetListUrls]);
+
   const refreshChainState = useCallback(async () => {
     if (!activeAccount) return;
     setLoadingChain(true);
@@ -308,7 +396,18 @@ export function WalletProvider({
         stellarClient.fetchClaimableBalances(activeAccount.address, 20),
         stellarClient.fetchOpenOffers(activeAccount.address, 20),
       ]);
-      setAccountState(state);
+      const verifiedSet = new Set(
+        verifiedAssets.map((v) => `${v.code.toUpperCase()}:${v.issuer}`),
+      );
+      const enrichedBalances = state.balances.map((b) => ({
+        ...b,
+        isVerifiedAsset:
+          b.isVerifiedAsset ||
+          (b.assetCode === "XLM" && !b.assetIssuer) ||
+          (Boolean(b.assetIssuer) &&
+            verifiedSet.has(`${b.assetCode.toUpperCase()}:${b.assetIssuer}`)),
+      }));
+      setAccountState({ ...state, balances: enrichedBalances });
       setRecentPayments(payments);
       setClaimableBalances(claimables);
       setOpenOffers(offers);
@@ -317,7 +416,7 @@ export function WalletProvider({
     } finally {
       setLoadingChain(false);
     }
-  }, [activeAccount, stellarClient]);
+  }, [activeAccount, stellarClient, verifiedAssets]);
 
   useEffect(() => {
     if (vaultStatus === "unlocked" && activeAccount) {
@@ -371,22 +470,55 @@ export function WalletProvider({
       },
       authorizeRequest: async (ctx) => {
         const rawXdr = typeof ctx.params.xdr === "string" ? ctx.params.xdr : undefined;
+        let scanReport: ScanReport | undefined;
         if (rawXdr) {
           const scan = scanTransactionEnvelopeXdr(rawXdr, {
             networkPassphrase: config.networkPassphrase,
+            verifiedAssets,
           });
+          scanReport = scan.report;
           if (scan.report.verdict === "malicious") {
             throw new Error(
               `Scan & Shield blocked malicious dApp XDR: ${scan.report.findings[0]?.title ?? "drainer detected"}`,
             );
           }
         }
-        return true;
+
+        if (dappConsentResolverRef.current) {
+          dappConsentResolverRef.current(false);
+          dappConsentResolverRef.current = null;
+        }
+
+        const msgPreview =
+          typeof ctx.params.message === "string"
+            ? ctx.params.message.slice(0, 140)
+            : rawXdr
+              ? `${scanReport?.operationsCount ?? 1} operation(s), verdict: ${scanReport?.verdict.toUpperCase() ?? "UNKNOWN"}`
+              : "Soroban authorization entry";
+
+        return new Promise<boolean>((resolve) => {
+          dappConsentResolverRef.current = resolve;
+          setPendingDappConsent({
+            id: Date.now(),
+            method: ctx.method,
+            origin: ctx.origin,
+            summary: msgPreview,
+            scanReport,
+          });
+        });
       },
     });
 
-    return attachSep43WindowProvider(provider);
-  }, [vaultStatus, unlockedMnemonic, activeAccount, config]);
+    const detach = attachSep43WindowProvider(provider);
+    return () => {
+      detach();
+      if (dappConsentResolverRef.current) {
+        dappConsentResolverRef.current(false);
+        dappConsentResolverRef.current = null;
+      }
+      setPendingDappConsent(null);
+    };
+  }, [vaultStatus, unlockedMnemonic, activeAccount, config, verifiedAssets]);
 
   const createOrImportVault = useCallback(
     async (mnemonic: string, pinOrPassphrase: string, initialLabel = "Primary") => {
@@ -438,25 +570,32 @@ export function WalletProvider({
   }, []);
 
   const unlockWithBiometric = useCallback(async () => {
-    const pin = await unlockWithFingerprint();
+    const pin = await unlockWithFingerprint(resolveWebAuthnRpId(config.pwaOrigin));
     await unlockWithPin(pin);
-  }, [unlockWithPin]);
+  }, [unlockWithPin, config.pwaOrigin]);
 
-  const enableFingerprint = useCallback(async (pinOrPassphrase: string) => {
-    const envelope = await loadEncryptedVault();
-    if (!envelope) {
-      throw new Error("Create and save your vault first");
-    }
-    await decryptVaultPayload(envelope, pinOrPassphrase, {
-      deriveKeyFn: deriveKeyInWorker,
-    });
-    const res = await enrollFingerprintUnlock(pinOrPassphrase);
-    if (res.enrolled) {
-      setFingerprintEnrolled(true);
-      return { enrolled: true, message: "Fingerprint quick-unlock enabled on this device." };
-    }
-    return { enrolled: false, message: res.reason };
-  }, []);
+  const enableFingerprint = useCallback(
+    async (pinOrPassphrase: string) => {
+      const envelope = await loadEncryptedVault();
+      if (!envelope) {
+        throw new Error("Create and save your vault first");
+      }
+      await decryptVaultPayload(envelope, pinOrPassphrase, {
+        deriveKeyFn: deriveKeyInWorker,
+      });
+      const res = await enrollFingerprintUnlock(
+        pinOrPassphrase,
+        "AstroWallet",
+        resolveWebAuthnRpId(config.pwaOrigin),
+      );
+      if (res.enrolled) {
+        setFingerprintEnrolled(true);
+        return { enrolled: true, message: "Fingerprint quick-unlock enabled on this device." };
+      }
+      return { enrolled: false, message: res.reason };
+    },
+    [config.pwaOrigin],
+  );
 
   const disableFingerprint = useCallback(async () => {
     await disableFingerprintUnlock();
@@ -618,6 +757,11 @@ export function WalletProvider({
   );
 
   const lockVault = useCallback(() => {
+    if (dappConsentResolverRef.current) {
+      dappConsentResolverRef.current(false);
+      dappConsentResolverRef.current = null;
+    }
+    setPendingDappConsent(null);
     setUnlockedMnemonic(null);
     setAccountState(null);
     setRecentPayments([]);
@@ -626,7 +770,63 @@ export function WalletProvider({
     setVaultStatus("locked");
   }, []);
 
+  // Auto-lock after 5 min of inactivity or > 60s in background tab
+  useEffect(() => {
+    if (vaultStatus !== "unlocked" || typeof window === "undefined") {
+      return undefined;
+    }
+
+    const INACTIVITY_MS = 5 * 60 * 1000;
+    const BACKGROUND_LOCK_MS = 60 * 1000;
+
+    let timer = window.setTimeout(() => {
+      lockVault();
+      showToast("Vault auto-locked after 5 minutes of inactivity", "info");
+    }, INACTIVITY_MS);
+
+    const resetInactivityTimer = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        lockVault();
+        showToast("Vault auto-locked after 5 minutes of inactivity", "info");
+      }, INACTIVITY_MS);
+    };
+
+    let hiddenAt: number | null = null;
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        hiddenAt = Date.now();
+      } else if (hiddenAt !== null) {
+        const elapsed = Date.now() - hiddenAt;
+        hiddenAt = null;
+        if (elapsed > BACKGROUND_LOCK_MS) {
+          lockVault();
+          showToast("Vault locked after staying in background", "info");
+        }
+      }
+    };
+
+    const opts: AddEventListenerOptions = { passive: true };
+    window.addEventListener("pointerdown", resetInactivityTimer, opts);
+    window.addEventListener("keydown", resetInactivityTimer, opts);
+    window.addEventListener("touchstart", resetInactivityTimer, opts);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("pointerdown", resetInactivityTimer);
+      window.removeEventListener("keydown", resetInactivityTimer);
+      window.removeEventListener("touchstart", resetInactivityTimer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [vaultStatus, lockVault, showToast]);
+
   const wipeLocalVault = useCallback(async () => {
+    if (dappConsentResolverRef.current) {
+      dappConsentResolverRef.current(false);
+      dappConsentResolverRef.current = null;
+    }
+    setPendingDappConsent(null);
     await deleteEncryptedVault();
     setUnlockedMnemonic(null);
     setAccountMetaList([]);
@@ -817,6 +1017,7 @@ export function WalletProvider({
     ): Promise<{ signedXdr: string; scanReport: ScanReport }> => {
       const scan = scanTransactionEnvelopeXdr(xdrBase64.trim(), {
         networkPassphrase: config.networkPassphrase,
+        verifiedAssets,
       });
       if (scan.report.verdict === "malicious") {
         throw new Error(
@@ -837,7 +1038,7 @@ export function WalletProvider({
         return { signedXdr, scanReport: scan.report };
       });
     },
-    [config.networkPassphrase, withActiveKeypair],
+    [config.networkPassphrase, verifiedAssets, withActiveKeypair],
   );
 
   const signAndSubmitRawXdrWithShield = useCallback(
@@ -974,6 +1175,7 @@ export function WalletProvider({
             if (rawXdr) {
               const scan = scanTransactionEnvelopeXdr(rawXdr, {
                 networkPassphrase: config.networkPassphrase,
+                verifiedAssets,
               });
               if (scan.report.verdict === "malicious") {
                 throw new Error(
@@ -991,13 +1193,14 @@ export function WalletProvider({
         return response;
       });
     },
-    [withActiveKeypair, config, refreshChainState],
+    [withActiveKeypair, config, verifiedAssets, refreshChainState],
   );
 
   const signConnectChallenge = useCallback(
     async (
       message: string,
       selectedIndices: readonly number[],
+      includePairedSmartAccount = false,
     ): Promise<SignedConnectAccountProof[]> => {
       if (!unlockedMnemonic) {
         throw new Error("Unlock your wallet first to sign the Telegram link challenge");
@@ -1013,7 +1216,8 @@ export function WalletProvider({
         if (!meta) continue;
         const derived = deriveStellarAccount(unlockedMnemonic, meta.index);
         try {
-          const signatureBase64 = signChallengeMessage(derived.toKeypair(), message);
+          const kp = derived.toKeypair();
+          const signatureBase64 = signChallengeMessage(kp, message);
           proofs.push({
             address: derived.publicKey,
             kind: "classic",
@@ -1021,13 +1225,70 @@ export function WalletProvider({
             isDefault: i === 0,
             signatureBase64,
           });
+          if (i === 0 && includePairedSmartAccount && config.smartAccountWasmHash) {
+            const smart = deriveCounterfactualSmartAccount({
+              guardianAddress: derived.publicKey,
+              wasmHashHex: config.smartAccountWasmHash,
+              networkPassphrase: config.networkPassphrase,
+            });
+            const boundMsg = formatSmartAccountLinkMessage(message, smart.contractAddress);
+            proofs.push({
+              address: smart.contractAddress,
+              kind: "smart",
+              label: `${meta.label} Smart`,
+              isDefault: false,
+              guardianAddress: derived.publicKey,
+              signatureBase64: signChallengeMessage(kp, boundMsg),
+            });
+          }
         } finally {
           derived.zeroize();
         }
       }
       return proofs;
     },
-    [unlockedMnemonic, accountMetaList],
+    [unlockedMnemonic, accountMetaList, config.smartAccountWasmHash, config.networkPassphrase],
+  );
+
+  const fundClaimEscrow = useCallback(
+    async (params: {
+      escrowContractId: ContractAddress;
+      claimIdHex: string;
+      amount: string;
+      assetCode: string;
+      assetIssuer?: string | undefined;
+      expiresAtUnix: number;
+    }) => {
+      return withActiveKeypair(async (keypair) => {
+        const res = await stellarClient.fundClaimEscrow({
+          sourceKeypair: keypair,
+          ...params,
+        });
+        await refreshChainState();
+        showToast(`Escrow funded (${params.amount} ${params.assetCode})`);
+        return res;
+      });
+    },
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+  );
+
+  const claimFromEscrow = useCallback(
+    async (params: {
+      escrowContractId: ContractAddress;
+      claimIdHex: string;
+      claimSecretSeedHex: string;
+    }) => {
+      return withActiveKeypair(async (keypair) => {
+        const res = await stellarClient.claimFromEscrow({
+          sourceKeypair: keypair,
+          ...params,
+        });
+        await refreshChainState();
+        showToast("Claimed escrowed funds onto ledger");
+        return res;
+      });
+    },
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
   );
 
   const value: WalletContextValue = {
@@ -1046,6 +1307,9 @@ export function WalletProvider({
     chainError,
     fingerprintSupported,
     fingerprintEnrolled,
+    verifiedAssets,
+    pendingDappConsent,
+    resolveDappConsent,
     setActiveIndex,
     showToast,
     dismissToast,
@@ -1084,6 +1348,8 @@ export function WalletProvider({
     signActiveSep53Message,
     handleDappRpcRequest,
     signConnectChallenge,
+    fundClaimEscrow,
+    claimFromEscrow,
   };
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

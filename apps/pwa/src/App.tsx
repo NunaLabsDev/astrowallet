@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type FormEvent,
+} from "react";
 import { StellarAddressSchema } from "@astrowallet/domain";
 import { deriveCounterfactualSmartAccount } from "@astrowallet/stellar-core";
 import { AccountSwitcher } from "./components/AccountSwitcher.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
 import { AstroWalletLogo } from "./components/AstroWalletLogo.js";
-import { ClassicToolsSheet } from "./components/ClassicToolsSheet.js";
-import { CollectiblesSheet } from "./components/CollectiblesSheet.js";
-import { DappConnectSheet } from "./components/DappConnectSheet.js";
-import { DevLabSheet } from "./components/DevLabSheet.js";
+import type { AppDockTab } from "./components/LandingPage.js";
 import {
   IconAccounts,
   IconActivity,
@@ -46,17 +51,42 @@ import {
   type ActiveIntentRoute,
 } from "./components/IntentSheet.js";
 import { IosBrowserGuard } from "./components/IosBrowserGuard.js";
-import { LandingPage, type AppDockTab } from "./components/LandingPage.js";
 import { ModalDrawer } from "./components/ModalDrawer.js";
 import { OnboardingSheet } from "./components/OnboardingSheet.js";
-import { RampSheet } from "./components/RampSheet.js";
-import { ReceiveSheet } from "./components/ReceiveSheet.js";
-import { ScanShieldSheet } from "./components/ScanShieldSheet.js";
-import { SendSheet } from "./components/SendSheet.js";
-import { SwapSheet } from "./components/SwapSheet.js";
 import { UnlockSheet } from "./components/UnlockSheet.js";
 import { loadPwaEnv } from "./config/env.js";
 import { WalletProvider, useWallet } from "./state/wallet-context.js";
+
+const LandingPage = lazy(() =>
+  import("./components/LandingPage.js").then((m) => ({ default: m.LandingPage })),
+);
+const ClassicToolsSheet = lazy(() =>
+  import("./components/ClassicToolsSheet.js").then((m) => ({ default: m.ClassicToolsSheet })),
+);
+const CollectiblesSheet = lazy(() =>
+  import("./components/CollectiblesSheet.js").then((m) => ({ default: m.CollectiblesSheet })),
+);
+const DappConnectSheet = lazy(() =>
+  import("./components/DappConnectSheet.js").then((m) => ({ default: m.DappConnectSheet })),
+);
+const DevLabSheet = lazy(() =>
+  import("./components/DevLabSheet.js").then((m) => ({ default: m.DevLabSheet })),
+);
+const RampSheet = lazy(() =>
+  import("./components/RampSheet.js").then((m) => ({ default: m.RampSheet })),
+);
+const ReceiveSheet = lazy(() =>
+  import("./components/ReceiveSheet.js").then((m) => ({ default: m.ReceiveSheet })),
+);
+const ScanShieldSheet = lazy(() =>
+  import("./components/ScanShieldSheet.js").then((m) => ({ default: m.ScanShieldSheet })),
+);
+const SendSheet = lazy(() =>
+  import("./components/SendSheet.js").then((m) => ({ default: m.SendSheet })),
+);
+const SwapSheet = lazy(() =>
+  import("./components/SwapSheet.js").then((m) => ({ default: m.SwapSheet })),
+);
 
 type ActiveDrawer =
   | "send"
@@ -254,7 +284,7 @@ function RevealSeedModalContent({ onDone }: { onDone: () => void }) {
           />
         </div>
         {error && <div className="aw-banner aw-banner--danger">{error}</div>}
-        <button type="submit" className="aw-btn-primary" disabled={busy || pin.length < 4}>
+        <button type="submit" className="aw-btn-primary" disabled={busy || pin.length < 6}>
           <IconEye size={15} />
           <span>{busy ? "Decrypting Vault..." : "Verify PIN & Reveal Seed"}</span>
         </button>
@@ -329,6 +359,8 @@ function WalletShell({
     chainError,
     fingerprintSupported,
     fingerprintEnrolled,
+    pendingDappConsent,
+    resolveDappConsent,
     enableFingerprint,
     disableFingerprint,
     exportAgVaultJson,
@@ -1115,7 +1147,17 @@ function WalletShell({
                   </div>
                 )}
 
-                {activeTab === "nfts" && <CollectiblesSheet />}
+                {activeTab === "nfts" && (
+                  <Suspense
+                    fallback={
+                      <section className="glass-card" style={{ padding: 24, textAlign: "center" }}>
+                        Loading Collectibles...
+                      </section>
+                    }
+                  >
+                    <CollectiblesSheet />
+                  </Suspense>
+                )}
 
                 {activeTab === "activity" && (
                   <section className="glass-card" style={{ display: "grid", gap: 12 }}>
@@ -1281,7 +1323,17 @@ function WalletShell({
                   </section>
                 )}
 
-                {activeTab === "dev" && <DevLabSheet />}
+                {activeTab === "dev" && (
+                  <Suspense
+                    fallback={
+                      <section className="glass-card" style={{ padding: 24, textAlign: "center" }}>
+                        Loading Developer Workbench...
+                      </section>
+                    }
+                  >
+                    <DevLabSheet />
+                  </Suspense>
+                )}
 
                 {activeTab === "accounts" && (
                   <div style={{ display: "grid", gap: 14 }}>
@@ -1472,19 +1524,26 @@ function WalletShell({
                           Counterfactual Soroban Smart Account (C...) &amp; Recovery Guardian
                         </div>
                         {pairedSmartAccount ? (
-                          <div className="aw-list-row">
-                            <div>
-                              <div style={{ fontWeight: 700, fontSize: 13 }}>
-                                Smart Account (Guardian: {activeAccount.label})
+                          <div style={{ display: "grid", gap: 8 }}>
+                            <div className="aw-list-row">
+                              <div>
+                                <div style={{ fontWeight: 700, fontSize: 13 }}>
+                                  Smart Account (Guardian: {activeAccount.label})
+                                </div>
+                                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                                  <code>
+                                    {pairedSmartAccount.contractAddress.slice(0, 10)}…
+                                    {pairedSmartAccount.contractAddress.slice(-8)}
+                                  </code>
+                                </div>
                               </div>
-                              <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                                <code>
-                                  {pairedSmartAccount.contractAddress.slice(0, 10)}…
-                                  {pairedSmartAccount.contractAddress.slice(-8)}
-                                </code>
-                              </div>
+                              <span className="glass-pill glass-pill--gold">CAP-46 Counterfactual</span>
                             </div>
-                            <span className="glass-pill glass-pill--gold">Gasless C...</span>
+                            <div className="aw-banner aw-banner--warn" style={{ fontSize: 11 }}>
+                              Counterfactual — Deploy on Soroban before sending funds. Sending
+                              assets to an undeployed C... contract requires deploying with your
+                              linked G... Guardian first.
+                            </div>
                           </div>
                         ) : (
                           <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
@@ -1777,25 +1836,97 @@ function WalletShell({
         subtitle={currentDrawerMeta?.subtitle}
         onClose={() => setActiveDrawer(null)}
       >
-        {activeDrawer === "send" && (
-          <SendSheet
-            embedded
-            initialAssetCode={sendPrefill.assetCode}
-            initialAssetIssuer={sendPrefill.assetIssuer}
-            initialDestination={sendPrefill.destination}
-            onClose={() => setActiveDrawer(null)}
-          />
-        )}
-        {activeDrawer === "receive" && (
-          <ReceiveSheet embedded onClose={() => setActiveDrawer(null)} />
-        )}
-        {activeDrawer === "swap" && <SwapSheet initialFromAsset={swapFromPrefill} />}
-        {activeDrawer === "scan" && <ScanShieldSheet />}
-        {activeDrawer === "tools" && <ClassicToolsSheet />}
-        {activeDrawer === "ramp" && <RampSheet />}
-        {activeDrawer === "dapp" && <DappConnectSheet />}
-        {activeDrawer === "revealSeed" && (
-          <RevealSeedModalContent onDone={() => setActiveDrawer(null)} />
+        <Suspense
+          fallback={
+            <section className="glass-card" style={{ padding: 20, textAlign: "center" }}>
+              Loading tool...
+            </section>
+          }
+        >
+          {activeDrawer === "send" && (
+            <SendSheet
+              embedded
+              initialAssetCode={sendPrefill.assetCode}
+              initialAssetIssuer={sendPrefill.assetIssuer}
+              initialDestination={sendPrefill.destination}
+              onClose={() => setActiveDrawer(null)}
+            />
+          )}
+          {activeDrawer === "receive" && (
+            <ReceiveSheet embedded onClose={() => setActiveDrawer(null)} />
+          )}
+          {activeDrawer === "swap" && <SwapSheet initialFromAsset={swapFromPrefill} />}
+          {activeDrawer === "scan" && <ScanShieldSheet />}
+          {activeDrawer === "tools" && <ClassicToolsSheet />}
+          {activeDrawer === "ramp" && <RampSheet />}
+          {activeDrawer === "dapp" && <DappConnectSheet />}
+          {activeDrawer === "revealSeed" && (
+            <RevealSeedModalContent onDone={() => setActiveDrawer(null)} />
+          )}
+        </Suspense>
+      </ModalDrawer>
+
+      {/* Explicit SEP-43 window.stellar Consent Modal */}
+      <ModalDrawer
+        open={pendingDappConsent !== null}
+        title="dApp Signature Request (SEP-43)"
+        subtitle={
+          pendingDappConsent?.origin
+            ? `Origin: ${pendingDappConsent.origin}`
+            : "External dApp via window.stellar"
+        }
+        onClose={() => resolveDappConsent(false)}
+      >
+        {pendingDappConsent && (
+          <div style={{ display: "grid", gap: 12 }}>
+            <div className="aw-list-row">
+              <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Method</span>
+              <code>{pendingDappConsent.method}</code>
+            </div>
+            <div className="aw-list-row">
+              <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Payload</span>
+              <span style={{ fontSize: 12, wordBreak: "break-word" }}>
+                {pendingDappConsent.summary}
+              </span>
+            </div>
+            {pendingDappConsent.scanReport && (
+              <div
+                className={
+                  pendingDappConsent.scanReport.verdict === "warning"
+                    ? "aw-banner aw-banner--warn"
+                    : "aw-banner"
+                }
+                style={{ fontSize: 12 }}
+              >
+                <strong>
+                  Scan &amp; Shield: {pendingDappConsent.scanReport.verdict.toUpperCase()}
+                </strong>
+                {pendingDappConsent.scanReport.findings[0] && (
+                  <div style={{ marginTop: 4 }}>
+                    {pendingDappConsent.scanReport.findings[0].description}
+                  </div>
+                )}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                className="aw-btn-secondary"
+                style={{ flex: 1 }}
+                onClick={() => resolveDappConsent(false)}
+              >
+                Reject
+              </button>
+              <button
+                type="button"
+                className="aw-btn-primary"
+                style={{ flex: 1 }}
+                onClick={() => resolveDappConsent(true)}
+              >
+                Approve &amp; Sign
+              </button>
+            </div>
+          </div>
         )}
       </ModalDrawer>
     </div>
@@ -1846,7 +1977,19 @@ function RoutedExperience() {
   }, []);
 
   if (route.view === "landing" && !route.intent) {
-    return <LandingPage onLaunchApp={navigateToApp} />;
+    return (
+      <Suspense
+        fallback={
+          <main className="glass-canvas">
+            <div className="aw-shell" style={{ paddingTop: 48, textAlign: "center" }}>
+              Loading AstroWallet...
+            </div>
+          </main>
+        }
+      >
+        <LandingPage onLaunchApp={navigateToApp} />
+      </Suspense>
+    );
   }
 
   return (

@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { App } from "./App.js";
+import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import "./styles/tokens.css";
 import "./styles/glass.css";
 
@@ -9,8 +10,16 @@ if (!rootElement) {
   throw new Error("Root mount element #root not found");
 }
 
+if (import.meta.env.PROD && "serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    void navigator.serviceWorker.register("/sw.js").catch(() => undefined);
+  });
+}
+
 createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </StrictMode>,
 );

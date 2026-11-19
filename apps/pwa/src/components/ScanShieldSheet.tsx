@@ -1,16 +1,21 @@
 import { useState, type FormEvent } from "react";
-import type { ScanReport } from "@astrowallet/domain";
-import { scanTransactionEnvelopeXdr } from "@astrowallet/security-shield";
+import { StellarAddressSchema, type ScanReport } from "@astrowallet/domain";
+import {
+  inspectRawXdrInWorker,
+  scanTransactionEnvelopeXdr,
+} from "@astrowallet/security-shield";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 
 export function ScanShieldSheet() {
-  const { config } = useWallet();
+  const { config, verifiedAssets } = useWallet();
 
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
+  const [workerBusy, setWorkerBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [report, setReport] = useState<ScanReport | null>(null);
+  const [analyzedXdr, setAnalyzedXdr] = useState<string | null>(null);
   const [rawDecodedJson, setRawDecodedJson] = useState<string | null>(null);
   const [showRawInspector, setShowRawInspector] = useState(false);
 
@@ -22,7 +27,11 @@ export function ScanShieldSheet() {
     setBusy(true);
     setError(null);
     setReport(null);
+    setAnalyzedXdr(null);
     setRawDecodedJson(null);
+    setShowRawInspector(false);
+
+    const isAddress = StellarAddressSchema.safeParse(cleaned).success;
 
     try {
       // 1. Try server-assisted directory + SEP-29 + XDR scan first
@@ -36,11 +45,10 @@ export function ScanShieldSheet() {
       if (res && res.ok) {
         const body = (await res.json()) as {
           report: ScanReport;
-          decoded?: unknown;
         };
         setReport(body.report);
-        if (body.decoded) {
-          setRawDecodedJson(JSON.stringify(body.decoded, null, 2));
+        if (!isAddress) {
+          setAnalyzedXdr(cleaned);
         }
         return;
       }
@@ -48,9 +56,12 @@ export function ScanShieldSheet() {
       // 2. Offline / local zero-WASM fallback for XDR envelopes
       const local = scanTransactionEnvelopeXdr(cleaned, {
         networkPassphrase: config.networkPassphrase,
+        verifiedAssets,
       });
       setReport(local.report);
-      setRawDecodedJson(JSON.stringify(local.decoded, null, 2));
+      if (!isAddress) {
+        setAnalyzedXdr(cleaned);
+      }
     } catch (err) {
       setError(
         err instanceof Error
@@ -59,6 +70,27 @@ export function ScanShieldSheet() {
       );
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleToggleRawInspector = async () => {
+    if (showRawInspector) {
+      setShowRawInspector(false);
+      return;
+    }
+    setShowRawInspector(true);
+    if (!rawDecodedJson && analyzedXdr) {
+      setWorkerBusy(true);
+      try {
+        const pretty = await inspectRawXdrInWorker(analyzedXdr, config.networkPassphrase);
+        setRawDecodedJson(pretty);
+      } catch (err) {
+        setRawDecodedJson(
+          `Worker inspection failed: ${err instanceof Error ? err.message : "Invalid XDR"}`,
+        );
+      } finally {
+        setWorkerBusy(false);
+      }
     }
   };
 
@@ -133,18 +165,38 @@ export function ScanShieldSheet() {
                 ))}
               </ul>
             )}
+            {report.balanceDiffs.length > 0 && (
+              <div style={{ marginTop: 8, fontSize: 12 }}>
+                <div style={{ fontWeight: 700, marginBottom: 4 }}>Simulated Balance Diffs:</div>
+                <ul style={{ margin: 0, paddingLeft: 18 }}>
+                  {report.balanceDiffs.map((diff, idx) => (
+                    <li key={`${diff.address}-${diff.assetCode}-${idx}`}>
+                      <code>
+                        {diff.address.slice(0, 6)}…{diff.address.slice(-4)}
+                      </code>
+                      : <strong className="tabular-nums">{diff.delta} {diff.assetCode}</strong>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
 
-          {rawDecodedJson && (
+          {analyzedXdr && (
             <div>
               <button
                 type="button"
                 className="aw-chip-btn"
-                onClick={() => setShowRawInspector((v) => !v)}
+                disabled={workerBusy}
+                onClick={() => void handleToggleRawInspector()}
               >
-                {showRawInspector ? "Hide Raw XDR Inspector" : "Open Raw XDR Inspector"}
+                {workerBusy
+                  ? "Inspecting in Web Worker..."
+                  : showRawInspector
+                    ? "Hide Raw XDR Inspector"
+                    : "Open Raw XDR Inspector"}
               </button>
-              {showRawInspector && (
+              {showRawInspector && rawDecodedJson && (
                 <pre
                   style={{
                     marginTop: 8,

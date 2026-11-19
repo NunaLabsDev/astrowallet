@@ -59,10 +59,10 @@ export function DappConnectSheet() {
         />
         <div>
           <div style={{ fontWeight: 700, fontSize: 15 }}>
-            dApp Connect (Reown / Wallets Kit / SEP-43)
+            Local dApp JSON-RPC Sandbox (SEP-43 / WalletConnect Payload Tester)
           </div>
           <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-            CAIP-2 <code>{caip2Chain}</code> • Scan &amp; Shield enforced on every request
+            CAIP-2 <code>{caip2Chain}</code> • Scan &amp; Shield + explicit user approval enforced
           </div>
         </div>
       </div>
@@ -85,13 +85,11 @@ export function DappConnectSheet() {
             <div style={{ fontWeight: 700, fontSize: 13 }}>Reown AppKit / WalletConnect v2</div>
             <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
               {config.reownProjectId
-                ? `Project ID: ${config.reownProjectId.slice(0, 8)}…`
-                : "Set VITE_REOWN_PROJECT_ID to enable cloud relay pairing"}
+                ? `Project ID ${config.reownProjectId.slice(0, 8)}… configured — cloud QR relay activates once @reown/walletkit is connected`
+                : "Local sandbox mode — cloud WalletConnect v2 QR pairing activates once @reown/walletkit + VITE_REOWN_PROJECT_ID is connected"}
             </div>
           </div>
-          <span className={config.reownProjectId ? "glass-pill glass-pill--gold" : "glass-pill"}>
-            {config.reownProjectId ? "Ready" : "Local RPC"}
-          </span>
+          <span className="glass-pill">Sandbox</span>
         </div>
       </div>
 

@@ -124,6 +124,7 @@ export function SwapSheet({
         toAsset: toAsset.trim(),
         amount: amount.trim(),
         slippageBps,
+        sourceAddress: activeAccount?.address,
       });
       setQuote(res);
     } catch (err) {

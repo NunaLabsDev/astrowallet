@@ -111,7 +111,7 @@ export function AccountSwitcher() {
             <button
               type="submit"
               className="aw-btn-primary"
-              disabled={busy || pin.length < 4}
+              disabled={busy || pin.length < 6}
             >
               {busy ? "Deriving..." : "Derive & Save"}
             </button>

@@ -1,5 +1,9 @@
-import { useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { ClassicAddressSchema, MuxedAddressSchema, type ClassicAddress } from "@astrowallet/domain";
+import {
+  filterSpamClaimableBalances,
+  sanitizeMemoPhishing,
+} from "@astrowallet/security-shield";
 import { decodeMuxedAddress, encodeMuxedAddress } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
@@ -10,6 +14,7 @@ export function ClassicToolsSheet() {
     accountState,
     claimableBalances,
     openOffers,
+    verifiedAssets,
     addOrRemoveTrustline,
     reclaimZeroBalanceReserves,
     claimBalanceById,
@@ -35,6 +40,17 @@ export function ClassicToolsSheet() {
   const [zenithSuccess, setZenithSuccess] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [showSpamClaimables, setShowSpamClaimables] = useState(false);
+
+  const safeClaimableIds = useMemo(() => {
+    const filtered = filterSpamClaimableBalances(claimableBalances, { verifiedAssets });
+    return new Set(filtered.map((c) => c.id));
+  }, [claimableBalances, verifiedAssets]);
+
+  const hiddenSpamCount = Math.max(0, claimableBalances.length - safeClaimableIds.size);
+  const visibleClaimables = showSpamClaimables
+    ? claimableBalances
+    : claimableBalances.filter((c) => safeClaimableIds.has(c.id));
 
   if (!activeAccount) return null;
 
@@ -134,14 +150,25 @@ export function ClassicToolsSheet() {
     setErrorMsg(null);
     setStatusMsg(null);
 
-    const parsedSellIssuer =
-      sellCode.trim().toUpperCase() === "XLM" && !sellIssuer.trim()
-        ? undefined
-        : ClassicAddressSchema.parse(sellIssuer.trim());
-    const parsedBuyIssuer =
-      buyCode.trim().toUpperCase() === "XLM" && !buyIssuer.trim()
-        ? undefined
-        : ClassicAddressSchema.parse(buyIssuer.trim());
+    let parsedSellIssuer: ClassicAddress | undefined;
+    if (!(sellCode.trim().toUpperCase() === "XLM" && !sellIssuer.trim())) {
+      const checkSell = ClassicAddressSchema.safeParse(sellIssuer.trim());
+      if (!checkSell.success) {
+        setErrorMsg("Enter a valid Classic G... selling asset issuer.");
+        return;
+      }
+      parsedSellIssuer = checkSell.data;
+    }
+
+    let parsedBuyIssuer: ClassicAddress | undefined;
+    if (!(buyCode.trim().toUpperCase() === "XLM" && !buyIssuer.trim())) {
+      const checkBuy = ClassicAddressSchema.safeParse(buyIssuer.trim());
+      if (!checkBuy.success) {
+        setErrorMsg("Enter a valid Classic G... buying asset issuer.");
+        return;
+      }
+      parsedBuyIssuer = checkBuy.data;
+    }
 
     setBusy(true);
     try {
@@ -305,26 +332,40 @@ export function ClassicToolsSheet() {
 
       {/* 4. Claimable Balances */}
       <div style={{ display: "grid", gap: 8, paddingTop: 8, borderTop: "1px solid rgba(165, 139, 224, 0.2)" }}>
-        <div style={{ fontWeight: 700, fontSize: 13 }}>
-          Claimable Balances ({claimableBalances.length})
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <div style={{ fontWeight: 700, fontSize: 13 }}>
+            Claimable Balances ({visibleClaimables.length})
+          </div>
+          {hiddenSpamCount > 0 && (
+            <button
+              type="button"
+              className="aw-chip-btn"
+              onClick={() => setShowSpamClaimables((v) => !v)}
+            >
+              {showSpamClaimables ? "Hide spam" : `Show hidden spam (${hiddenSpamCount})`}
+            </button>
+          )}
         </div>
         {!isClassic ? (
           <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
             Smart Accounts (C...) cannot claim Classic Claimable Balances directly; route to your linked G... account.
           </div>
-        ) : claimableBalances.length === 0 ? (
+        ) : visibleClaimables.length === 0 ? (
           <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-            No pending Claimable Balances for this account.
+            {hiddenSpamCount > 0
+              ? `${hiddenSpamCount} dust/unverified claimable balance(s) hidden by Scan & Shield spam filter.`
+              : "No pending Claimable Balances for this account."}
           </div>
         ) : (
-          claimableBalances.map((cb) => (
+          visibleClaimables.map((cb) => (
             <div key={cb.id} className="aw-list-row">
               <div>
                 <div className="tabular-nums" style={{ fontWeight: 700, fontSize: 13 }}>
-                  {cb.amount} {cb.assetCode}
+                  {cb.amount} {sanitizeMemoPhishing(cb.assetCode)}
                 </div>
                 <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
                   ID {cb.id.slice(0, 10)}…{cb.id.slice(-6)}
+                  {cb.sponsor ? ` · Sponsor: ${sanitizeMemoPhishing(cb.sponsor.slice(0, 8))}…` : ""}
                 </div>
               </div>
               <button

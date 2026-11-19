@@ -14,7 +14,6 @@ type RampProvider = "circle-cctp" | "moonpay" | "transak";
 
 export function RampSheet() {
   const { config, activeAccount } = useWallet();
-  const env = import.meta.env as Record<string, string | undefined>;
 
   const [provider, setProvider] = useState<RampProvider>("circle-cctp");
   const [direction, setDirection] = useState<"onramp" | "offramp">("onramp");
@@ -22,12 +21,12 @@ export function RampSheet() {
   const [fiatCurrency, setFiatCurrency] = useState("USD");
   const [amount, setAmount] = useState("25.00");
 
-  const [cctpBridgeUrl, setCctpBridgeUrl] = useState(() => env.VITE_CCTP_BRIDGE_URL ?? "");
+  const [cctpBridgeUrl, setCctpBridgeUrl] = useState(() => config.cctpBridgeUrl ?? "");
   const [forwarderId, setForwarderId] = useState(
-    () => env.VITE_CCTP_FORWARDER_CONTRACT_ID ?? "",
+    () => config.cctpForwarderContractId ?? "",
   );
-  const [moonPayUrl, setMoonPayUrl] = useState(() => env.VITE_MOONPAY_WIDGET_URL ?? "");
-  const [transakUrl, setTransakUrl] = useState(() => env.VITE_TRANSAK_WIDGET_URL ?? "");
+  const [moonPayUrl, setMoonPayUrl] = useState(() => config.moonPayWidgetUrl ?? "");
+  const [transakUrl, setTransakUrl] = useState(() => config.transakWidgetUrl ?? "");
 
   const [busy, setBusy] = useState(false);
   const [sessionUrl, setSessionUrl] = useState<string | null>(null);

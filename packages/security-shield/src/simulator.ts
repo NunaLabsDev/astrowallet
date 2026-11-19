@@ -1,9 +1,19 @@
+import { StellarAddressSchema, type BalanceDiff, type StellarAddress } from "@astrowallet/domain";
+
 export interface SimulatedSorobanResult {
   ok: boolean;
   error?: string | undefined;
   minResourceFeeStroops: string;
   requiresProtocol23Restore: boolean;
   eventsCount: number;
+  balanceDiffs: BalanceDiff[];
+}
+
+interface RawStateChange {
+  type?: string;
+  key?: string;
+  before?: unknown;
+  after?: unknown;
 }
 
 interface RpcSimulateResponse {
@@ -11,6 +21,7 @@ interface RpcSimulateResponse {
     error?: string;
     minResourceFee?: string;
     events?: unknown[];
+    stateChanges?: RawStateChange[];
     restorePreamble?: {
       minResourceFee?: string;
       transactionData?: string;
@@ -19,6 +30,66 @@ interface RpcSimulateResponse {
   error?: {
     message?: string;
   };
+}
+
+function extractBalanceFromStateEntry(entry: unknown): {
+  address?: string | undefined;
+  amount?: bigint | undefined;
+} | null {
+  if (!entry || typeof entry !== "object") return null;
+  const obj = entry as Record<string, unknown>;
+
+  // Handle JSON-formatted ledger entry balance shapes defensively
+  const balanceVal =
+    typeof obj.amount === "string" || typeof obj.amount === "number" || typeof obj.amount === "bigint"
+      ? BigInt(obj.amount)
+      : typeof obj.balance === "string" || typeof obj.balance === "number" || typeof obj.balance === "bigint"
+        ? BigInt(obj.balance)
+        : undefined;
+
+  const addrVal =
+    typeof obj.address === "string"
+      ? obj.address
+      : typeof obj.accountId === "string"
+        ? obj.accountId
+        : undefined;
+
+  if (balanceVal === undefined) return null;
+  return { address: addrVal, amount: balanceVal };
+}
+
+function parseStateChangeBalanceDiffs(
+  stateChanges: readonly RawStateChange[] | undefined,
+): BalanceDiff[] {
+  if (!Array.isArray(stateChanges) || stateChanges.length === 0) {
+    return [];
+  }
+
+  const diffs: BalanceDiff[] = [];
+  for (const sc of stateChanges) {
+    const beforeInfo = extractBalanceFromStateEntry(sc.before);
+    const afterInfo = extractBalanceFromStateEntry(sc.after);
+    const rawAddress = afterInfo?.address ?? beforeInfo?.address;
+    const parsedAddr = rawAddress ? StellarAddressSchema.safeParse(rawAddress) : null;
+    if (!parsedAddr?.success) continue;
+
+    const beforeAmt = beforeInfo?.amount ?? 0n;
+    const afterAmt = afterInfo?.amount ?? 0n;
+    const delta = afterAmt - beforeAmt;
+    if (delta === 0n) continue;
+
+    const sign = delta > 0n ? "+" : "-";
+    const abs = delta > 0n ? delta : -delta;
+    const whole = abs / 10_000_000n;
+    const frac = (abs % 10_000_000n).toString().padStart(7, "0");
+
+    diffs.push({
+      address: parsedAddr.data as StellarAddress,
+      assetCode: "XLM",
+      delta: `${sign}${whole.toString()}.${frac}`,
+    });
+  }
+  return diffs;
 }
 
 /**
@@ -42,6 +113,7 @@ export async function simulateSorobanTransaction(
           method: "simulateTransaction",
           params: {
             transaction: xdrBase64,
+            xdrFormat: "json",
           },
         }),
       });
@@ -58,6 +130,7 @@ export async function simulateSorobanTransaction(
           minResourceFeeStroops: "0",
           requiresProtocol23Restore: false,
           eventsCount: 0,
+          balanceDiffs: [],
         };
       }
 
@@ -69,6 +142,7 @@ export async function simulateSorobanTransaction(
           minResourceFeeStroops: "0",
           requiresProtocol23Restore: false,
           eventsCount: 0,
+          balanceDiffs: [],
         };
       }
 
@@ -78,6 +152,7 @@ export async function simulateSorobanTransaction(
         minResourceFeeStroops: res.minResourceFee ?? "0",
         requiresProtocol23Restore: requiresRestore,
         eventsCount: res.events?.length ?? 0,
+        balanceDiffs: parseStateChangeBalanceDiffs(res.stateChanges),
       };
     } catch (err) {
       lastError = err;
@@ -90,5 +165,6 @@ export async function simulateSorobanTransaction(
     minResourceFeeStroops: "0",
     requiresProtocol23Restore: false,
     eventsCount: 0,
+    balanceDiffs: [],
   };
 }

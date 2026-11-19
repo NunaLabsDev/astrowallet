@@ -1,3 +1,4 @@
+import { MuxedAccount, StrKey } from "@stellar/stellar-sdk";
 import type {
   BalanceDiff,
   ScanReport,
@@ -33,6 +34,22 @@ export interface SecurityRuleContext {
 
 const PROTECTED_ASSET_SYMBOLS = new Set(["USDC", "EURC", "PYUSD", "AQUA", "BTC", "ETH"]);
 const PHISHING_URL_REGEX = /(?:https?:\/\/|www\.|[a-z0-9-]+\.(?:com|io|org|net|xyz|app|gg|me|link|claim|airdrop)\b)/i;
+
+/**
+ * Extracts the underlying Classic G... address from a CAP-27 M... muxed address
+ * so directory and SEP-29 rules cannot be bypassed via muxed wrapping.
+ */
+export function extractBaseDestination(destination: string): string {
+  const cleaned = destination.trim();
+  if (!cleaned.startsWith("M") || !StrKey.isValidMed25519PublicKey(cleaned)) {
+    return cleaned;
+  }
+  try {
+    return MuxedAccount.fromAddress(cleaned, "0").baseAccount().accountId();
+  } catch {
+    return cleaned;
+  }
+}
 
 /**
  * Aggregates security findings deterministically into a fail-closed verdict.
@@ -157,9 +174,12 @@ export function evaluateDecodedTransaction(
       });
     }
 
-    // 3. Directory & SEP-29 Exchange Memo checks on destination
+    // 3. Directory & SEP-29 Exchange Memo checks on destination (resolving M... -> base G...)
     if (op.destination) {
-      const dirEntry = context.directoryEntries?.get(op.destination);
+      const baseDest = extractBaseDestination(op.destination);
+      const dirEntry =
+        context.directoryEntries?.get(baseDest) ??
+        context.directoryEntries?.get(op.destination);
       if (dirEntry?.tags.some((t) => t === "malicious" || t === "unsafe")) {
         findings.push({
           code: "DIRECTORY_MALICIOUS_DESTINATION",
@@ -173,6 +193,7 @@ export function evaluateDecodedTransaction(
       const needsMemo =
         Boolean(dirEntry?.memoRequired) ||
         Boolean(dirEntry?.tags.includes("exchange")) ||
+        Boolean(context.memoRequiredDestinations?.has(baseDest)) ||
         Boolean(context.memoRequiredDestinations?.has(op.destination));
 
       if (needsMemo) {
@@ -202,6 +223,16 @@ export function evaluateDecodedTransaction(
         PROTECTED_ASSET_SYMBOLS.has(asset.code.toUpperCase())
       ) {
         const verifiedList = context.verifiedAssets ?? [];
+        if (verifiedList.length === 0) {
+          findings.push({
+            code: "UNVERIFIED_PROTECTED_ASSET_NO_REGISTRY",
+            severity: "warning",
+            title: `Unverified ${asset.code} Issuer (No SEP-42 Registry)`,
+            description: `No SEP-42 asset list is configured to verify ${asset.code} (${asset.issuer}). Confirm the issuer address carefully before signing.`,
+            blocksSigning: false,
+          });
+          continue;
+        }
         const isVerified = verifiedList.some(
           (v) =>
             v.code.toUpperCase() === asset.code.toUpperCase() &&

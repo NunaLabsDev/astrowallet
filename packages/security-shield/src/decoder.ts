@@ -3,7 +3,7 @@ import {
   FeeBumpTransaction,
   TransactionBuilder,
   scValToNative,
-  type xdr,
+  xdr,
 } from "@stellar/stellar-sdk";
 
 export interface DecodedMemo {
@@ -53,6 +53,9 @@ export interface DecodedTransactionSummary {
 function safeFormatScVal(val: xdr.ScVal): string {
   try {
     const native = scValToNative(val);
+    if (native instanceof Uint8Array) {
+      return Array.from(native, (b) => b.toString(16).padStart(2, "0")).join("");
+    }
     if (typeof native === "bigint") return native.toString();
     if (typeof native === "string") return native;
     if (typeof native === "number" || typeof native === "boolean") return String(native);
@@ -252,4 +255,33 @@ export function decodeTransactionEnvelope(
     },
     operations,
   };
+}
+
+export interface DecodedHostFunction {
+  type: string;
+  contractId?: string | undefined;
+  functionName?: string | undefined;
+}
+
+/**
+ * Decodes a Base64 `HostFunction` XDR (Soroban relay payloads) without exposing the SDK to callers.
+ * Throws on malformed XDR so relays can reject with HTTP 400.
+ */
+export function decodeHostFunctionXdr(funcXdrBase64: string): DecodedHostFunction {
+  const hostFn = xdr.HostFunction.fromXDR(funcXdrBase64.trim(), "base64");
+  if (hostFn.type === "hostFunctionTypeInvokeContract") {
+    const invoke = hostFn.invokeContract;
+    let contractId: string | undefined;
+    try {
+      contractId = Address.fromScAddress(invoke.contractAddress).toString();
+    } catch {
+      contractId = undefined;
+    }
+    return {
+      type: hostFn.type,
+      contractId,
+      functionName: decodeFunctionName(invoke.functionName),
+    };
+  }
+  return { type: hostFn.type };
 }

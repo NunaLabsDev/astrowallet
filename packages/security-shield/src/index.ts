@@ -1,19 +1,28 @@
 import type {
+  BalanceDiff,
   ScanReport,
   ScannerPort,
   SecurityFinding,
   StellarAddress,
 } from "@astrowallet/domain";
-import { decodeTransactionEnvelope } from "./decoder.js";
+import {
+  decodeTransactionEnvelope,
+  type DecodedSorobanInvocation,
+} from "./decoder.js";
+import type { RawXdrInspectRequest, RawXdrInspectResponse } from "./raw-xdr.worker.js";
 import {
   classifyVerdict,
   evaluateDecodedTransaction,
+  extractBaseDestination,
   type DirectoryTagEntry,
   type VerifiedAssetEntry,
 } from "./rules.js";
+import { fetchSep42VerifiedAssets } from "./sep42.js";
+import { simulateSorobanTransaction } from "./simulator.js";
 
 export * from "./decoder.js";
 export * from "./rules.js";
+export * from "./sep42.js";
 export * from "./simulator.js";
 
 export interface SecurityShieldConfig {
@@ -27,11 +36,80 @@ export interface SecurityShieldConfig {
     | ((address: string) => Promise<DirectoryTagEntry | null>)
     | undefined;
   memoRequiredLookup?: ((address: string) => Promise<boolean>) | undefined;
+  fetchFn?: typeof fetch | undefined;
 }
 
 export interface SecurityShieldHandle {
   readonly config: SecurityShieldConfig;
   createScanner(): ScannerPort;
+}
+
+function collectSorobanContractIds(
+  inv: DecodedSorobanInvocation,
+  out: Set<string>,
+): void {
+  if (inv.contractId) {
+    out.add(inv.contractId);
+  }
+  for (const sub of inv.subInvocations) {
+    collectSorobanContractIds(sub, out);
+  }
+}
+
+let workerReqSeq = 1;
+
+/**
+ * Inspects a raw transaction XDR inside a lazy-loaded Web Worker (falling back to inline decode
+ * in non-Worker environments).
+ */
+export async function inspectRawXdrInWorker(
+  xdrBase64: string,
+  networkPassphrase: string,
+): Promise<string> {
+  if (typeof Worker === "undefined") {
+    const decoded = decodeTransactionEnvelope(xdrBase64, networkPassphrase);
+    return JSON.stringify(decoded, null, 2);
+  }
+
+  try {
+    const worker = new Worker(new URL("./raw-xdr.worker.js", import.meta.url), {
+      type: "module",
+    });
+    const id = workerReqSeq;
+    workerReqSeq += 1;
+
+    return await new Promise<string>((resolve, reject) => {
+      const cleanup = () => {
+        worker.terminate();
+      };
+
+      worker.onmessage = (event: MessageEvent<RawXdrInspectResponse>) => {
+        if (event.data.id !== id) return;
+        cleanup();
+        if (!event.data.ok) {
+          reject(new Error(event.data.error));
+          return;
+        }
+        resolve(event.data.jsonPretty);
+      };
+
+      worker.onerror = () => {
+        cleanup();
+        try {
+          const decoded = decodeTransactionEnvelope(xdrBase64, networkPassphrase);
+          resolve(JSON.stringify(decoded, null, 2));
+        } catch (err) {
+          reject(err);
+        }
+      };
+
+      const req: RawXdrInspectRequest = { id, xdrBase64, networkPassphrase };
+      worker.postMessage(req);
+    });
+  } catch {
+    const decoded = decodeTransactionEnvelope(xdrBase64, networkPassphrase);
+    return JSON.stringify(decoded, null, 2);
+  }
 }
 
 /**
@@ -47,6 +125,7 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
     verifiedAssets: config.verifiedAssets ? [...config.verifiedAssets] : undefined,
     directoryLookup: config.directoryLookup,
     memoRequiredLookup: config.memoRequiredLookup,
+    fetchFn: config.fetchFn,
   });
 
   return {
@@ -67,40 +146,112 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
 
           const directoryMap = new Map<string, DirectoryTagEntry>();
           const memoRequiredSet = new Set<string>();
-
           const addressesToInspect = new Set<string>();
+
+          let hasSorobanOp = false;
           for (const op of decoded.operations) {
-            if (op.destination) addressesToInspect.add(op.destination);
-            if (op.soroban?.contractId) addressesToInspect.add(op.soroban.contractId);
+            if (op.destination) {
+              addressesToInspect.add(op.destination);
+              addressesToInspect.add(extractBaseDestination(op.destination));
+            }
+            if (op.soroban) {
+              collectSorobanContractIds(op.soroban, addressesToInspect);
+            }
+            if (op.type === "invokeHostFunction") {
+              hasSorobanOp = true;
+            }
           }
 
-          await Promise.all(
-            [...addressesToInspect].map(async (addr) => {
-              if (frozenConfig.directoryLookup) {
-                const entry = await frozenConfig.directoryLookup(addr).catch(() => null);
-                if (entry) directoryMap.set(addr, entry);
-              }
-              if (frozenConfig.memoRequiredLookup) {
-                const req = await frozenConfig.memoRequiredLookup(addr).catch(() => false);
-                if (req) memoRequiredSet.add(addr);
-              }
-            }),
-          );
+          const fetchFn = frozenConfig.fetchFn ?? fetch;
 
-          return evaluateDecodedTransaction(decoded, {
+          const [resolvedVerifiedAssets, sorobanSim] = await Promise.all([
+            frozenConfig.verifiedAssets !== undefined
+              ? Promise.resolve(frozenConfig.verifiedAssets)
+              : frozenConfig.sep42AssetListUrls.length > 0
+                ? fetchSep42VerifiedAssets(frozenConfig.sep42AssetListUrls, { fetchFn })
+                : Promise.resolve(undefined),
+            hasSorobanOp && frozenConfig.rpcUrls.length > 0
+              ? simulateSorobanTransaction(frozenConfig.rpcUrls, xdrBase64, fetchFn)
+              : Promise.resolve(null),
+            Promise.all(
+              [...addressesToInspect].map(async (addr) => {
+                if (frozenConfig.directoryLookup) {
+                  const entry = await frozenConfig.directoryLookup(addr).catch(() => null);
+                  if (entry) directoryMap.set(addr, entry);
+                }
+                if (frozenConfig.memoRequiredLookup) {
+                  const req = await frozenConfig.memoRequiredLookup(addr).catch(() => false);
+                  if (req) memoRequiredSet.add(addr);
+                }
+              }),
+            ),
+          ]);
+
+          const simulatedBalanceDiffs: BalanceDiff[] | undefined =
+            sorobanSim && sorobanSim.balanceDiffs.length > 0
+              ? sorobanSim.balanceDiffs
+              : undefined;
+
+          const baseReport = evaluateDecodedTransaction(decoded, {
             networkPassphrase: frozenConfig.networkPassphrase,
             directoryEntries: directoryMap,
-            verifiedAssets: frozenConfig.verifiedAssets,
+            verifiedAssets: resolvedVerifiedAssets,
             memoRequiredDestinations: memoRequiredSet,
+            simulatedBalanceDiffs,
           });
+
+          if (!sorobanSim) {
+            return baseReport;
+          }
+
+          const extraFindings: SecurityFinding[] = [...baseReport.findings];
+          if (!sorobanSim.ok) {
+            extraFindings.push({
+              code: "SOROBAN_SIMULATION_FAILED",
+              severity: "warning",
+              title: "Soroban RPC Simulation Warning",
+              description: sorobanSim.error ?? "Unable to simulate Soroban invocation",
+              blocksSigning: false,
+            });
+          } else if (sorobanSim.requiresProtocol23Restore) {
+            extraFindings.push({
+              code: "SOROBAN_TTL_RESTORE_REQUIRED",
+              severity: "warning",
+              title: "Soroban State Restore Required",
+              description:
+                "Contract storage entry expired and requires Protocol 23 auto-restore before execution.",
+              blocksSigning: false,
+            });
+          }
+
+          let estimatedFeeStroops = baseReport.estimatedFeeStroops;
+          if (/^\d+$/.test(sorobanSim.minResourceFeeStroops)) {
+            estimatedFeeStroops = (
+              BigInt(baseReport.estimatedFeeStroops) +
+              BigInt(sorobanSim.minResourceFeeStroops)
+            ).toString();
+          }
+
+          return {
+            ...baseReport,
+            verdict: classifyVerdict(extraFindings),
+            findings: extraFindings,
+            estimatedFeeStroops,
+          };
         },
 
         async scanAddress(address: StellarAddress): Promise<ScanReport> {
           const findings: SecurityFinding[] = [];
           let requiresMemoCheck = false;
+          const lookupAddr = extractBaseDestination(address);
 
           if (frozenConfig.directoryLookup) {
-            const entry = await frozenConfig.directoryLookup(address).catch(() => null);
+            const entry =
+              (await frozenConfig.directoryLookup(lookupAddr).catch(() => null)) ??
+              (lookupAddr !== address
+                ? await frozenConfig.directoryLookup(address).catch(() => null)
+                : null);
+
             if (entry) {
               if (entry.tags.some((t) => t === "malicious" || t === "unsafe")) {
                 findings.push({
@@ -117,7 +268,8 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
                   code: "EXCHANGE_MEMO_REQUIRED",
                   severity: "warning",
                   title: `Exchange Account (${entry.name ?? "CEX"}) — Memo Required`,
-                  description: "Always include a deposit Memo or M... muxed address when sending to this exchange.",
+                  description:
+                    "Always include a deposit Memo or M... muxed address when sending to this exchange.",
                   blocksSigning: false,
                 });
               }
@@ -125,14 +277,17 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
           }
 
           if (frozenConfig.memoRequiredLookup) {
-            const sep29 = await frozenConfig.memoRequiredLookup(address).catch(() => false);
+            const sep29 = await frozenConfig
+              .memoRequiredLookup(lookupAddr)
+              .catch(() => false);
             if (sep29 && !requiresMemoCheck) {
               requiresMemoCheck = true;
               findings.push({
                 code: "SEP29_MEMO_REQUIRED",
                 severity: "warning",
                 title: "SEP-29 config.memo_required Enabled",
-                description: "This account enforces SEP-29 memo_required on incoming transfers.",
+                description:
+                  "This account enforces SEP-29 memo_required on incoming transfers.",
                 blocksSigning: false,
               });
             }

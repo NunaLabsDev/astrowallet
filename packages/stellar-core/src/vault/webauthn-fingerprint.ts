@@ -51,6 +51,34 @@ export async function isFingerprintSupported(): Promise<boolean> {
   }
 }
 
+const PRF_HKDF_INFO = new TextEncoder().encode("astrowallet:webauthn-prf-pin-wrap:v1");
+
+async function deriveAesKeyFromPrf(
+  prfBytes: Uint8Array<ArrayBuffer>,
+  salt: Uint8Array<ArrayBuffer>,
+  usage: KeyUsage,
+): Promise<CryptoKey> {
+  const hkdfKey = await crypto.subtle.importKey(
+    "raw",
+    prfBytes,
+    { name: "HKDF" },
+    false,
+    ["deriveKey"],
+  );
+  return crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt,
+      info: PRF_HKDF_INFO,
+    },
+    hkdfKey,
+    { name: "AES-GCM", length: 256 },
+    false,
+    [usage],
+  );
+}
+
 /**
  * Enrolls optional Fingerprint / device biometric convenience unlock via WebAuthn PRF.
  * Degrades cleanly if the browser/authenticator does not expose PRF.
@@ -58,6 +86,7 @@ export async function isFingerprintSupported(): Promise<boolean> {
 export async function enrollFingerprintUnlock(
   pinOrPassphrase: string,
   accountLabel = "AstroWallet",
+  rpId?: string,
 ): Promise<{ enrolled: true } | { enrolled: false; reason: string }> {
   const supported = await isFingerprintSupported();
   if (!supported) {
@@ -77,10 +106,11 @@ export async function enrollFingerprintUnlock(
   crypto.getRandomValues(iv);
 
   const extensionsRequest = { prf: { eval: { first: prfSalt } } } as unknown as AuthenticationExtensionsClientInputs;
+  const resolvedRpId = rpId?.trim() || window.location.hostname;
 
   const credential = (await navigator.credentials.create({
     publicKey: {
-      rp: { name: "AstroWallet", id: window.location.hostname },
+      rp: { name: "AstroWallet", id: resolvedRpId },
       user: {
         id: userId,
         name: accountLabel,
@@ -115,19 +145,15 @@ export async function enrollFingerprintUnlock(
   }
 
   const pinBytes = new TextEncoder().encode(pinOrPassphrase);
+  const pinCopy = new Uint8Array(new ArrayBuffer(pinBytes.byteLength));
+  pinCopy.set(pinBytes);
+  zeroizeBytes(pinBytes);
+
   const prfKeyBytes = new Uint8Array(new ArrayBuffer(prfOutput.byteLength));
   prfKeyBytes.set(new Uint8Array(prfOutput));
 
   try {
-    const aesKey = await crypto.subtle.importKey(
-      "raw",
-      prfKeyBytes,
-      { name: "AES-GCM" },
-      false,
-      ["encrypt"],
-    );
-    const pinCopy = new Uint8Array(new ArrayBuffer(pinBytes.byteLength));
-    pinCopy.set(pinBytes);
+    const aesKey = await deriveAesKeyFromPrf(prfKeyBytes, prfSalt, "encrypt");
     const wrapped = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aesKey, pinCopy);
 
     await saveBiometricRecord({
@@ -140,7 +166,7 @@ export async function enrollFingerprintUnlock(
 
     return { enrolled: true };
   } finally {
-    zeroizeBytes(pinBytes);
+    zeroizeBytes(pinCopy);
     zeroizeBytes(prfKeyBytes);
   }
 }
@@ -148,7 +174,7 @@ export async function enrollFingerprintUnlock(
 /**
  * Unlocks the wrapped vault PIN using platform Fingerprint / Biometrics.
  */
-export async function unlockWithFingerprint(): Promise<string> {
+export async function unlockWithFingerprint(rpId?: string): Promise<string> {
   const record = await loadBiometricRecord();
   if (!record) {
     throw new Error("Fingerprint quick-unlock is not enrolled on this device");
@@ -162,11 +188,12 @@ export async function unlockWithFingerprint(): Promise<string> {
   const ciphertext = fromB64(record.wrappedPinCiphertextB64);
 
   const extensionsRequest = { prf: { eval: { first: prfSalt } } } as unknown as AuthenticationExtensionsClientInputs;
+  const resolvedRpId = rpId?.trim() || window.location.hostname;
 
   const assertion = (await navigator.credentials.get({
     publicKey: {
       challenge,
-      rpId: window.location.hostname,
+      rpId: resolvedRpId,
       allowCredentials: [{ type: "public-key", id: credId }],
       userVerification: "preferred",
       timeout: 60_000,
@@ -189,13 +216,7 @@ export async function unlockWithFingerprint(): Promise<string> {
   let decryptedBytes = new Uint8Array(0);
 
   try {
-    const aesKey = await crypto.subtle.importKey(
-      "raw",
-      prfKeyBytes,
-      { name: "AES-GCM" },
-      false,
-      ["decrypt"],
-    );
+    const aesKey = await deriveAesKeyFromPrf(prfKeyBytes, prfSalt, "decrypt");
     const plainBuf = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, aesKey, ciphertext);
     decryptedBytes = new Uint8Array(plainBuf);
     return new TextDecoder().decode(decryptedBytes);

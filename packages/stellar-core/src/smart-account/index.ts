@@ -12,7 +12,7 @@ import {
   Operation,
   StrKey,
   nativeToScVal,
-  type xdr,
+  xdr,
 } from "@stellar/stellar-sdk";
 
 export interface CounterfactualSmartAccountInput {
@@ -40,15 +40,33 @@ function bytesToHex(bytes: Uint8Array): string {
   return out;
 }
 
+function hexToBytes(hex: string, expectedLength?: number): Uint8Array {
+  const cleaned = hex.trim().toLowerCase().replace(/^0x/, "");
+  if (!/^[0-9a-f]+$/.test(cleaned) || cleaned.length % 2 !== 0) {
+    throw new Error("Expected a valid even-length hexadecimal string");
+  }
+  const out = new Uint8Array(cleaned.length / 2);
+  for (let i = 0; i < cleaned.length; i += 2) {
+    out[i / 2] = parseInt(cleaned.slice(i, i + 2), 16);
+  }
+  if (expectedLength !== undefined && out.length !== expectedLength) {
+    throw new Error(`Expected ${expectedLength} bytes, got ${out.length}`);
+  }
+  return out;
+}
+
 /**
- * Computes a deterministic counterfactual C... Soroban Smart Account address
- * paired with the user's SEP-0005 G... account as on-chain Recovery Guardian.
+ * Computes the deterministic Stellar CAP-46 counterfactual C... Soroban Smart Account address
+ * deployed by the user's SEP-0005 G... Recovery Guardian.
  */
 export function deriveCounterfactualSmartAccount(
   input: CounterfactualSmartAccountInput,
 ): SmartAccountDescriptor {
   if (!/^[a-fA-F0-9]{64}$/.test(input.wasmHashHex)) {
     throw new Error("wasmHashHex must be a 64-character hex string");
+  }
+  if (!StrKey.isValidEd25519PublicKey(input.guardianAddress)) {
+    throw new Error("guardianAddress must be a valid Classic G... address");
   }
 
   const saltSeed = [
@@ -59,17 +77,22 @@ export function deriveCounterfactualSmartAccount(
   ].join(":");
   const saltBytes = sha256(new TextEncoder().encode(saltSeed));
   const networkId = sha256(new TextEncoder().encode(input.networkPassphrase));
-  const guardianPubKey = StrKey.decodeEd25519PublicKey(input.guardianAddress);
 
-  // Deterministic contract ID preimage digest: sha256(networkId || "C_ID" || guardianPubKey || salt)
-  const preimage = new Uint8Array(32 + 4 + 32 + 32);
-  preimage.set(networkId, 0);
-  preimage.set(new TextEncoder().encode("C_ID"), 32);
-  preimage.set(guardianPubKey, 36);
-  preimage.set(saltBytes, 68);
+  const fromAddress = new xdr.ContractIdPreimageFromAddress({
+    address: new Address(input.guardianAddress).toScAddress(),
+    salt: saltBytes,
+  });
+  const preimage = xdr.HashIdPreimage.envelopeTypeContractId(
+    new xdr.HashIdPreimageContractId({
+      networkId: networkId,
+      contractIdPreimage: xdr.ContractIdPreimage.contractIdPreimageFromAddress(fromAddress),
+    }),
+  );
 
-  const contractHash = sha256(preimage);
-  const contractAddress = StrKey.encodeContract(contractHash) as ContractAddress;
+  const contractHash = sha256(preimage.toXDR());
+  const contractAddress = StrKey.encodeContract(
+    contractHash,
+  ) as ContractAddress;
 
   return {
     contractAddress,
@@ -79,6 +102,28 @@ export function deriveCounterfactualSmartAccount(
     dailySpendLimitXlm: input.dailySpendLimitXlm ?? "500.00",
     capabilities: defaultCapabilitiesForKind("smart"),
   };
+}
+
+/**
+ * Builds the Soroban `createCustomContract` CAP-46 operation deploying a counterfactual
+ * Smart Account C... deterministically from the user's G... guardian address and salt.
+ */
+export function buildDeploySmartAccountOperation(input: {
+  guardianAddress: ClassicAddress;
+  wasmHashHex: string;
+  saltHex: string;
+}): xdr.Operation {
+  if (!StrKey.isValidEd25519PublicKey(input.guardianAddress)) {
+    throw new Error("guardianAddress must be a valid Classic G... address");
+  }
+  const wasmHash = hexToBytes(input.wasmHashHex, 32);
+  const salt = hexToBytes(input.saltHex, 32);
+
+  return Operation.createCustomContract({
+    address: new Address(input.guardianAddress),
+    wasmHash: wasmHash,
+    salt: salt,
+  });
 }
 
 /**

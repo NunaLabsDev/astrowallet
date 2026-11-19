@@ -1,7 +1,9 @@
 import type { ClassicAddress } from "@astrowallet/domain";
-import { Keypair } from "@stellar/stellar-sdk";
+import { sha256 } from "@noble/hashes/sha2.js";
+import { Address, Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import {
+  buildDeploySmartAccountOperation,
   buildGuardianRecoveryRotationOperation,
   buildSacTransferOperation,
   deriveCounterfactualSmartAccount,
@@ -31,6 +33,34 @@ describe("Counterfactual Smart Account (C...) & 1-Tap SAC Bridge", () => {
     expect(sa1.guardianAddress).toBe(GUARDIAN_G);
     expect(sa1.capabilities.supportsGaslessSoroban).toBe(true);
     expect(sa1.capabilities.canSignClassicSdex).toBe(false);
+
+    // Verify exact Stellar CAP-46 HashIdPreimage parity
+    const saltBytes = new Uint8Array(
+      sa1.saltHex.match(/../g)!.map((h) => parseInt(h, 16)),
+    );
+    const networkId = sha256(new TextEncoder().encode(TESTNET_PASSPHRASE));
+    const expectedPreimage = xdr.HashIdPreimage.envelopeTypeContractId(
+      new xdr.HashIdPreimageContractId({
+        networkId: networkId,
+        contractIdPreimage: xdr.ContractIdPreimage.contractIdPreimageFromAddress(
+          new xdr.ContractIdPreimageFromAddress({
+            address: new Address(GUARDIAN_G).toScAddress(),
+            salt: saltBytes,
+          }),
+        ),
+      }),
+    );
+    const expectedContractId = StrKey.encodeContract(
+      sha256(expectedPreimage.toXDR()),
+    );
+    expect(sa1.contractAddress).toBe(expectedContractId);
+
+    const deployOp = buildDeploySmartAccountOperation({
+      guardianAddress: GUARDIAN_G,
+      wasmHashHex: SAMPLE_WASM_HASH,
+      saltHex: sa1.saltHex,
+    });
+    expect(deployOp.body.type).toBe("invokeHostFunction");
   });
 
   it("resolves canonical SAC contract IDs and builds 1-tap G... <-> C... SAC transfers", () => {

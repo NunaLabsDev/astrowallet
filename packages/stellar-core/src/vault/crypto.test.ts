@@ -89,6 +89,10 @@ describe("Argon2id + AES-GCM-256 non-custodial vault", () => {
     await expect(decryptVaultPayload(tampered, "123456")).rejects.toThrow(
       /Invalid PIN/,
     );
+
+    await expect(
+      encryptVaultPayload(SAMPLE_PAYLOAD, "1234", { kdfParams: FAST_TEST_PARAMS }),
+    ).rejects.toThrow(/at least 6 characters/);
   });
 
   it("serializes and parses AGVAULT backup bundles", async () => {

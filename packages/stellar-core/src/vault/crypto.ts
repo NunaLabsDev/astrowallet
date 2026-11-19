@@ -109,8 +109,8 @@ export async function deriveKeyArgon2id(
   params: Argon2idParams = DEFAULT_ARGON2ID_PARAMS,
   options: KdfRunOptions = {},
 ): Promise<{ keyBytes: Uint8Array<ArrayBuffer>; engine: "wasm" | "noble-js" }> {
-  if (!pinOrPassphrase || pinOrPassphrase.length < 4) {
-    throw new Error("PIN or passphrase must be at least 4 characters");
+  if (!pinOrPassphrase || pinOrPassphrase.length < 6) {
+    throw new Error("PIN or passphrase must be at least 6 characters");
   }
 
   const preferWasm = options.preferWasm ?? true;

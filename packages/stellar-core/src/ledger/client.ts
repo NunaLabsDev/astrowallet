@@ -2,6 +2,7 @@ import {
   calculateAccountReserveSummary,
   type AssetBalance,
   type ClassicAddress,
+  type ContractAddress,
   type MuxedAddress,
   type PwaConfig,
   type ServerConfig,
@@ -14,6 +15,7 @@ import {
   Horizon,
   Operation,
   TransactionBuilder,
+  rpc,
   type Keypair,
   type xdr,
 } from "@stellar/stellar-sdk";
@@ -28,7 +30,17 @@ import {
   type ClassicAssetInput,
   type TypedMemoInput,
 } from "../classic/index.js";
+import {
+  buildClaimOperation,
+  buildCreateClaimOperation,
+  generateEphemeralClaimKey,
+  signClaimEscrowPayload,
+} from "../claim-escrow/index.js";
 import { assertFriendbotAllowed, createFailoverEndpoints } from "../network.js";
+import {
+  buildSacTransferOperation,
+  resolveSacContractId,
+} from "../smart-account/index.js";
 
 export interface StellarAccountState {
   funded: boolean;
@@ -129,6 +141,26 @@ export interface StellarClient {
     name: string;
     value: string | null;
   }): Promise<{ hash: string; ledger: number }>;
+  fundClaimEscrow(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    amount: string;
+    assetCode: string;
+    assetIssuer?: string | undefined;
+    expiresAtUnix: number;
+  }): Promise<{
+    hash: string;
+    ledger: number;
+    claimSecretSeedHex: string;
+    expiresAtUnix: number;
+  }>;
+  claimFromEscrow(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    claimSecretSeedHex: string;
+  }): Promise<{ hash: string; ledger: number }>;
 }
 
 function isHorizonNotFound(err: unknown): boolean {
@@ -172,13 +204,49 @@ function parseHorizonCanonicalAsset(raw: string): {
   };
 }
 
+function decimalToStroops7(amount: string): bigint {
+  const cleaned = amount.trim();
+  if (!/^\d+(?:\.\d{1,7})?$/.test(cleaned)) {
+    throw new Error("Amount must be a positive decimal with up to 7 fractional digits");
+  }
+  const [wholePart, fracPart = ""] = cleaned.split(".");
+  const stroops =
+    BigInt(wholePart ?? "0") * 10_000_000n + BigInt(fracPart.padEnd(7, "0"));
+  if (stroops <= 0n) {
+    throw new Error("Amount must be greater than zero");
+  }
+  return stroops;
+}
+
+async function resolveDynamicFeeStroops(server: Horizon.Server): Promise<string> {
+  try {
+    const stats = (await server.feeStats()) as {
+      fee_charged?: { p90?: string; mode?: string };
+    };
+    const raw = Number(stats.fee_charged?.p90 ?? stats.fee_charged?.mode ?? BASE_FEE);
+    const base = Number(BASE_FEE);
+    if (!Number.isFinite(raw) || raw < base) {
+      return BASE_FEE;
+    }
+    return String(Math.min(Math.trunc(raw), 50_000));
+  } catch {
+    return BASE_FEE;
+  }
+}
+
 /**
- * Creates a live Horizon client driven strictly by validated environment configuration.
+ * Creates a live Horizon + Soroban RPC client driven strictly by validated environment configuration.
  */
 export function createStellarClient(
-  config: Pick<PwaConfig | ServerConfig, "network" | "networkPassphrase" | "horizonUrls" | "friendbotUrl">,
+  config: Pick<
+    PwaConfig | ServerConfig,
+    "network" | "networkPassphrase" | "horizonUrls" | "friendbotUrl"
+  > & { rpcUrls?: readonly string[] | undefined },
 ): StellarClient {
   const endpoints = createFailoverEndpoints(config.horizonUrls);
+  const rpcEndpoints = config.rpcUrls?.length
+    ? createFailoverEndpoints(config.rpcUrls)
+    : null;
 
   async function withHorizonFailover<T>(
     fn: (server: Horizon.Server) => Promise<T>,
@@ -203,17 +271,44 @@ export function createStellarClient(
     throw lastError instanceof Error ? lastError : new Error("All Horizon endpoints failed");
   }
 
+  async function withRpcFailover<T>(
+    fn: (server: rpc.Server) => Promise<T>,
+  ): Promise<T> {
+    if (!rpcEndpoints) {
+      throw new Error("Soroban RPC URLs are required for smart contract operations");
+    }
+    const urls = rpcEndpoints.list();
+    let lastError: unknown;
+    for (let i = 0; i < urls.length; i += 1) {
+      const url = rpcEndpoints.current();
+      const server = new rpc.Server(url, {
+        allowHttp: url.startsWith("http://"),
+      });
+      try {
+        return await fn(server);
+      } catch (err) {
+        lastError = err;
+        rpcEndpoints.next();
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("All Soroban RPC endpoints failed");
+  }
+
   async function submitClassicOperations(
     sourceKeypair: Keypair,
     operations: readonly xdr.Operation[],
     memoInput?: TypedMemoInput,
   ): Promise<{ hash: string; ledger: number }> {
     const sourceAddress = sourceKeypair.publicKey();
-    const sourceAccount = await withHorizonFailover((server) =>
-      server.loadAccount(sourceAddress),
-    );
+    const { sourceAccount, fee } = await withHorizonFailover(async (server) => {
+      const [acc, dynamicFee] = await Promise.all([
+        server.loadAccount(sourceAddress),
+        resolveDynamicFeeStroops(server),
+      ]);
+      return { sourceAccount: acc, fee: dynamicFee };
+    });
     const builder = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
+      fee,
       networkPassphrase: config.networkPassphrase,
     });
 
@@ -232,6 +327,60 @@ export function createStellarClient(
       hash: result.hash,
       ledger: result.ledger,
     };
+  }
+
+  async function submitSorobanOperation(
+    sourceKeypair: Keypair,
+    operation: xdr.Operation,
+    memoInput?: TypedMemoInput,
+  ): Promise<{ hash: string; ledger: number }> {
+    const sourceAddress = sourceKeypair.publicKey();
+    return withRpcFailover(async (server) => {
+      const sourceAccount = await server.getAccount(sourceAddress);
+      const builder = new TransactionBuilder(sourceAccount, {
+        fee: BASE_FEE,
+        networkPassphrase: config.networkPassphrase,
+      }).addOperation(operation);
+
+      if (memoInput && memoInput.kind !== "none") {
+        builder.addMemo(buildStellarMemo(memoInput));
+      }
+
+      const tx = builder.setTimeout(60).build();
+      const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationError(sim)) {
+        throw new Error(`Soroban simulation failed: ${sim.error}`);
+      }
+
+      const assembled = rpc.assembleTransaction(tx, sim).build();
+      assembled.sign(sourceKeypair);
+      const sent = await server.sendTransaction(assembled);
+      if (sent.status === "ERROR") {
+        throw new Error(`Soroban sendTransaction failed (${sent.hash})`);
+      }
+
+      let polled = await server.getTransaction(sent.hash);
+      for (
+        let i = 0;
+        i < 18 && polled.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
+        i += 1
+      ) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        polled = await server.getTransaction(sent.hash);
+      }
+
+      if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
+        throw new Error(`Soroban transaction failed on ledger (${sent.hash})`);
+      }
+
+      return {
+        hash: sent.hash,
+        ledger:
+          polled.status === rpc.Api.GetTransactionStatus.SUCCESS
+            ? polled.ledger
+            : sent.latestLedger,
+      };
+    });
   }
 
   async function fetchAccountState(address: string): Promise<StellarAccountState> {
@@ -322,6 +471,34 @@ export function createStellarClient(
             to: create.account,
             amount: create.starting_balance,
             assetCode: "XLM",
+          };
+        }
+        if (
+          rec.type === "path_payment_strict_send" ||
+          rec.type === "path_payment_strict_receive"
+        ) {
+          const pathRec = rec as unknown as {
+            id: string;
+            created_at: string;
+            transaction_hash: string;
+            from: string;
+            to: string;
+            amount: string;
+            asset_type?: string;
+            asset_code?: string;
+            asset_issuer?: string;
+          };
+          return {
+            id: pathRec.id,
+            type: "payment",
+            createdAt: pathRec.created_at,
+            txHash: pathRec.transaction_hash,
+            from: pathRec.from,
+            to: pathRec.to,
+            amount: pathRec.amount,
+            assetCode:
+              pathRec.asset_type === "native" ? "XLM" : (pathRec.asset_code ?? "ASSET"),
+            assetIssuer: pathRec.asset_issuer,
           };
         }
         return {
@@ -425,12 +602,33 @@ export function createStellarClient(
     const isNativeXlm = input.assetCode === "XLM" && !input.assetIssuer;
     let useCreateAccount = false;
 
+    const memoInput: TypedMemoInput | undefined = input.typedMemo
+      ? input.typedMemo
+      : input.memoText && input.memoText.trim() !== ""
+        ? { kind: "text", value: input.memoText.trim().slice(0, 28) }
+        : undefined;
+
+    if (destAddress.startsWith("C")) {
+      const sacContractId = resolveSacContractId({
+        assetCode: input.assetCode,
+        assetIssuer: input.assetIssuer,
+        networkPassphrase: config.networkPassphrase,
+      });
+      const sacOp = buildSacTransferOperation({
+        sacContractId,
+        fromAddress: input.sourceKeypair.publicKey() as ClassicAddress,
+        toAddress: destAddress,
+        amountStroops: decimalToStroops7(input.amount),
+      });
+      return submitSorobanOperation(input.sourceKeypair, sacOp, memoInput);
+    }
+
     if (destAddress.startsWith("M")) {
       const destState = await fetchAccountState(destAddress);
       if (!destState.funded) {
         throw new Error("Destination M... base account is unfunded on ledger");
       }
-    } else if (isNativeXlm && !destAddress.startsWith("C")) {
+    } else if (isNativeXlm) {
       const destState = await fetchAccountState(destAddress);
       if (!destState.funded) {
         const numericAmount = Number(input.amount);
@@ -457,12 +655,6 @@ export function createStellarClient(
           asset,
           amount: input.amount,
         });
-
-    const memoInput: TypedMemoInput | undefined = input.typedMemo
-      ? input.typedMemo
-      : input.memoText && input.memoText.trim() !== ""
-        ? { kind: "text", value: input.memoText.trim().slice(0, 28) }
-        : undefined;
 
     return submitClassicOperations(input.sourceKeypair, [op], memoInput);
   }
@@ -559,6 +751,65 @@ export function createStellarClient(
     return submitClassicOperations(input.sourceKeypair, [op]);
   }
 
+  async function fundClaimEscrow(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    amount: string;
+    assetCode: string;
+    assetIssuer?: string | undefined;
+    expiresAtUnix: number;
+  }): Promise<{
+    hash: string;
+    ledger: number;
+    claimSecretSeedHex: string;
+    expiresAtUnix: number;
+  }> {
+    const ephemeral = generateEphemeralClaimKey();
+    const tokenContractId = resolveSacContractId({
+      assetCode: input.assetCode,
+      assetIssuer: input.assetIssuer,
+      networkPassphrase: config.networkPassphrase,
+    });
+    const op = buildCreateClaimOperation({
+      escrowContractId: input.escrowContractId,
+      claimIdHex: input.claimIdHex,
+      senderAddress: input.sourceKeypair.publicKey() as ClassicAddress,
+      tokenContractId,
+      amountStroops: decimalToStroops7(input.amount),
+      claimPubkeyHex: ephemeral.publicKeyHex,
+      expiresAtUnix: input.expiresAtUnix,
+    });
+    const res = await submitSorobanOperation(input.sourceKeypair, op);
+    return {
+      ...res,
+      claimSecretSeedHex: ephemeral.secretSeedHex,
+      expiresAtUnix: input.expiresAtUnix,
+    };
+  }
+
+  async function claimFromEscrow(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    claimSecretSeedHex: string;
+  }): Promise<{ hash: string; ledger: number }> {
+    const recipientAddress = input.sourceKeypair.publicKey() as ClassicAddress;
+    const signatureHex = signClaimEscrowPayload(
+      input.claimSecretSeedHex,
+      input.escrowContractId,
+      input.claimIdHex,
+      recipientAddress,
+    );
+    const op = buildClaimOperation({
+      escrowContractId: input.escrowContractId,
+      claimIdHex: input.claimIdHex,
+      recipientAddress,
+      signatureHex,
+    });
+    return submitSorobanOperation(input.sourceKeypair, op);
+  }
+
   return {
     fetchAccountState,
     fetchRecentPayments,
@@ -572,5 +823,7 @@ export function createStellarClient(
     submitSdexSellOffer,
     submitPathPaymentStrictSend,
     submitManageData,
+    fundClaimEscrow,
+    claimFromEscrow,
   };
 }

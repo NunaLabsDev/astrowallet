@@ -8,10 +8,13 @@
 
 | Component | Live Value |
 | :--- | :--- |
+| **GitHub Repository** | `https://github.com/NunaLabsDev/astrowallet` (`main` branch) |
 | **Official Website (Landing Showcase)** | `https://astrowallet-b1o.pages.dev/` |
 | **Fintech Wallet App (PWA `/app` + Bot `/intent/*`)** | `https://astrowallet-b1o.pages.dev/app` |
+| **Stellar & Soroban Dev Lab** | `https://astrowallet-b1o.pages.dev/app?tab=dev` |
 | **Worker Service Name (`workers_dev = false`)** | `astrowallet-server` (bound via `ASTROWALLET_SERVER` to Pages Functions) |
 | **Health Check** | `https://astrowallet-b1o.pages.dev/health` |
+| **Explorer Base URL (`VITE_EXPLORER_BASE_URL`)** | `https://stellar.expert/explorer/testnet` |
 | **Telegram Super-Bot** | `@AstroWalletAppBot` (`https://astrowallet-b1o.pages.dev/tg/webhook`) |
 | **Cloudflare D1 Database** | `astrowallet` (`12b7f77d-5467-44a6-a4b3-11ccd63a315c`, migration `0001_init.sql` applied) |
 | **Cloudflare KV Namespace** | `astrowallet-cache` (`3389ff9f05414c219d912e82a7a84baa`) |
@@ -40,3 +43,45 @@
 2. **Mainnet Cutover (Env-Only, Zero Code Changes):**
    - Deploy audited `contracts/claim-escrow` to Stellar Mainnet and enroll in Soroban Security Audit Bank.
    - Create dedicated Mainnet Cloudflare D1/KV (`astrowallet-mainnet`), set `STELLAR_NETWORK=mainnet`, remove `FRIENDBOT_URL` / `VITE_FRIENDBOT_URL`, configure Mainnet RPC/Horizon/API origins, and rotate `TG_BOT_TOKEN` / `TG_WEBHOOK_SECRET` / `INTENT_HMAC_SECRET`.
+
+---
+
+## 4. Quick Resume Commands & Next Session Paths
+
+### Verify & Build Locally
+```bash
+pnpm check && pnpm build
+cargo test --manifest-path contracts/claim-escrow/Cargo.toml
+```
+
+### Redeploy Worker & Pages (Zero `workers.dev` / Project-Only Names)
+1. Deploy `apps/server` Worker:
+   ```bash
+   set -a && source ~/.secrets/env && set +a
+   pnpm --filter @astrowallet/server exec wrangler deploy
+   ```
+2. Rebuild & deploy `apps/pwa` to Cloudflare Pages (**always run `wrangler pages deploy` from inside `apps/pwa/`** so `apps/pwa/functions/` Service Binding attaches automatically):
+   ```bash
+   set -a
+   source ~/.secrets/env ~/.secrets/astrowallet/telegram-bot.env ~/.secrets/astrowallet/contracts.env
+   set +a
+   export VITE_STELLAR_NETWORK=testnet
+   export VITE_STELLAR_NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
+   export VITE_STELLAR_RPC_URLS=https://soroban-testnet.stellar.org
+   export VITE_HORIZON_URLS=https://horizon-testnet.stellar.org
+   export VITE_API_BASE_URL=https://astrowallet-b1o.pages.dev
+   export VITE_PWA_ORIGIN=https://astrowallet-b1o.pages.dev
+   export VITE_TG_BOT_USERNAME="$TG_BOT_USERNAME"
+   export VITE_FRIENDBOT_URL=https://friendbot.stellar.org
+   export VITE_SMART_ACCOUNT_WASM_HASH="$CLAIM_ESCROW_WASM_HASH"
+   export VITE_CLAIM_ESCROW_CONTRACT_ID="$CLAIM_ESCROW_CONTRACT_ID"
+   export VITE_SOROBITS_CONTRACT_ID=CBVETCPLVAMNUUQRUJGH54XHVQT5ZOVB4FGGP2IGOGAZLUIYBBV7G3I3
+   export VITE_EXPLORER_BASE_URL=https://stellar.expert/explorer/testnet
+   pnpm --filter @astrowallet/pwa build
+   cd apps/pwa && ../server/node_modules/.bin/wrangler pages deploy dist --project-name astrowallet --branch main
+   ```
+
+### Logical Next Session Options
+1. **Custom Domain Attachment:** Connect a branded domain (e.g. `astrowallet.xyz`) to Cloudflare Pages and update `PWA_ORIGIN`, `ALLOWED_ORIGINS`, `VITE_API_BASE_URL`, `VITE_PWA_ORIGIN`, and the Telegram webhook URL.
+2. **Real-Device E2E QA & Polish:** Walk through mobile PWA onboarding, Friendbot funding, multi-asset sends, Horizon path swaps, `@AstroWalletAppBot` `/connect` + `/pay` live intents, and Soroban contract invocations in **Dev Lab**, fixing any real-world edge cases discovered.
+3. **SCF 7.0 Submission & Mainnet Cutover:** Finalize screenshots/demo links in [`docs/SCF_7_SUBMISSION_AND_STRIDE_THREAT_MODEL.md`](./SCF_7_SUBMISSION_AND_STRIDE_THREAT_MODEL.md) and execute Mainnet deployment + Audit Bank enrollment.

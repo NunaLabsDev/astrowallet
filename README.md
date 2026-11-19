@@ -19,13 +19,15 @@ Every major Stellar wallet today solves only part of the mobile-first experience
 2. **Universal Mobile Auth (No FaceID Required):**
    - **Mandatory PIN / Passphrase** (Web Worker Argon2id + AES-GCM-256 in IndexedDB) works reliably on every smartphone.
    - Optional **Fingerprint (`Touch ID` / Android BiometricPrompt / device screen lock)** via standard WebAuthn (`userVerification: "preferred"`).
-3. **Genuine Telegram Super-Bot Connectivity (`@AstroWalletBot` — 2025 ToS-Compliant):**
+3. **Genuine Telegram Super-Bot Connectivity (`@AstroWalletAppBot` — 2025 ToS-Compliant):**
    - Pure standard Telegram Bot (`grammY` + Inline Mode + HMAC-signed Intent Links)—zero Mini App WebView, zero TON dependency, and zero private keys on Telegram or backend servers.
    - Cryptographic `/connect` binding (`telegram_user_id` + `@username` ↔ multi-account addresses), `/accounts`, `/balance`, `/pay`, `/request`, `/split`, `/scan`, `/swap`, `/alerts`, `/reserve`, **real-time live card editing** (`⏳ Pending` → `✅ Confirmed`), real-time push alerts, and **Telegram Claim Links** to onboard `@username` friends with no wallet yet.
 4. **Built-In "Scan & Shield" Clear-Signing:**
    - Primary zero-WASM decoding (`@stellar/stellar-sdk` + `contract.Spec` SEP-46/47/48), Stellar RPC `simulateTransaction` balance diffs, edge-proxied **StellarExpert Open Directory**, **SDF SEP-42** verified asset lists, **SEP-29** CEX memo guards, Claimable Balance spam filtering, and lazy Web Worker Raw XDR inspection (`@stellar/stellar-xdr-json`).
 5. **Apple Liquid Glass UI, Banking-Trust Color Psychology & Pixel "Astro Navigators" + Sorobits (SEP-50):**
    - Calibrated 60/30/10 Sovereign Navy / Frosted Amethyst / Vault Gold palette with deterministic `32×32` crisp-pixel **Astro Navigator** guardians across 6 behavioral states (`float`, `shield`, `warp`, `vault`, `comms`, `zenith`) plus live on-chain **NunaLabs Sorobits (SEP-50)** inspection via Soroban RPC.
+6. **Full Consumer Execution + Built-In Stellar & Soroban Developer Workbench (`/app?tab=dev`):**
+   - Multi-asset sends with `25%/50%/MAX`, SEP-0002 Federation (`user*domain`), SEP-0007 QR/URIs, Contacts book, live Horizon Path / Soroswap execution, Spendable vs Reserved breakdown, plus an integrated **Dev Lab** with live Soroban RPC telemetry, Contract Read/Write caller, XDR Lab (templates, Scan & Shield, Sign-Only, Broadcast), SEP-53 sign/verify, HD derivation inspector, on-chain `ManageData`, and Reown / SEP-43 dApp Bridge.
 
 ---
 
@@ -68,7 +70,9 @@ Every major Stellar wallet today solves only part of the mobile-first experience
 
 | Component | Live Testnet Identifier |
 | :--- | :--- |
-| **Web App & API Origin** | `https://astrowallet-b1o.pages.dev` |
+| **Official Website (`/`)** | `https://astrowallet-b1o.pages.dev/` |
+| **Fintech Wallet App (`/app`)** | `https://astrowallet-b1o.pages.dev/app` |
+| **Stellar & Soroban Dev Lab** | `https://astrowallet-b1o.pages.dev/app?tab=dev` |
 | **Health Check** | `https://astrowallet-b1o.pages.dev/health` |
 | **Telegram Super-Bot** | [`@AstroWalletAppBot`](https://t.me/AstroWalletAppBot) (`https://astrowallet-b1o.pages.dev/tg/webhook`) |
 | **Claim-Link Escrow Contract (Testnet)** | `CBZBB5ZAGBE6KMDVPEIFCZ7EYGO65JQ7QYJMBQVHSCDUAXK77DK72635` |

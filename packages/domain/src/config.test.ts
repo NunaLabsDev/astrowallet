@@ -70,13 +70,49 @@ describe("parsePwaConfig", () => {
 });
 
 describe("parseServerConfig", () => {
-  it("parses valid testnet server configuration", () => {
+  it("parses valid testnet server configuration with rate-limit defaults and optional hardening vars", () => {
     const config = parseServerConfig(VALID_TESTNET_SERVER_ENV);
     expect(config.network).toBe("testnet");
     expect(config.allowedOrigins).toEqual([
       "https://testnet.astrowallet.example",
       "http://localhost:5173",
     ]);
+    expect(config.sep42AssetListUrls).toEqual([]);
+    expect(config.relayAllowedContracts).toEqual([]);
+    expect(config.relayRateLimitPerMin).toBe(10);
+    expect(config.proxyRateLimitPerMin).toBe(60);
+
+    const custom = parseServerConfig({
+      ...VALID_TESTNET_SERVER_ENV,
+      SEP42_ASSET_LIST_URLS: "https://assets.example.org/list.json",
+      CLAIM_ESCROW_CONTRACT_ID: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+      RELAY_ALLOWED_CONTRACTS: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+      RELAY_RATE_LIMIT_PER_MIN: "25",
+      PROXY_RATE_LIMIT_PER_MIN: "120",
+    });
+    expect(custom.sep42AssetListUrls).toEqual(["https://assets.example.org/list.json"]);
+    expect(custom.claimEscrowContractId).toBe(
+      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+    );
+    expect(custom.relayAllowedContracts).toHaveLength(1);
+    expect(custom.relayRateLimitPerMin).toBe(25);
+    expect(custom.proxyRateLimitPerMin).toBe(120);
+  });
+
+  it("parses optional PWA ramp config fields cleanly", () => {
+    const pwa = parsePwaConfig({
+      ...VALID_TESTNET_PWA_ENV,
+      VITE_CCTP_BRIDGE_URL: "https://bridge.example.org",
+      VITE_CCTP_FORWARDER_CONTRACT_ID: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+      VITE_MOONPAY_WIDGET_URL: "https://buy.moonpay.example",
+      VITE_TRANSAK_WIDGET_URL: "https://global.transak.example",
+    });
+    expect(pwa.cctpBridgeUrl).toBe("https://bridge.example.org");
+    expect(pwa.cctpForwarderContractId).toBe(
+      "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+    );
+    expect(pwa.moonPayWidgetUrl).toBe("https://buy.moonpay.example");
+    expect(pwa.transakWidgetUrl).toBe("https://global.transak.example");
   });
 
   it("hard-blocks FRIENDBOT_URL when STELLAR_NETWORK=mainnet", () => {

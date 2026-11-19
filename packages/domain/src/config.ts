@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ContractAddressSchema } from "./accounts.js";
+import { ContractAddressSchema, type ContractAddress } from "./accounts.js";
 
 export const StellarNetworkSchema = z.enum(["testnet", "mainnet"]);
 export type StellarNetwork = z.infer<typeof StellarNetworkSchema>;
@@ -62,6 +62,41 @@ const OptionalNonEmptyStringSchema = z.preprocess(
   emptyToUndefined,
   z.string().trim().min(1).optional(),
 );
+
+function parseContractCsv(field: string) {
+  return z
+    .preprocess(
+      (val) => (typeof val === "string" ? val : ""),
+      z.string(),
+    )
+    .transform((raw) =>
+      Array.from(
+        new Set(
+          raw
+            .split(",")
+            .map((part) => part.trim())
+            .filter(Boolean),
+        ),
+      ),
+    )
+    .superRefine((contracts, ctx) => {
+      for (const addr of contracts) {
+        if (!ContractAddressSchema.safeParse(addr).success) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${field} contains invalid Soroban contract address "${addr}"`,
+          });
+        }
+      }
+    });
+}
+
+function parsePositiveIntWithDefault(defaultValue: number, max: number) {
+  return z.preprocess(
+    emptyToUndefined,
+    z.coerce.number().int().min(1).max(max).default(defaultValue),
+  );
+}
 
 function parseUrlCsv(field: string, required: boolean) {
   return z
@@ -137,6 +172,13 @@ const RawPwaEnvSchema = z
     VITE_SEP42_ASSET_LIST_URLS: parseUrlCsv("VITE_SEP42_ASSET_LIST_URLS", false),
     VITE_EXPLORER_BASE_URL: OptionalUrlSchema("VITE_EXPLORER_BASE_URL"),
     VITE_REOWN_PROJECT_ID: OptionalNonEmptyStringSchema,
+    VITE_CCTP_BRIDGE_URL: OptionalUrlSchema("VITE_CCTP_BRIDGE_URL"),
+    VITE_CCTP_FORWARDER_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
+    VITE_MOONPAY_WIDGET_URL: OptionalUrlSchema("VITE_MOONPAY_WIDGET_URL"),
+    VITE_TRANSAK_WIDGET_URL: OptionalUrlSchema("VITE_TRANSAK_WIDGET_URL"),
   })
   .superRefine((env, ctx) => {
     if (env.VITE_STELLAR_NETWORK === "mainnet" && env.VITE_FRIENDBOT_URL) {
@@ -163,6 +205,10 @@ export interface PwaConfig {
   sep42AssetListUrls: string[];
   explorerBaseUrl?: string | undefined;
   reownProjectId?: string | undefined;
+  cctpBridgeUrl?: string | undefined;
+  cctpForwarderContractId?: ContractAddress | undefined;
+  moonPayWidgetUrl?: string | undefined;
+  transakWidgetUrl?: string | undefined;
 }
 
 export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
@@ -182,6 +228,10 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     sep42AssetListUrls: parsed.VITE_SEP42_ASSET_LIST_URLS,
     explorerBaseUrl: parsed.VITE_EXPLORER_BASE_URL,
     reownProjectId: parsed.VITE_REOWN_PROJECT_ID,
+    cctpBridgeUrl: parsed.VITE_CCTP_BRIDGE_URL,
+    cctpForwarderContractId: parsed.VITE_CCTP_FORWARDER_CONTRACT_ID,
+    moonPayWidgetUrl: parsed.VITE_MOONPAY_WIDGET_URL,
+    transakWidgetUrl: parsed.VITE_TRANSAK_WIDGET_URL,
   };
 }
 
@@ -200,6 +250,14 @@ const RawServerEnvSchema = z
     STELLAR_EXPERT_API_BASE: OptionalUrlSchema("STELLAR_EXPERT_API_BASE"),
     OZ_CHANNELS_API_URL: OptionalUrlSchema("OZ_CHANNELS_API_URL"),
     SOROSWAP_API_BASE: OptionalUrlSchema("SOROSWAP_API_BASE"),
+    SEP42_ASSET_LIST_URLS: parseUrlCsv("SEP42_ASSET_LIST_URLS", false),
+    CLAIM_ESCROW_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
+    RELAY_ALLOWED_CONTRACTS: parseContractCsv("RELAY_ALLOWED_CONTRACTS"),
+    RELAY_RATE_LIMIT_PER_MIN: parsePositiveIntWithDefault(10, 1000),
+    PROXY_RATE_LIMIT_PER_MIN: parsePositiveIntWithDefault(60, 5000),
     TG_BOT_TOKEN: z
       .string({ required_error: "TG_BOT_TOKEN is required" })
       .trim()
@@ -237,6 +295,11 @@ export interface ServerConfig {
   stellarExpertApiBase?: string | undefined;
   ozChannelsApiUrl?: string | undefined;
   soroswapApiBase?: string | undefined;
+  sep42AssetListUrls: string[];
+  claimEscrowContractId?: ContractAddress | undefined;
+  relayAllowedContracts: string[];
+  relayRateLimitPerMin: number;
+  proxyRateLimitPerMin: number;
   tgBotToken: string;
   tgWebhookSecret: string;
   intentHmacSecret: string;
@@ -258,6 +321,11 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     stellarExpertApiBase: parsed.STELLAR_EXPERT_API_BASE,
     ozChannelsApiUrl: parsed.OZ_CHANNELS_API_URL,
     soroswapApiBase: parsed.SOROSWAP_API_BASE,
+    sep42AssetListUrls: parsed.SEP42_ASSET_LIST_URLS,
+    claimEscrowContractId: parsed.CLAIM_ESCROW_CONTRACT_ID,
+    relayAllowedContracts: parsed.RELAY_ALLOWED_CONTRACTS,
+    relayRateLimitPerMin: parsed.RELAY_RATE_LIMIT_PER_MIN,
+    proxyRateLimitPerMin: parsed.PROXY_RATE_LIMIT_PER_MIN,
     tgBotToken: parsed.TG_BOT_TOKEN,
     tgWebhookSecret: parsed.TG_WEBHOOK_SECRET,
     intentHmacSecret: parsed.INTENT_HMAC_SECRET,

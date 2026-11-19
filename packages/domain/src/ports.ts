@@ -45,6 +45,7 @@ export interface SwapQuoteRequest {
   toAsset: string;
   amount: string;
   slippageBps: number;
+  sourceAddress?: string | undefined;
 }
 
 export interface SwapQuote {

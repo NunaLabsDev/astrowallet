@@ -1,9 +1,12 @@
 import { useMemo, useState, type FormEvent } from "react";
 import {
+  calculateMinReceivedStroops7,
   createCompositeSwapEngine,
   createHorizonPathSwapAdapter,
   createSoroswapProxyAdapter,
+  decimalToStroops7,
   parseSwapAssetIdentifier,
+  stroops7ToDecimal,
 } from "@astrowallet/defi";
 import type { ClassicAddress, SwapQuote } from "@astrowallet/domain";
 import { useWallet } from "../state/wallet-context.js";
@@ -27,11 +30,6 @@ function assetIdentifier(assetCode: string, assetIssuer?: string): string {
   return assetCode.toUpperCase() === "XLM" && !assetIssuer
     ? "XLM"
     : `${assetCode}:${assetIssuer ?? ""}`;
-}
-
-function formatTruncated7(num: number): string {
-  if (!Number.isFinite(num) || num <= 0) return "0.0000001";
-  return (Math.floor(num * 10_000_000) / 10_000_000).toFixed(7);
 }
 
 export function SwapSheet({
@@ -75,9 +73,13 @@ export function SwapSheet({
 
   const minReceived = useMemo(() => {
     if (!quote) return "0";
-    const expected = Number(quote.expectedOutputAmount);
-    const min = expected * (1 - slippageBps / 10_000);
-    return formatTruncated7(min);
+    try {
+      return stroops7ToDecimal(
+        calculateMinReceivedStroops7(quote.expectedOutputAmount, slippageBps),
+      );
+    } catch {
+      return "0";
+    }
   }, [quote, slippageBps]);
 
   const handleFlipAssets = () => {
@@ -148,14 +150,38 @@ export function SwapSheet({
 
       const sendParsed = parseSwapAssetIdentifier(fromAsset);
       const destParsed = parseSwapAssetIdentifier(toAsset);
+      const horizon = createHorizonPathSwapAdapter({
+        horizonUrls: config.horizonUrls,
+      });
+      const freshQuote = await horizon.getQuote({
+        fromAsset: fromAsset.trim(),
+        toAsset: toAsset.trim(),
+        amount: quote.inputAmount,
+        slippageBps,
+        sourceAddress: activeAccount.address,
+      });
+
+      const minBaselineStroops = calculateMinReceivedStroops7(
+        quote.expectedOutputAmount,
+        slippageBps,
+      );
+      if (decimalToStroops7(freshQuote.expectedOutputAmount) < minBaselineStroops) {
+        throw new Error(
+          "Live swap quote drifted beyond your slippage tolerance; fetch a fresh quote first.",
+        );
+      }
+
+      const liveDestMin = stroops7ToDecimal(
+        calculateMinReceivedStroops7(freshQuote.expectedOutputAmount, slippageBps),
+      );
       const res = await executePathSwap({
         sendAssetCode: sendParsed.code,
         sendAssetIssuer: sendParsed.issuer as ClassicAddress | undefined,
         sendAmount: quote.inputAmount,
         destAssetCode: destParsed.code,
         destAssetIssuer: destParsed.issuer as ClassicAddress | undefined,
-        destMin: minReceived,
-        path: quote.pathAssets,
+        destMin: liveDestMin,
+        path: freshQuote.pathAssets,
       });
       setTxHash(res.hash);
     } catch (err) {
@@ -371,7 +397,10 @@ export function SwapSheet({
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12 }}>
             <span style={{ color: "var(--aw-ink-secondary)" }}>Route Provider</span>
             <span>
-              {quote.provider} (~{quote.priceImpactPct}% impact)
+              {quote.provider}{" "}
+              {quote.priceImpactPct === "N/A"
+                ? "(market rate)"
+                : `(~${quote.priceImpactPct}% impact)`}
             </span>
           </div>
           {quote.pathAssets && quote.pathAssets.length > 0 && (

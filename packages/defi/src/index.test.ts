@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DeFiRegistry,
+  calculateMinReceivedStroops7,
   convertEvmUsdc6ToStellarStroops7,
   convertStellarUsdcToEvmAtomic6,
   createCircleCctpRampAdapter,
@@ -182,5 +183,60 @@ describe("DeFi Swap Adapters & Registry", () => {
     const trUrl = new URL(trSession.url);
     expect(trUrl.searchParams.get("productsAvailed")).toBe("SELL");
     expect(trUrl.searchParams.get("network")).toBe("stellar");
+  });
+
+  it("compares Horizon paths via exact BigInt stroops and reports honest N/A price impact", async () => {
+    const horizon = createHorizonPathSwapAdapter({
+      horizonUrls: ["https://horizon-test.example"],
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            _embedded: {
+              records: [
+                { destination_amount: "10000000000.0000001", path: [] },
+                { destination_amount: "10000000000.0000002", path: [] },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+    });
+
+    const horizonQuote = await horizon.getQuote({
+      fromAsset: "XLM",
+      toAsset: `USDC:${SAMPLE_ISSUER}`,
+      amount: "100",
+      slippageBps: 50,
+    });
+    expect(horizonQuote.expectedOutputAmount).toBe("10000000000.0000002");
+    expect(horizonQuote.priceImpactPct).toBe("N/A");
+
+    const soroswap = createSoroswapProxyAdapter({
+      apiBaseUrl: "https://api-test.example",
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            expectedOutputAmount: "42.1234567",
+          }),
+          { status: 200 },
+        ),
+    });
+    const soroswapQuote = await soroswap.getQuote({
+      fromAsset: "XLM",
+      toAsset: `USDC:${SAMPLE_ISSUER}`,
+      amount: "100",
+      slippageBps: 50,
+    });
+    expect(soroswapQuote.priceImpactPct).toBe("N/A");
+  });
+
+  it("calculates exact BigInt minimum received stroops and guards invalid slippage", () => {
+    expect(calculateMinReceivedStroops7("100.0000000", 50)).toBe(995_000_000n);
+    expect(calculateMinReceivedStroops7("10000000000.0000001", 100)).toBe(99_000_000_000_000_000n);
+    expect(() => calculateMinReceivedStroops7("10", -1)).toThrow(/integer/i);
+    expect(() => calculateMinReceivedStroops7("10", 10_000)).toThrow(/integer/i);
+    expect(() => calculateMinReceivedStroops7("10", 12.5)).toThrow(/integer/i);
+    expect(() => calculateMinReceivedStroops7("0", 50)).toThrow(/greater than zero/i);
+    expect(() => calculateMinReceivedStroops7("0.0000001", 50)).toThrow(/greater than zero/i);
   });
 });

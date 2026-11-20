@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "stellar-docs": {
+      "url": "https://developers.stellar.org/mcp"
+    }
+  }
+}

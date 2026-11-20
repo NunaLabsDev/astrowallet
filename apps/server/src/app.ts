@@ -12,6 +12,7 @@ import { createIndexerRoutes } from "./routes/indexer.js";
 import { createIntentRoutes, type IntentRoutesDeps } from "./routes/intents.js";
 import { createProxyRoutes } from "./routes/proxy.js";
 import { createRelayRoutes } from "./routes/relay.js";
+import { createTgAuthRoutes } from "./routes/tg-auth.js";
 import type { FetchLike } from "./stellar-verifier.js";
 
 export interface WorkerBindings {
@@ -115,8 +116,10 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
   };
 
   app.use("/tg/webhook", attachRepo);
+  app.use("/v1/tg/*", attachRepo);
   app.use("/v1/intents/*", attachRepo);
   app.use("/v1/relay/*", attachOptionalRepo);
+  app.use("/v1/proxy/*", attachOptionalRepo);
   app.use("/webhooks/indexer", attachRepo);
   app.use("/webhooks/indexer/*", attachRepo);
 
@@ -136,6 +139,23 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
       );
     }
 
+    // Deduplicate retried Telegram webhooks atomically using update_id before entering handlers
+    let updateId: number | undefined;
+    try {
+      const bodyCopy = (await c.req.raw.clone().json()) as { update_id?: unknown };
+      if (typeof bodyCopy.update_id === "number" && Number.isInteger(bodyCopy.update_id)) {
+        updateId = bodyCopy.update_id;
+      }
+    } catch {
+      // Let grammY reject malformed JSON payloads
+    }
+    if (updateId !== undefined) {
+      const claimed = await repo.claimTelegramUpdateId(updateId);
+      if (!claimed) {
+        return c.json({ ok: true, duplicate: true }, 200);
+      }
+    }
+
     const bot = createTelegramBot(config, repo, {
       fetchFn: deps.fetchFn,
       cache: c.env.CACHE,
@@ -143,6 +163,8 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
     const handler = webhookCallback(bot, "hono");
     return handler(c);
   });
+
+  app.route("/v1/tg", createTgAuthRoutes());
 
   app.route(
     "/v1/intents",

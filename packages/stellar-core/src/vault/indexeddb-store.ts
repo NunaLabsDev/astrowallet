@@ -6,6 +6,16 @@ const STORE_NAME = "vault";
 const PRIMARY_VAULT_KEY = "primary_vault";
 const BIOMETRIC_WRAP_KEY = "biometric_wrap";
 const CONTACTS_KEY = "contacts_v1";
+const PIN_LOCKOUT_KEY = "pin_lockout_v1";
+
+const MAX_PIN_ATTEMPTS_BEFORE_LOCK = 5;
+const BASE_PIN_LOCKOUT_MS = 30_000;
+const MAX_PIN_LOCKOUT_MS = 15 * 60_000;
+
+export interface PinLockoutState {
+  failedAttempts: number;
+  lockedUntilMs: number;
+}
 
 export interface ContactEntry {
   id: string;
@@ -133,4 +143,48 @@ export async function loadContacts(): Promise<ContactEntry[]> {
 
 export async function saveContacts(contacts: readonly ContactEntry[]): Promise<void> {
   await idbPut(CONTACTS_KEY, [...contacts]);
+}
+
+export async function getPinLockoutState(): Promise<PinLockoutState> {
+  try {
+    const state = await idbGet<PinLockoutState>(PIN_LOCKOUT_KEY);
+    if (
+      state &&
+      typeof state.failedAttempts === "number" &&
+      Number.isFinite(state.failedAttempts) &&
+      typeof state.lockedUntilMs === "number" &&
+      Number.isFinite(state.lockedUntilMs)
+    ) {
+      return state;
+    }
+  } catch {
+    // Non-IndexedDB test or fallback environments
+  }
+  return { failedAttempts: 0, lockedUntilMs: 0 };
+}
+
+export async function recordFailedPinAttempt(nowMs: number = Date.now()): Promise<PinLockoutState> {
+  const prev = await getPinLockoutState();
+  const failedAttempts = prev.failedAttempts + 1;
+  let lockedUntilMs = prev.lockedUntilMs;
+  if (failedAttempts >= MAX_PIN_ATTEMPTS_BEFORE_LOCK) {
+    const exponent = failedAttempts - MAX_PIN_ATTEMPTS_BEFORE_LOCK;
+    const backoff = Math.min(BASE_PIN_LOCKOUT_MS * 2 ** exponent, MAX_PIN_LOCKOUT_MS);
+    lockedUntilMs = Math.max(prev.lockedUntilMs, nowMs + backoff);
+  }
+  const next: PinLockoutState = { failedAttempts, lockedUntilMs };
+  try {
+    await idbPut(PIN_LOCKOUT_KEY, next);
+  } catch {
+    // Ignore IDB errors in restricted contexts while returning computed state
+  }
+  return next;
+}
+
+export async function clearPinLockoutState(): Promise<void> {
+  try {
+    await idbDelete(PIN_LOCKOUT_KEY);
+  } catch {
+    // Ignore when IDB is unavailable
+  }
 }

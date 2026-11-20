@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import {
+  calculateMinReceivedStroops7,
   createHorizonPathSwapAdapter,
   parseSwapAssetIdentifier,
+  stroops7ToDecimal,
 } from "@astrowallet/defi";
 import type {
   ClassicAddress,
@@ -9,7 +11,9 @@ import type {
   ScanReport,
   StellarAddress,
 } from "@astrowallet/domain";
+import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
+import { triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 
 export interface ActiveIntentRoute {
@@ -97,6 +101,7 @@ export function IntentSheet({
   route: ActiveIntentRoute;
   onDismiss: () => void;
 }) {
+  const { sessionToken, refreshLinkedAccounts } = useTelegram();
   const {
     config,
     vaultStatus,
@@ -120,11 +125,17 @@ export function IntentSheet({
   const [includeSmartAccount, setIncludeSmartAccount] = useState<boolean>(
     Boolean(config.smartAccountWasmHash),
   );
+  const [confirmCode, setConfirmCode] = useState("");
+  const [warningAcknowledged, setWarningAcknowledged] = useState(false);
   const [manualClaimSecret, setManualClaimSecret] = useState("");
   const [shareClaimUrl, setShareClaimUrl] = useState<string | null>(null);
   const [copiedClaimUrl, setCopiedClaimUrl] = useState(false);
   const [destScanReport, setDestScanReport] = useState<ScanReport | null>(null);
   const [scanningIntent, setScanningIntent] = useState(false);
+
+  useEffect(() => {
+    setWarningAcknowledged(false);
+  }, [route.intentId, intent?.intentId]);
 
   useEffect(() => {
     if (accounts.length > 0) {
@@ -141,6 +152,9 @@ export function IntentSheet({
         const base = config.apiBaseUrl.replace(/\/+$/, "");
         const res = await fetch(
           `${base}/v1/intents/${encodeURIComponent(route.intentId)}?sig=${encodeURIComponent(route.sig)}`,
+          sessionToken
+            ? { headers: { Authorization: `Bearer ${sessionToken}` } }
+            : undefined,
         );
         const data = (await res.json()) as RemoteIntentResponse & { error?: string };
         if (!res.ok) {
@@ -163,7 +177,7 @@ export function IntentSheet({
     return () => {
       cancelled = true;
     };
-  }, [config.apiBaseUrl, route.intentId, route.sig]);
+  }, [config.apiBaseUrl, route.intentId, route.sig, sessionToken]);
 
   useEffect(() => {
     if (!intent) {
@@ -221,11 +235,15 @@ export function IntentSheet({
 
   const confirmOnServer = async (extraBody: Record<string, unknown>) => {
     const base = config.apiBaseUrl.replace(/\/+$/, "");
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (sessionToken) {
+      headers.Authorization = `Bearer ${sessionToken}`;
+    }
     const res = await fetch(
       `${base}/v1/intents/${encodeURIComponent(route.intentId)}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           sig: route.sig,
           ...extraBody,
@@ -242,12 +260,18 @@ export function IntentSheet({
     if (!res.ok) {
       throw new Error(body.error ?? "Transaction confirmed on-chain, but bot callback failed");
     }
+    triggerTelegramHaptic("success");
     return body;
   };
 
   const handleConfirmConnect = async () => {
     if (!intent?.payload.message) {
       setError("Connect challenge message is missing from intent");
+      return;
+    }
+    const cleanCode = confirmCode.trim().toUpperCase();
+    if (!sessionToken && !cleanCode) {
+      setError("Enter the 6-character confirmation code shown in Telegram DM.");
       return;
     }
     setBusy(true);
@@ -259,13 +283,18 @@ export function IntentSheet({
         includeSmartAccount,
       );
       const base = config.apiBaseUrl.replace(/\/+$/, "");
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (sessionToken) {
+        headers.Authorization = `Bearer ${sessionToken}`;
+      }
       const res = await fetch(
         `${base}/v1/intents/${encodeURIComponent(route.intentId)}/connect`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers,
           body: JSON.stringify({
             sig: route.sig,
+            ...(sessionToken ? {} : { confirmCode: cleanCode }),
             accounts: proofs,
           }),
         },
@@ -274,8 +303,10 @@ export function IntentSheet({
       if (!res.ok) {
         throw new Error(body.error ?? "Failed to verify connect signature");
       }
+      triggerTelegramHaptic("success");
+      await refreshLinkedAccounts();
       setCompletedMsg(
-        `Linked ${body.linkedCount ?? proofs.length} account(s) to @${config.tgBotUsername}. Return to Telegram to use /balance and /pay.`,
+        `Linked ${body.linkedCount ?? proofs.length} account(s) to @${config.tgBotUsername}.`,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to complete /connect");
@@ -293,6 +324,10 @@ export function IntentSheet({
       setError(
         `Scan & Shield blocked transaction: ${destScanReport.findings[0]?.title ?? "malicious target"}`,
       );
+      return;
+    }
+    if (destScanReport?.verdict === "warning" && !warningAcknowledged) {
+      setError("Acknowledge the Scan & Shield warning before signing this transaction.");
       return;
     }
     if (destScanReport?.requiresMemoCheck && !intent.payload.memo?.trim()) {
@@ -341,6 +376,10 @@ export function IntentSheet({
       );
       return;
     }
+    if (destScanReport?.verdict === "warning" && !warningAcknowledged) {
+      setError("Acknowledge the Scan & Shield warning before signing this swap.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -362,11 +401,9 @@ export function IntentSheet({
           amount,
           slippageBps: 100,
         });
-        const minNum = Math.max(0, Number(freshQuote.expectedOutputAmount) * 0.99);
-        const destMin =
-          minNum > 0
-            ? (Math.floor(minNum * 10_000_000) / 10_000_000).toFixed(7)
-            : "0.0000001";
+        const destMin = stroops7ToDecimal(
+          calculateMinReceivedStroops7(freshQuote.expectedOutputAmount, 100),
+        );
         const sendParsed = parseSwapAssetIdentifier(fromAsset);
         const destParsed = parseSwapAssetIdentifier(toAsset);
         const res = await executePathSwap({
@@ -648,10 +685,35 @@ export function IntentSheet({
                   </label>
                 )}
               </div>
+              {sessionToken ? (
+                <div className="aw-banner" style={{ fontSize: 12 }}>
+                  <strong>Telegram Identity Verified:</strong> Authenticated automatically via
+                  signed Telegram <code>initData</code>.
+                </div>
+              ) : (
+                <div>
+                  <label className="aw-label" htmlFor="tg-connect-confirm-code">
+                    Telegram DM Confirmation Code
+                  </label>
+                  <input
+                    id="tg-connect-confirm-code"
+                    type="text"
+                    maxLength={12}
+                    className="aw-input"
+                    placeholder="Enter 6-character code from DM (e.g. A7K9M2)"
+                    value={confirmCode}
+                    onChange={(e) => setConfirmCode(e.target.value.toUpperCase())}
+                  />
+                </div>
+              )}
               <button
                 type="button"
                 className="aw-btn-primary"
-                disabled={busy || selectedIndices.length === 0}
+                disabled={
+                  busy ||
+                  selectedIndices.length === 0 ||
+                  (!sessionToken && confirmCode.trim().length < 4)
+                }
                 onClick={() => void handleConfirmConnect()}
               >
                 {busy ? "Signing Challenge..." : `Sign & Link ${selectedIndices.length} Account(s)`}
@@ -740,8 +802,10 @@ export function IntentSheet({
               <div className="aw-list-row">
                 <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Route</span>
                 <span>
-                  {intent.payload.provider ?? "horizon-path"} (~
-                  {intent.payload.priceImpactPct ?? "0.05"}% impact)
+                  {intent.payload.provider ?? "horizon-path"}{" "}
+                  {!intent.payload.priceImpactPct || intent.payload.priceImpactPct === "N/A"
+                    ? "(market rate)"
+                    : `(~${intent.payload.priceImpactPct}% impact)`}
                 </span>
               </div>
               {scanningIntent && (
@@ -758,18 +822,32 @@ export function IntentSheet({
                         ? "aw-banner aw-banner--warn"
                         : "aw-banner"
                   }
-                  style={{ fontSize: 12 }}
+                  style={{ fontSize: 12, display: "grid", gap: 6 }}
                 >
                   <strong>Scan &amp; Shield: {destScanReport.verdict.toUpperCase()}</strong>
                   {destScanReport.findings[0] && (
-                    <div style={{ marginTop: 3 }}>{destScanReport.findings[0].description}</div>
+                    <div>{destScanReport.findings[0].description}</div>
+                  )}
+                  {destScanReport.verdict === "warning" && (
+                    <label className="aw-checkbox-row" style={{ marginTop: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={warningAcknowledged}
+                        onChange={(e) => setWarningAcknowledged(e.target.checked)}
+                      />
+                      <span>I reviewed this warning and accept the risk.</span>
+                    </label>
                   )}
                 </div>
               )}
               <button
                 type="button"
                 className="aw-btn-primary"
-                disabled={busy || destScanReport?.verdict === "malicious"}
+                disabled={
+                  busy ||
+                  destScanReport?.verdict === "malicious" ||
+                  (destScanReport?.verdict === "warning" && !warningAcknowledged)
+                }
                 onClick={() => void handleConfirmSwap()}
               >
                 {busy ? "Signing & Settling Swap..." : "Sign & Execute Swap"}
@@ -868,6 +946,16 @@ export function IntentSheet({
                   {destScanReport.findings[0] && (
                     <div style={{ marginTop: 3 }}>{destScanReport.findings[0].description}</div>
                   )}
+                  {destScanReport.verdict === "warning" && (
+                    <label className="aw-checkbox-row" style={{ marginTop: 6 }}>
+                      <input
+                        type="checkbox"
+                        checked={warningAcknowledged}
+                        onChange={(e) => setWarningAcknowledged(e.target.checked)}
+                      />
+                      <span>I reviewed this warning and accept the risk.</span>
+                    </label>
+                  )}
                 </div>
               )}
               <button
@@ -876,6 +964,7 @@ export function IntentSheet({
                 disabled={
                   busy ||
                   destScanReport?.verdict === "malicious" ||
+                  (destScanReport?.verdict === "warning" && !warningAcknowledged) ||
                   Boolean(destScanReport?.requiresMemoCheck && !intent.payload.memo?.trim())
                 }
                 onClick={() => void handleConfirmPayment()}

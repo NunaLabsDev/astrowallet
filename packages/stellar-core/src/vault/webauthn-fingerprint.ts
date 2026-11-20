@@ -124,7 +124,7 @@ export async function enrollFingerprintUnlock(
       authenticatorSelection: {
         authenticatorAttachment: "platform",
         residentKey: "preferred",
-        userVerification: "preferred",
+        userVerification: "required",
       },
       timeout: 60_000,
       extensions: extensionsRequest,
@@ -195,7 +195,7 @@ export async function unlockWithFingerprint(rpId?: string): Promise<string> {
       challenge,
       rpId: resolvedRpId,
       allowCredentials: [{ type: "public-key", id: credId }],
-      userVerification: "preferred",
+      userVerification: "required",
       timeout: 60_000,
       extensions: extensionsRequest,
     },

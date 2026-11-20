@@ -7,12 +7,13 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { StellarAddressSchema } from "@astrowallet/domain";
+import { StellarAddressSchema, type PwaConfig } from "@astrowallet/domain";
 import { deriveCounterfactualSmartAccount } from "@astrowallet/stellar-core";
+import { formatNanoTon } from "@astrowallet/ton-core";
 import { AccountSwitcher } from "./components/AccountSwitcher.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
 import { AstroWalletLogo } from "./components/AstroWalletLogo.js";
-import type { AppDockTab } from "./components/LandingPage.js";
+import { TelegramOnlyGate } from "./components/TelegramOnlyGate.js";
 import {
   IconAccounts,
   IconActivity,
@@ -25,10 +26,8 @@ import {
   IconCode,
   IconCopy,
   IconEdit,
-  IconExternalLink,
   IconEye,
   IconFingerprint,
-  IconGlobe,
   IconKey,
   IconLock,
   IconNft,
@@ -55,19 +54,19 @@ import { ModalDrawer } from "./components/ModalDrawer.js";
 import { OnboardingSheet } from "./components/OnboardingSheet.js";
 import { UnlockSheet } from "./components/UnlockSheet.js";
 import { loadPwaEnv } from "./config/env.js";
+import { TelegramProvider, useTelegram } from "./state/telegram-context.js";
 import { WalletProvider, useWallet } from "./state/wallet-context.js";
+import {
+  setTelegramClosingConfirmation,
+  triggerTelegramHaptic,
+  useTelegramBackButton,
+} from "./telegram/webapp.js";
 
-const LandingPage = lazy(() =>
-  import("./components/LandingPage.js").then((m) => ({ default: m.LandingPage })),
-);
 const ClassicToolsSheet = lazy(() =>
   import("./components/ClassicToolsSheet.js").then((m) => ({ default: m.ClassicToolsSheet })),
 );
 const CollectiblesSheet = lazy(() =>
   import("./components/CollectiblesSheet.js").then((m) => ({ default: m.CollectiblesSheet })),
-);
-const DappConnectSheet = lazy(() =>
-  import("./components/DappConnectSheet.js").then((m) => ({ default: m.DappConnectSheet })),
 );
 const DevLabSheet = lazy(() =>
   import("./components/DevLabSheet.js").then((m) => ({ default: m.DevLabSheet })),
@@ -87,6 +86,14 @@ const SendSheet = lazy(() =>
 const SwapSheet = lazy(() =>
   import("./components/SwapSheet.js").then((m) => ({ default: m.SwapSheet })),
 );
+const TonConnectSheet = lazy(() =>
+  import("./components/TonConnectSheet.js").then((m) => ({ default: m.TonConnectSheet })),
+);
+const TonWalletSheet = lazy(() =>
+  import("./components/TonWalletSheet.js").then((m) => ({ default: m.TonWalletSheet })),
+);
+
+export type AppDockTab = "wallet" | "ton" | "activity" | "nfts" | "accounts";
 
 type ActiveDrawer =
   | "send"
@@ -95,11 +102,11 @@ type ActiveDrawer =
   | "scan"
   | "tools"
   | "ramp"
-  | "dapp"
+  | "tonConnect"
+  | "dev"
   | "revealSeed"
   | null;
 
-type RouteView = "landing" | "app";
 type ActivityFilter = "all" | "received" | "sent";
 
 interface SendPrefill {
@@ -110,11 +117,10 @@ interface SendPrefill {
 
 const VALID_TABS: readonly AppDockTab[] = [
   "wallet",
-  "nfts",
+  "ton",
   "activity",
-  "dev",
+  "nfts",
   "accounts",
-  "telegram",
 ];
 
 function parseTabFromSearch(search: string): AppDockTab | null {
@@ -126,25 +132,20 @@ function parseTabFromSearch(search: string): AppDockTab | null {
 }
 
 function readLocationRoute(): {
-  view: RouteView;
   tab: AppDockTab | null;
   intent: ActiveIntentRoute | null;
 } {
   if (typeof window === "undefined") {
-    return { view: "landing", tab: null, intent: null };
+    return { tab: null, intent: null };
   }
   const intent = parseIntentRouteFromLocation();
   if (intent) {
-    return { view: "app", tab: "wallet", intent };
+    return { tab: "wallet", intent };
   }
-  if (window.location.pathname.startsWith("/app")) {
-    return {
-      view: "app",
-      tab: parseTabFromSearch(window.location.search),
-      intent: null,
-    };
-  }
-  return { view: "landing", tab: null, intent: null };
+  return {
+    tab: parseTabFromSearch(window.location.search),
+    intent: null,
+  };
 }
 
 function drawerMetadata(
@@ -179,13 +180,18 @@ function drawerMetadata(
       };
     case "ramp":
       return {
-        title: "USDC Bridge & On/Off Ramps",
-        subtitle: "Circle CCTP (6↔7 decimals guard), MoonPay & Transak",
+        title: "CCTP Precision Guard",
+        subtitle: "Circle CCTP 6↔7 USDC decimal guard & forwarder validator",
       };
-    case "dapp":
+    case "tonConnect":
       return {
-        title: "Connect dApp",
-        subtitle: "WalletConnect v2 / Reown & SEP-43 Provider",
+        title: "TON Connect v2",
+        subtitle: "Telegram ToS §7.3 compliant encrypted NaCl bridge sessions",
+      };
+    case "dev":
+      return {
+        title: "Developer Workbench",
+        subtitle: "Soroban RPC Telemetry, Contracts, Raw XDR & SEP-0005 Tools",
       };
     case "revealSeed":
       return {
@@ -199,33 +205,22 @@ function renderDockIcon(tab: AppDockTab) {
   switch (tab) {
     case "wallet":
       return <IconWallet size={19} />;
+    case "ton":
+      return <IconZap size={19} />;
     case "nfts":
       return <IconNft size={19} />;
     case "activity":
       return <IconActivity size={19} />;
-    case "dev":
-      return <IconCode size={19} />;
     case "accounts":
       return <IconAccounts size={19} />;
-    case "telegram":
-      return <IconTelegram size={19} />;
   }
 }
 
-const SIDEBAR_ITEMS: ReadonlyArray<{ id: AppDockTab; label: string }> = [
-  { id: "wallet", label: "Wallet" },
-  { id: "nfts", label: "NFTs" },
-  { id: "activity", label: "Activity" },
-  { id: "dev", label: "Dev Lab" },
-  { id: "accounts", label: "Vault" },
-  { id: "telegram", label: "Telegram" },
-];
-
 const MOBILE_DOCK_ITEMS: ReadonlyArray<{ id: AppDockTab; label: string }> = [
-  { id: "wallet", label: "Wallet" },
-  { id: "nfts", label: "NFTs" },
+  { id: "wallet", label: "Stellar" },
+  { id: "ton", label: "TON" },
   { id: "activity", label: "Activity" },
-  { id: "dev", label: "Dev Lab" },
+  { id: "nfts", label: "NFTs" },
   { id: "accounts", label: "Vault" },
 ];
 
@@ -1892,18 +1887,37 @@ function WalletShell({
             {pendingDappConsent.scanReport && (
               <div
                 className={
-                  pendingDappConsent.scanReport.verdict === "warning"
-                    ? "aw-banner aw-banner--warn"
-                    : "aw-banner"
+                  pendingDappConsent.scanReport.verdict === "malicious"
+                    ? "aw-banner aw-banner--danger"
+                    : pendingDappConsent.scanReport.verdict === "warning"
+                      ? "aw-banner aw-banner--warn"
+                      : "aw-banner"
                 }
-                style={{ fontSize: 12 }}
+                style={{ fontSize: 12, display: "grid", gap: 6 }}
               >
-                <strong>
-                  Scan &amp; Shield: {pendingDappConsent.scanReport.verdict.toUpperCase()}
-                </strong>
-                {pendingDappConsent.scanReport.findings[0] && (
-                  <div style={{ marginTop: 4 }}>
-                    {pendingDappConsent.scanReport.findings[0].description}
+                <div>
+                  <strong>
+                    Scan &amp; Shield: {pendingDappConsent.scanReport.verdict.toUpperCase()}
+                  </strong>
+                  {pendingDappConsent.scanReport.estimatedFeeStroops !== "0" && (
+                    <span style={{ marginLeft: 8, color: "var(--aw-ink-secondary)" }}>
+                      · Max Fee: {pendingDappConsent.scanReport.estimatedFeeStroops} stroops
+                    </span>
+                  )}
+                </div>
+                {pendingDappConsent.scanReport.findings.map((finding, idx) => (
+                  <div key={`${finding.code}-${idx}`}>
+                    <strong>{finding.title}:</strong> {finding.description}
+                  </div>
+                ))}
+                {pendingDappConsent.scanReport.balanceDiffs.length > 0 && (
+                  <div style={{ display: "grid", gap: 3 }}>
+                    <span style={{ fontWeight: 600 }}>Projected Balance Changes:</span>
+                    {pendingDappConsent.scanReport.balanceDiffs.map((d, idx) => (
+                      <code key={`${d.assetCode}-${idx}`} style={{ fontSize: 11 }}>
+                        {d.delta} {d.assetCode} ({d.address.slice(0, 6)}…{d.address.slice(-4)})
+                      </code>
+                    ))}
                   </div>
                 )}
               </div>
@@ -1921,6 +1935,10 @@ function WalletShell({
                 type="button"
                 className="aw-btn-primary"
                 style={{ flex: 1 }}
+                disabled={
+                  pendingDappConsent.scanReport?.verdict === "malicious" ||
+                  Boolean(pendingDappConsent.scanReport?.findings.some((f) => f.blocksSigning))
+                }
                 onClick={() => resolveDappConsent(true)}
               >
                 Approve &amp; Sign

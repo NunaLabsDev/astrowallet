@@ -63,17 +63,136 @@ export interface FetchSorobitShowcaseResult {
 const DATA_JSON_PREFIX = "data:application/json;utf8,";
 const DATA_SVG_PREFIX = "data:image/svg+xml;utf8,";
 
+const ALLOWED_SVG_TAGS = new Set([
+  "svg",
+  "g",
+  "defs",
+  "title",
+  "desc",
+  "path",
+  "circle",
+  "ellipse",
+  "rect",
+  "line",
+  "polyline",
+  "polygon",
+  "lineargradient",
+  "radialgradient",
+  "stop",
+  "clippath",
+  "mask",
+  "pattern",
+  "text",
+  "tspan",
+]);
+
+const ALLOWED_SVG_ATTRS = new Set([
+  "xmlns",
+  "viewbox",
+  "width",
+  "height",
+  "x",
+  "y",
+  "x1",
+  "y1",
+  "x2",
+  "y2",
+  "cx",
+  "cy",
+  "r",
+  "rx",
+  "ry",
+  "d",
+  "points",
+  "fill",
+  "fill-opacity",
+  "fill-rule",
+  "stroke",
+  "stroke-width",
+  "stroke-linecap",
+  "stroke-linejoin",
+  "stroke-dasharray",
+  "stroke-dashoffset",
+  "stroke-opacity",
+  "opacity",
+  "transform",
+  "id",
+  "class",
+  "clip-path",
+  "clip-rule",
+  "mask",
+  "offset",
+  "stop-color",
+  "stop-opacity",
+  "gradientunits",
+  "gradienttransform",
+  "spreadmethod",
+  "patternunits",
+  "text-anchor",
+  "dominant-baseline",
+  "font-size",
+  "font-weight",
+  "font-family",
+  "letter-spacing",
+  "dx",
+  "dy",
+  "preserveaspectratio",
+  "version",
+]);
+
+const ATTR_PAIR_REGEX = /([a-zA-Z_:][a-zA-Z0-9_.:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')/g;
+
 /**
- * Validates and sanitizes an on-chain `<svg>...</svg>` string so unsafe script tags or handlers never render.
+ * Validates an on-chain `<svg>...</svg>` string with a strict tag and attribute allowlist.
+ * Rejects scripts, `foreignObject`, `<use>`, SMIL animations, HTML/entity-encoded URIs, and event handlers.
  */
 export function sanitizeOnChainSvg(rawSvg: string): string {
   const trimmed = rawSvg.trim();
   if (!trimmed.startsWith("<svg") || !trimmed.endsWith("</svg>")) {
     throw new Error("Invalid SVG markup returned from Soroban contract");
   }
-  if (/<script\b/i.test(trimmed) || /\son[a-z]+\s*=/i.test(trimmed) || /javascript:/i.test(trimmed)) {
+  if (/<!\[CDATA\[|<!DOCTYPE|<!--|\son[a-z]+\s*=/i.test(trimmed)) {
     throw new Error("Unsafe script or event handler detected in SVG markup");
   }
+
+  let match: RegExpExecArray | null;
+  const tagRegex = /<\/?([a-zA-Z][a-zA-Z0-9:-]*)([^>]*)>/g;
+  while ((match = tagRegex.exec(trimmed)) !== null) {
+    const tagName = (match[1] ?? "").toLowerCase();
+    const attrSection = match[2] ?? "";
+    if (!ALLOWED_SVG_TAGS.has(tagName)) {
+      throw new Error(`Disallowed SVG tag <${match[1] ?? "unknown"}> rejected`);
+    }
+    if (attrSection.includes("&#")) {
+      throw new Error("Encoded numeric character entities are disallowed inside SVG attributes");
+    }
+
+    // Remove matched attributes and verify no unquoted or malformed attribute leftovers remain
+    let strippedAttrs = attrSection.trim();
+    if (strippedAttrs.endsWith("/")) {
+      strippedAttrs = strippedAttrs.slice(0, -1).trim();
+    }
+
+    ATTR_PAIR_REGEX.lastIndex = 0;
+    let attrMatch: RegExpExecArray | null;
+    let remaining = strippedAttrs;
+    while ((attrMatch = ATTR_PAIR_REGEX.exec(strippedAttrs)) !== null) {
+      const attrName = (attrMatch[1] ?? "").toLowerCase();
+      const attrVal = attrMatch[2] ?? attrMatch[3] ?? "";
+      if (attrName.startsWith("on") || attrName === "href" || attrName === "xlink:href" || !ALLOWED_SVG_ATTRS.has(attrName)) {
+        throw new Error(`Unsafe or disallowed SVG attribute "${attrMatch[1] ?? ""}" rejected`);
+      }
+      if (/javascript:|vbscript:|data:|expression\(|url\(\s*['"]?\s*(?:https?:|\/\/)/i.test(attrVal)) {
+        throw new Error(`Unsafe URI or script value in SVG attribute "${attrMatch[1] ?? ""}"`);
+      }
+      remaining = remaining.replace(attrMatch[0], "").trim();
+    }
+
+    if (remaining.length > 0) {
+      throw new Error(`Malformed or unquoted SVG attribute content rejected: ${remaining.slice(0, 40)}`);
+    }
+  }
+
   return trimmed;
 }
 
@@ -333,10 +452,13 @@ export async function fetchSorobitShowcase(
     fnName: "total_supply",
     args: [],
     fetchFn,
-  }).catch(() => 3);
+  });
 
   const parsedSupply = Number(rawSupply);
-  const totalSupply = Number.isFinite(parsedSupply) && parsedSupply >= 0 ? Math.trunc(parsedSupply) : 3;
+  if (!Number.isFinite(parsedSupply) || parsedSupply < 0) {
+    throw new Error("Invalid Sorobits total_supply returned from contract");
+  }
+  const totalSupply = Math.trunc(parsedSupply);
   const limit = Math.max(0, Math.min(totalSupply, input.maxTokens ?? 3));
 
   const ids = Array.from({ length: limit }, (_, idx) => idx);

@@ -10,6 +10,7 @@ export default tseslint.config(
       "**/.turbo/**",
       "**/.wrangler/**",
       "coverage/**",
+      ".agents/**",
     ],
   },
   js.configs.recommended,
@@ -73,6 +74,10 @@ export default tseslint.config(
               name: "@astrowallet/stellar-core",
               message: "apps/server must remain non-custodial and never import @astrowallet/stellar-core.",
             },
+            {
+              name: "@astrowallet/ton-core",
+              message: "apps/server must remain non-custodial and never import @astrowallet/ton-core.",
+            },
           ],
         },
       ],
@@ -93,6 +98,7 @@ export default tseslint.config(
           ],
           patterns: [
             { group: ["@stellar/*"], message: "@astrowallet/domain must not depend on Stellar SDKs." },
+            { group: ["@ton/*"], message: "@astrowallet/domain must not depend on TON SDKs." },
             { group: ["cloudflare:*"], message: "@astrowallet/domain must not depend on Cloudflare." },
             { group: ["@astrowallet/*"], message: "@astrowallet/domain is the root layer and cannot import peer packages." },
             { group: ["@noble/*"], message: "@astrowallet/domain must not depend on crypto primitives." },
@@ -115,9 +121,34 @@ export default tseslint.config(
             { name: "@astrowallet/security-shield", message: "Peer package import forbidden by hexagonal DAG." },
             { name: "@astrowallet/defi", message: "Peer package import forbidden by hexagonal DAG." },
             { name: "@astrowallet/tg-protocol", message: "Peer package import forbidden by hexagonal DAG." },
+            { name: "@astrowallet/ton-core", message: "Peer package import forbidden by hexagonal DAG." },
           ],
           patterns: [
             { group: ["cloudflare:*"], message: "stellar-core cannot import Cloudflare modules." },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    files: ["packages/ton-core/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            { name: "react", message: "ton-core cannot import UI frameworks." },
+            { name: "react-dom", message: "ton-core cannot import UI frameworks." },
+            { name: "grammy", message: "ton-core cannot import Telegram bot SDKs." },
+            { name: "hono", message: "ton-core cannot import HTTP server frameworks." },
+            { name: "@astrowallet/stellar-core", message: "Peer package import forbidden by hexagonal DAG." },
+            { name: "@astrowallet/security-shield", message: "Peer package import forbidden by hexagonal DAG." },
+            { name: "@astrowallet/defi", message: "Peer package import forbidden by hexagonal DAG." },
+            { name: "@astrowallet/tg-protocol", message: "Peer package import forbidden by hexagonal DAG." },
+          ],
+          patterns: [
+            { group: ["@stellar/*"], message: "ton-core cannot import Stellar SDKs." },
+            { group: ["cloudflare:*"], message: "ton-core cannot import Cloudflare modules." },
           ],
         },
       ],
@@ -137,6 +168,7 @@ export default tseslint.config(
             { name: "@astrowallet/stellar-core", message: "Peer package import forbidden by hexagonal DAG." },
             { name: "@astrowallet/defi", message: "Peer package import forbidden by hexagonal DAG." },
             { name: "@astrowallet/tg-protocol", message: "Peer package import forbidden by hexagonal DAG." },
+            { name: "@astrowallet/ton-core", message: "Peer package import forbidden by hexagonal DAG." },
           ],
           patterns: [
             { group: ["cloudflare:*"], message: "security-shield cannot import Cloudflare modules directly." },
@@ -159,6 +191,7 @@ export default tseslint.config(
             { name: "@astrowallet/stellar-core", message: "Peer package import forbidden by hexagonal DAG." },
             { name: "@astrowallet/security-shield", message: "Peer package import forbidden by hexagonal DAG." },
             { name: "@astrowallet/tg-protocol", message: "Peer package import forbidden by hexagonal DAG." },
+            { name: "@astrowallet/ton-core", message: "Peer package import forbidden by hexagonal DAG." },
           ],
           patterns: [
             { group: ["cloudflare:*"], message: "defi cannot import Cloudflare modules." },
@@ -181,6 +214,7 @@ export default tseslint.config(
             { name: "@astrowallet/stellar-core", message: "Peer package import forbidden by hexagonal DAG." },
             { name: "@astrowallet/security-shield", message: "Peer package import forbidden by hexagonal DAG." },
             { name: "@astrowallet/defi", message: "Peer package import forbidden by hexagonal DAG." },
+            { name: "@astrowallet/ton-core", message: "Peer package import forbidden by hexagonal DAG." },
           ],
           patterns: [
             { group: ["cloudflare:*"], message: "tg-protocol cannot import Cloudflare modules." },

@@ -101,5 +101,18 @@ describe("Telegram binding & signed intent schemas", () => {
     expect(summary.spendableXlm).toBe("20.5000000");
     expect(summary.reclaimableTrustlines).toHaveLength(2);
     expect(summary.reclaimableXlm).toBe("1.0");
+
+    const exactBigIntSummary = calculateAccountReserveSummary({
+      nativeBalanceXlm: "100000000.0000001",
+      subentryCount: 5,
+      sellingLiabilitiesXlm: "0.0000001",
+      balances: [
+        { assetCode: "XLM", balance: "100000000.0000001" },
+        { assetCode: "BAD", assetIssuer: SAMPLE_G, balance: "not-a-number" },
+      ],
+    });
+    expect(exactBigIntSummary.minReserveXlm).toBe("3.5");
+    expect(exactBigIntSummary.spendableXlm).toBe("99999996.5000000");
+    expect(exactBigIntSummary.reclaimableTrustlines).toHaveLength(0);
   });
 });

@@ -6,6 +6,7 @@ import {
   type TypedMemoInput,
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
+import { mapSep7MemoKind } from "../state/session-vault.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import {
   IconCheck,
@@ -97,7 +98,12 @@ export function SendSheet({
     () =>
       availableAssets.find(
         (b) => assetKeyOf(b.assetCode, b.assetIssuer) === selectedAssetKey,
-      ) ?? availableAssets[0]!,
+      ) ??
+      availableAssets[0] ?? {
+        assetCode: "XLM",
+        balance: "0",
+        isVerifiedAsset: true,
+      },
     [availableAssets, selectedAssetKey],
   );
 
@@ -243,7 +249,7 @@ export function SendSheet({
           }
         }
         if (parsed.memo) {
-          setMemoKind(parsed.memoType === "MEMO_ID" ? "id" : "text");
+          setMemoKind(mapSep7MemoKind(parsed.memoType));
           setMemoValue(parsed.memo);
         }
         setError(null);

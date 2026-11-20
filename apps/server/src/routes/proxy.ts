@@ -16,6 +16,7 @@ import {
 import type { KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { z } from "zod";
+import type { ServerRepository } from "../db/repository.js";
 import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
 import type { FetchLike } from "../stellar-verifier.js";
 
@@ -30,6 +31,7 @@ export type ProxyRouteEnv = {
   };
   Variables: {
     config: ServerConfig;
+    repo?: ServerRepository;
   };
 };
 
@@ -160,6 +162,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
   router.use("*", async (c, next) => {
     const config = c.get("config");
     const limit = await checkRateLimit({
+      repository: c.get("repo"),
       cache: c.env.CACHE,
       scope: "proxy",
       clientKey: clientKeyFromHeaders(c.req.raw.headers),
@@ -223,9 +226,35 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     if (Number.isFinite(declaredLength) && declaredLength > STELLAR_TOML_MAX_BYTES) {
       return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
     }
-    const text = await res.text();
-    if (new TextEncoder().encode(text).length > STELLAR_TOML_MAX_BYTES) {
-      return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
+
+    let text: string;
+    if (res.body) {
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let totalBytes = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        totalBytes += value.byteLength;
+        if (totalBytes > STELLAR_TOML_MAX_BYTES) {
+          await reader.cancel().catch(() => {});
+          return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
+        }
+        chunks.push(value);
+      }
+      const merged = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+      text = new TextDecoder().decode(merged);
+    } else {
+      text = await res.text();
+      if (new TextEncoder().encode(text).length > STELLAR_TOML_MAX_BYTES) {
+        return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
+      }
     }
     if (c.env.CACHE) {
       await c.env.CACHE.put(cacheKey, text, { expirationTtl: 900 });
@@ -284,7 +313,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
               provider: "soroswap",
               inputAmount: reqBody.amount,
               expectedOutputAmount: out,
-              priceImpactPct: data.priceImpactPct ?? "0.05",
+              priceImpactPct: data.priceImpactPct ?? "N/A",
               unsignedXdr,
             });
           }

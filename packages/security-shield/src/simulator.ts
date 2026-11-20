@@ -1,3 +1,4 @@
+import { StrKey, xdr } from "@stellar/stellar-sdk";
 import { StellarAddressSchema, type BalanceDiff, type StellarAddress } from "@astrowallet/domain";
 
 export interface SimulatedSorobanResult {
@@ -32,20 +33,119 @@ interface RpcSimulateResponse {
   };
 }
 
-function extractBalanceFromStateEntry(entry: unknown): {
+interface ExtractedStateBalance {
   address?: string | undefined;
   amount?: bigint | undefined;
-} | null {
+  assetCode?: string | undefined;
+  assetIssuer?: string | undefined;
+}
+
+function decodeAsciiAssetCode(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes).replace(/\0+$/, "").trim() || "UNKNOWN";
+}
+
+function tryBigInt(val: unknown): bigint | undefined {
+  if (typeof val === "bigint") return val;
+  if (typeof val === "number" && Number.isInteger(val)) return BigInt(val);
+  if (typeof val === "string" && /^-?\d+$/.test(val.trim())) return BigInt(val.trim());
+  return undefined;
+}
+
+function extractTrustlineAssetFromXdr(asset: xdr.TrustLineAsset): {
+  assetCode: string;
+  assetIssuer?: string | undefined;
+} {
+  if (asset.type === "assetTypeNative") {
+    return { assetCode: "XLM" };
+  }
+  if (asset.type === "assetTypeCreditAlphanum4") {
+    return {
+      assetCode: decodeAsciiAssetCode(asset.alphaNum4.assetCode.toBytes()),
+      assetIssuer: StrKey.encodeEd25519PublicKey(asset.alphaNum4.issuer.ed25519.toBytes()),
+    };
+  }
+  if (asset.type === "assetTypeCreditAlphanum12") {
+    return {
+      assetCode: decodeAsciiAssetCode(asset.alphaNum12.assetCode.toBytes()),
+      assetIssuer: StrKey.encodeEd25519PublicKey(asset.alphaNum12.issuer.ed25519.toBytes()),
+    };
+  }
+  return { assetCode: "LP_SHARE" };
+}
+
+function extractBalanceFromStateEntry(entry: unknown): ExtractedStateBalance | null {
+  if (typeof entry === "string") {
+    const trimmed = entry.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = xdr.LedgerEntry.fromXDR(trimmed, "base64");
+      if (parsed.data.type === "account") {
+        const account = parsed.data.account;
+        return {
+          address: StrKey.encodeEd25519PublicKey(account.accountId.ed25519.toBytes()),
+          amount: BigInt(account.balance),
+          assetCode: "XLM",
+        };
+      }
+      if (parsed.data.type === "trustline") {
+        const tl = parsed.data.trustLine;
+        const assetInfo = extractTrustlineAssetFromXdr(tl.asset);
+        return {
+          address: StrKey.encodeEd25519PublicKey(tl.accountId.ed25519.toBytes()),
+          amount: BigInt(tl.balance),
+          assetCode: assetInfo.assetCode,
+          assetIssuer: assetInfo.assetIssuer,
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
   if (!entry || typeof entry !== "object") return null;
   const obj = entry as Record<string, unknown>;
 
-  // Handle JSON-formatted ledger entry balance shapes defensively
-  const balanceVal =
-    typeof obj.amount === "string" || typeof obj.amount === "number" || typeof obj.amount === "bigint"
-      ? BigInt(obj.amount)
-      : typeof obj.balance === "string" || typeof obj.balance === "number" || typeof obj.balance === "bigint"
-        ? BigInt(obj.balance)
-        : undefined;
+  // Support nested Soroban RPC xdrFormat="json" shapes: { data: { account / trustLine } }
+  const dataObj =
+    obj.data && typeof obj.data === "object" ? (obj.data as Record<string, unknown>) : obj;
+  if (dataObj.account && typeof dataObj.account === "object") {
+    const acc = dataObj.account as Record<string, unknown>;
+    const bal = tryBigInt(acc.balance);
+    if (bal !== undefined) {
+      return {
+        address: typeof acc.accountId === "string" ? acc.accountId : undefined,
+        amount: bal,
+        assetCode: "XLM",
+      };
+    }
+  }
+  if (dataObj.trustLine && typeof dataObj.trustLine === "object") {
+    const tl = dataObj.trustLine as Record<string, unknown>;
+    const bal = tryBigInt(tl.balance);
+    if (bal !== undefined) {
+      const assetObj =
+        tl.asset && typeof tl.asset === "object" ? (tl.asset as Record<string, unknown>) : undefined;
+      const alpha = (assetObj?.alphaNum4 ?? assetObj?.alphaNum12) as
+        | { assetCode?: unknown; issuer?: unknown }
+        | undefined;
+      return {
+        address: typeof tl.accountId === "string" ? tl.accountId : undefined,
+        amount: bal,
+        assetCode:
+          assetObj?.native !== undefined
+            ? "XLM"
+            : typeof alpha?.assetCode === "string"
+              ? alpha.assetCode
+              : "UNKNOWN",
+        assetIssuer: typeof alpha?.issuer === "string" ? alpha.issuer : undefined,
+      };
+    }
+  }
+
+  // Handle flat JSON-formatted balance shapes defensively without assuming XLM when asset is missing
+  const balanceVal = tryBigInt(obj.amount) ?? tryBigInt(obj.balance);
+  if (balanceVal === undefined) return null;
 
   const addrVal =
     typeof obj.address === "string"
@@ -54,8 +154,20 @@ function extractBalanceFromStateEntry(entry: unknown): {
         ? obj.accountId
         : undefined;
 
-  if (balanceVal === undefined) return null;
-  return { address: addrVal, amount: balanceVal };
+  const rawCode =
+    typeof obj.assetCode === "string"
+      ? obj.assetCode.trim()
+      : obj.assetType === "native" || obj.isNative === true
+        ? "XLM"
+        : "UNKNOWN";
+  const rawIssuer = typeof obj.assetIssuer === "string" ? obj.assetIssuer.trim() : undefined;
+
+  return {
+    address: addrVal,
+    amount: balanceVal,
+    assetCode: rawCode || "UNKNOWN",
+    assetIssuer: rawIssuer,
+  };
 }
 
 function parseStateChangeBalanceDiffs(
@@ -78,6 +190,10 @@ function parseStateChangeBalanceDiffs(
     const delta = afterAmt - beforeAmt;
     if (delta === 0n) continue;
 
+    const assetCode = afterInfo?.assetCode ?? beforeInfo?.assetCode ?? "UNKNOWN";
+    const rawIssuer = afterInfo?.assetIssuer ?? beforeInfo?.assetIssuer;
+    const parsedIssuer = rawIssuer ? StellarAddressSchema.safeParse(rawIssuer) : null;
+
     const sign = delta > 0n ? "+" : "-";
     const abs = delta > 0n ? delta : -delta;
     const whole = abs / 10_000_000n;
@@ -85,7 +201,8 @@ function parseStateChangeBalanceDiffs(
 
     diffs.push({
       address: parsedAddr.data as StellarAddress,
-      assetCode: "XLM",
+      assetCode,
+      assetIssuer: parsedIssuer?.success ? (parsedIssuer.data as StellarAddress) : undefined,
       delta: `${sign}${whole.toString()}.${frac}`,
     });
   }

@@ -93,6 +93,15 @@ function assertMatchingNetwork(
   }
 }
 
+function bytesEqualConstantTime(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= (a[i] ?? 0) ^ (b[i] ?? 0);
+  }
+  return diff === 0;
+}
+
 async function signAuthEntryPayload(
   rawEntryXdr: string,
   keypair: Keypair,
@@ -105,27 +114,54 @@ async function signAuthEntryPayload(
   }
 
   // Case 1: HashIdPreimage (SEP-43 / WalletConnect standard preimage)
+  let preimage: xdr.HashIdPreimage | null = null;
   try {
-    const preimage = xdr.HashIdPreimage.fromXDR(cleaned, "base64");
-    if (preimage.type === "envelopeTypeSorobanAuthorization") {
-      const digest = sha256(base64ToBytes(cleaned));
-      const signature = keypair.sign(digest);
-      return {
-        signedAuthEntry: bytesToBase64(signature),
-        signerAddress: keypair.publicKey() as ClassicAddress,
-      };
-    }
+    preimage = xdr.HashIdPreimage.fromXDR(cleaned, "base64");
   } catch {
-    // Fall through to SorobanAuthorizationEntry check
+    preimage = null;
+  }
+
+  if (preimage !== null) {
+    let networkIdBytes: Uint8Array;
+    if (preimage.type === "envelopeTypeSorobanAuthorization") {
+      networkIdBytes = preimage.sorobanAuthorization.networkId.toBytes();
+    } else if (preimage.type === "envelopeTypeSorobanAuthorizationWithAddress") {
+      networkIdBytes = preimage.sorobanAuthorizationWithAddress.networkId.toBytes();
+    } else {
+      throw new Error(`Unsupported HashIdPreimage type for Soroban auth: ${preimage.type}`);
+    }
+
+    const expectedNetworkId = sha256(new TextEncoder().encode(networkPassphrase));
+    if (!bytesEqualConstantTime(networkIdBytes, expectedNetworkId)) {
+      throw new Error("Cross-network Soroban auth entry networkId mismatch rejected");
+    }
+
+    const digest = sha256(base64ToBytes(cleaned));
+    const signature = keypair.sign(digest);
+    return {
+      signedAuthEntry: bytesToBase64(signature),
+      signerAddress: keypair.publicKey() as ClassicAddress,
+    };
   }
 
   // Case 2: SorobanAuthorizationEntry XDR
+  if (
+    validUntilLedgerSeq === undefined ||
+    !Number.isInteger(validUntilLedgerSeq) ||
+    validUntilLedgerSeq < 1 ||
+    validUntilLedgerSeq > 2_000_000_000
+  ) {
+    throw new Error(
+      "validUntilLedgerSeq must be an integer between 1 and 2,000,000,000 for SorobanAuthorizationEntry",
+    );
+  }
+
   try {
     const entry = xdr.SorobanAuthorizationEntry.fromXDR(cleaned, "base64");
     const authorized = await authorizeEntry(
       entry,
       keypair,
-      validUntilLedgerSeq ?? 0,
+      validUntilLedgerSeq,
       networkPassphrase,
     );
     return {

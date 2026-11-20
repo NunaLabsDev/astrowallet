@@ -28,10 +28,14 @@ function buildDummyTxXdr(source: string, passphrase: string): string {
     .toXDR();
 }
 
-function buildDummyAuthPreimageB64(contractTarget: string): string {
+function buildDummyAuthPreimageB64(
+  contractTarget: string,
+  networkPassphrase: string = Networks.TESTNET,
+): string {
+  const networkId = sha256(new TextEncoder().encode(networkPassphrase));
   const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
     new xdr.HashIdPreimageSorobanAuthorization({
-      networkId: Buffer.alloc(32, 7),
+      networkId,
       nonce: xdr.Int64.fromString("123456"),
       signatureExpirationLedger: 5000,
       invocation: new xdr.SorobanAuthorizedInvocation({
@@ -170,5 +174,95 @@ describe("Ecosystem dApp interoperability (WalletConnect v2, Stellar Wallets Kit
     expect(await sep43.isConnected()).toBe(true);
     const signedMsg = await sep43.signMessage("SEP-43 Auth");
     expect(signedMsg.signerAddress).toBe(keypair.publicKey());
+  });
+
+  it("validates HashIdPreimageWithAddress networkId and SorobanAuthorizationEntry validUntilLedgerSeq", async () => {
+    const keypair = Keypair.random();
+    const responder = createWalletConnectStellarResponder({
+      network: "testnet",
+      networkPassphrase: Networks.TESTNET,
+      getKeypair: () => keypair,
+      authorizeRequest: async () => true,
+    });
+
+    const testnetWithAddr = xdr.HashIdPreimage.envelopeTypeSorobanAuthorizationWithAddress(
+      new xdr.HashIdPreimageSorobanAuthorizationWithAddress({
+        networkId: sha256(new TextEncoder().encode(Networks.TESTNET)),
+        nonce: 99n,
+        signatureExpirationLedger: 12000,
+        address: new Address(keypair.publicKey()).toScAddress(),
+        invocation: new xdr.SorobanAuthorizedInvocation({
+          function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+            new xdr.InvokeContractArgs({
+              contractAddress: new Address(keypair.publicKey()).toScAddress(),
+              functionName: "swap",
+              args: [],
+            }),
+          ),
+          subInvocations: [],
+        }),
+      }),
+    ).toXDR("base64");
+
+    const okWithAddr = (await responder.handleRequest({
+      method: "stellar_signAuthEntry",
+      chainId: "stellar:testnet",
+      params: { entryXdr: testnetWithAddr },
+    })) as { signedAuthEntry: string; signerAddress: string };
+    expect(okWithAddr.signerAddress).toBe(keypair.publicKey());
+
+    const wrongNetworkPreimage = buildDummyAuthPreimageB64(keypair.publicKey(), Networks.PUBLIC);
+    await expect(
+      responder.handleRequest({
+        method: "stellar_signAuthEntry",
+        chainId: "stellar:testnet",
+        params: { entryXdr: wrongNetworkPreimage },
+      }),
+    ).rejects.toThrow(/networkId mismatch/i);
+
+    const authEntryXdr = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsAddress(
+        new xdr.SorobanAddressCredentials({
+          address: new Address(keypair.publicKey()).toScAddress(),
+          nonce: 1n,
+          signatureExpirationLedger: 0,
+          signature: xdr.ScVal.scvVec([]),
+        }),
+      ),
+      rootInvocation: new xdr.SorobanAuthorizedInvocation({
+        function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+          new xdr.InvokeContractArgs({
+            contractAddress: new Address(keypair.publicKey()).toScAddress(),
+            functionName: "transfer",
+            args: [],
+          }),
+        ),
+        subInvocations: [],
+      }),
+    }).toXDR("base64");
+
+    await expect(
+      responder.handleRequest({
+        method: "stellar_signAuthEntry",
+        chainId: "stellar:testnet",
+        params: { entryXdr: authEntryXdr },
+      }),
+    ).rejects.toThrow(/validUntilLedgerSeq/i);
+
+    await expect(
+      responder.handleRequest({
+        method: "stellar_signAuthEntry",
+        chainId: "stellar:testnet",
+        params: { entryXdr: authEntryXdr, validUntilLedgerSeq: 2_000_000_001 },
+      }),
+    ).rejects.toThrow(/validUntilLedgerSeq/i);
+
+    const signedEntry = (await responder.handleRequest({
+      method: "stellar_signAuthEntry",
+      chainId: "stellar:testnet",
+      params: { entryXdr: authEntryXdr, validUntilLedgerSeq: 500_000 },
+    })) as { signedAuthEntry: string; signerAddress: string };
+    expect(signedEntry.signerAddress).toBe(keypair.publicKey());
+    expect(signedEntry.signedAuthEntry.length).toBeGreaterThan(20);
   });
 });

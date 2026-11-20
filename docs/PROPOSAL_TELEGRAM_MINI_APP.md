@@ -1,8 +1,14 @@
-# Propuesta (SIN DECIDIR): AstroWallet 100% dentro de Telegram como Mini App
+# Propuesta (APROBADA E IMPLEMENTADA): AstroWallet 100% dentro de Telegram como Mini App Multichain (Cláusula 7.3)
 
-> **Estado:** propuesta para investigar en la próxima sesión. **No se ha implementado nada** y **no se ha cambiado ningún contrato.** La Regla 7 de [`AGENTS.md`](../AGENTS.md) (bot puro, sin Mini App/WebView) **sigue vigente** hasta que esta propuesta se apruebe de forma explícita.
+> **Estado:** **APROBADA E IMPLEMENTADA (2026-11-20).** La Regla 7 de [`AGENTS.md`](../AGENTS.md) ha sido enmendada para operar exclusivamente como **Telegram Mini App Multichain** cumpliendo la **Cláusula 7.3 (*Multichain Wallets*)** de los [Términos del Servicio para Desarrolladores de Telegram](https://core.telegram.org/bots/terms#7-blockchain-integration).
 >
-> **Origen:** petición del propietario del proyecto (2026-11-19): *"todo debe ser dentro de Telegram, sin salir de Telegram; si tenemos que entrar a la wallet, entremos desde una app de Telegram"*.
+> **Decisión verificada:**
+> - La aplicación se ejecuta **exclusivamente dentro de Telegram** (`web_app` en chats privados y `https://t.me/<bot>/<short_name>?startapp=...` en grupos/inline), eliminando el sitio web/landing pública y bloqueando el acceso fuera de Telegram (salvo bandera explícita de desarrollo en Testnet).
+> - La identidad del usuario se verifica en el servidor mediante HMAC-SHA256 de `Telegram.WebApp.initData` (`POST /v1/tg/auth`, `auth_date <= 300s`).
+> - Cumplimiento Cláusula 7.3–7.4: gestión nativa Stellar (`G...`/`C...`) + TON (`WalletContractV4` / `WalletContractV5R1`, BIP-39 SLIP-0010 `m/44'/607'/i'`) dentro de la misma interfaz; conexiones externas exclusivamente mediante **TON Connect v2** (sin conectores WalletConnect/Reown ni `window.stellar` ni catálogos de apps no-TON).
+> - Regla 4 intacta: claves, PINs y frases semilla **nunca** tocan `Telegram.WebApp.CloudStorage`, `localStorage`, `sessionStorage`, servidor ni D1/KV.
+>
+> **Origen:** petición del propietario del proyecto (2026-11-19 / 2026-11-20): *"la app debe estar bien diseñada para Telegram y funcionar exclusivamente dentro de Telegram, sin abrir en otra web o navegador, cumpliendo las reglas"* .
 
 ---
 

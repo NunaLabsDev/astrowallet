@@ -102,14 +102,18 @@ export function createHorizonPathSwapAdapter(input: {
             _embedded?: { records?: HorizonStrictSendPathRecord[] };
           };
           const records = body._embedded?.records ?? [];
-          if (records.length === 0) {
+          const [first, ...rest] = records;
+          if (!first) {
             throw new Error(`No liquidity path found between ${from.code} and ${to.code}`);
           }
 
-          let best = records[0]!;
-          for (const rec of records) {
-            if (Number(rec.destination_amount) > Number(best.destination_amount)) {
+          let best = first;
+          let bestStroops = decimalToStroops7(best.destination_amount);
+          for (const rec of rest) {
+            const candidateStroops = decimalToStroops7(rec.destination_amount);
+            if (candidateStroops > bestStroops) {
               best = rec;
+              bestStroops = candidateStroops;
             }
           }
 
@@ -123,7 +127,7 @@ export function createHorizonPathSwapAdapter(input: {
             provider: "horizon-path",
             inputAmount: request.amount,
             expectedOutputAmount: best.destination_amount,
-            priceImpactPct: "0.10",
+            priceImpactPct: "N/A",
             pathAssets,
           };
         } catch (err) {
@@ -200,7 +204,7 @@ export function createSoroswapProxyAdapter(input: {
         provider: data.provider ?? "soroswap",
         inputAmount: request.amount,
         expectedOutputAmount: data.expectedOutputAmount,
-        priceImpactPct: data.priceImpactPct ?? "0.05",
+        priceImpactPct: data.priceImpactPct ?? "N/A",
         unsignedXdr: data.unsignedXdr,
         pathAssets: data.pathAssets,
       };
@@ -515,4 +519,28 @@ export function parseSoroswapQuoteOutput(data: {
     return stroops7ToDecimal(BigInt(String(data.amountOut)));
   }
   return null;
+}
+
+const BPS_DENOMINATOR = 10_000n;
+
+/**
+ * Computes minimum acceptable output stroops (7 decimals) after slippage using exact BigInt math.
+ * Throws if slippage is invalid or minimum received amount drops to `<= 0n`.
+ */
+export function calculateMinReceivedStroops7(
+  expectedAmount: string,
+  slippageBps: number,
+): bigint {
+  if (!Number.isInteger(slippageBps) || slippageBps < 0 || slippageBps >= 10_000) {
+    throw new Error("Slippage tolerance must be an integer between 0 and 9999 bps");
+  }
+  const expectedStroops = decimalToStroops7(expectedAmount);
+  if (expectedStroops <= 0n) {
+    throw new Error("Expected output amount must be positive");
+  }
+  const minReceived = (expectedStroops * (BPS_DENOMINATOR - BigInt(slippageBps))) / BPS_DENOMINATOR;
+  if (minReceived <= 0n) {
+    throw new Error("Minimum received amount after slippage must be greater than zero");
+  }
+  return minReceived;
 }

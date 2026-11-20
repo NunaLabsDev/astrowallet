@@ -1,4 +1,6 @@
+import { decimalToStroops7 } from "@astrowallet/defi";
 import { parseServerConfig } from "@astrowallet/domain";
+import { fetchSep42VerifiedAssets } from "@astrowallet/security-shield";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import { formatIncomingAlertCard } from "@astrowallet/tg-protocol";
 import type { WorkerBindings } from "../app.js";
@@ -8,6 +10,7 @@ import { sendTelegramMessage } from "../telegram-api.js";
 
 const POLL_INTERVAL_MS = 5_000;
 const BATCH_SIZE = 15;
+const MIN_NATIVE_ALERT_STROOPS = 500_000n; // 0.05 XLM dust spam filter
 
 interface WatcherStatus {
   lastLedger: number;
@@ -78,75 +81,108 @@ export class ChainWatcherDO {
       return;
     }
 
-    const repo = createD1Repository(this.env.DB);
-    const watched = await repo.listWatchedAccounts();
-    if (watched.length === 0) {
-      return;
-    }
-
-    const savedOffset = (await this.state.storage.get<number>("batch_offset")) ?? 0;
-    const start = savedOffset >= watched.length ? 0 : savedOffset;
-    const batch = watched.slice(start, start + BATCH_SIZE);
-    const nextOffset = start + BATCH_SIZE >= watched.length ? 0 : start + BATCH_SIZE;
-    await this.state.storage.put("batch_offset", nextOffset);
-
-    for (const entry of batch) {
-      if (entry.address.startsWith("C")) {
-        continue;
+    try {
+      const repo = createD1Repository(this.env.DB);
+      const watched = await repo.listWatchedAccounts();
+      if (watched.length === 0) {
+        return;
       }
 
-      const cursorKey = `pay_cursor:${config.network}:${entry.address}`;
-      const savedCursor = await this.state.storage.get<string>(cursorKey);
+      const verifiedAssets =
+        config.sep42AssetListUrls.length > 0
+          ? await fetchSep42VerifiedAssets(config.sep42AssetListUrls).catch(() => [])
+          : [];
 
-      try {
-        if (!savedCursor) {
-          // Initialize baseline cursor without replaying historical transactions
-          const recent = await fetchIncomingPaymentsSince(config, entry.address, undefined, 20);
-          const latestToken = recent[recent.length - 1]?.pagingToken ?? "empty_init";
-          await this.state.storage.put(cursorKey, latestToken);
+      const savedOffset = (await this.state.storage.get<number>("batch_offset")) ?? 0;
+      const start = savedOffset >= watched.length ? 0 : savedOffset;
+      const batch = watched.slice(start, start + BATCH_SIZE);
+      const nextOffset = start + BATCH_SIZE >= watched.length ? 0 : start + BATCH_SIZE;
+      await this.state.storage.put("batch_offset", nextOffset);
+
+      for (const entry of batch) {
+        if (entry.address.startsWith("C")) {
           continue;
         }
 
-        const effectiveCursor =
-          savedCursor === "empty_init" || savedCursor === "now" ? undefined : savedCursor;
-        const incoming = await fetchIncomingPaymentsSince(
-          config,
-          entry.address,
-          effectiveCursor,
-          5,
-        );
+        const cursorKey = `pay_cursor:${config.network}:${entry.address}`;
+        const savedCursor = await this.state.storage.get<string>(cursorKey);
 
-        let newestCursor = savedCursor;
-        for (const ev of incoming) {
-          newestCursor = ev.pagingToken;
-          const dedupKey = `alert:${config.network}:${ev.txHash.toLowerCase()}:${entry.address}:${entry.telegramUserId}`;
-          const claimed = await repo.claimAlertDedupKey(dedupKey);
-          if (!claimed) {
+        try {
+          if (!savedCursor) {
+            // Initialize baseline cursor without replaying historical transactions
+            const recent = await fetchIncomingPaymentsSince(config, entry.address, undefined, 20);
+            const latestToken = recent[recent.length - 1]?.pagingToken ?? "empty_init";
+            await this.state.storage.put(cursorKey, latestToken);
             continue;
           }
-          await sendTelegramMessage({
-            botToken: config.tgBotToken,
-            chatId: entry.telegramUserId,
-            text: formatIncomingAlertCard({
-              addressLabel: entry.label,
-              address: entry.address,
-              amount: ev.amount,
-              assetCode: ev.assetCode,
-              fromAddress: ev.from,
-              txHash: ev.txHash,
-              network: config.network,
-            }),
-          });
-        }
 
-        if (newestCursor !== savedCursor) {
-          await this.state.storage.put(cursorKey, newestCursor);
+          const effectiveCursor =
+            savedCursor === "empty_init" || savedCursor === "now" ? undefined : savedCursor;
+          const incoming = await fetchIncomingPaymentsSince(
+            config,
+            entry.address,
+            effectiveCursor,
+            5,
+          );
+
+          let newestCursor = savedCursor;
+          for (const ev of incoming) {
+            newestCursor = ev.pagingToken;
+            if (ev.assetCode === "XLM" && !ev.assetIssuer) {
+              try {
+                if (decimalToStroops7(ev.amount) < MIN_NATIVE_ALERT_STROOPS) {
+                  continue;
+                }
+              } catch {
+                continue;
+              }
+            }
+            const isVerifiedAsset =
+              ev.assetCode === "XLM" && !ev.assetIssuer
+                ? true
+                : Boolean(
+                    ev.assetIssuer &&
+                      verifiedAssets.some(
+                        (v) =>
+                          v.code.toUpperCase() === ev.assetCode.toUpperCase() &&
+                          v.issuer === ev.assetIssuer,
+                      ),
+                  );
+
+            const dedupKey = `alert:${config.network}:${ev.txHash.toLowerCase()}:${entry.address}:${entry.telegramUserId}`;
+            const claimed = await repo.claimAlertDedupKey(dedupKey);
+            if (!claimed) {
+              continue;
+            }
+            await sendTelegramMessage(
+              {
+                botToken: config.tgBotToken,
+                chatId: entry.telegramUserId,
+                text: formatIncomingAlertCard({
+                  addressLabel: entry.label,
+                  address: entry.address,
+                  amount: ev.amount,
+                  assetCode: ev.assetCode,
+                  assetIssuer: ev.assetIssuer,
+                  isVerifiedAsset,
+                  fromAddress: ev.from,
+                  txHash: ev.txHash,
+                  network: config.network,
+                }),
+              },
+              { apiOrigin: config.telegramApiOrigin },
+            );
+          }
+
+          if (newestCursor !== savedCursor) {
+            await this.state.storage.put(cursorKey, newestCursor);
+          }
+        } catch {
+          // Keep polling remaining accounts even if one account query fails transiently
         }
-      } catch {
-        // Keep polling remaining accounts even if one account query fails transiently
       }
+    } finally {
+      await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
     }
-
-    await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
   }
 }

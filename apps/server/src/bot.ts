@@ -17,7 +17,8 @@ import {
   fetchSep42VerifiedAssets,
 } from "@astrowallet/security-shield";
 import {
-  buildIntentDeepLink,
+  buildMiniAppWebAppUrl,
+  buildTelegramMiniAppLink,
   deriveClaimId,
   formatAccountsSummary,
   formatBalancesSummary,
@@ -65,7 +66,7 @@ async function createAndSignIntent(
     chatId?: string | undefined;
     ttlSeconds?: number | undefined;
   },
-): Promise<{ intent: SignedIntent; deepLink: string }> {
+): Promise<{ intent: SignedIntent }> {
   const now = Math.floor(Date.now() / 1000);
   const expiresAt = now + (input.ttlSeconds ?? 300);
   const intentId = input.intentId ?? generateId("it");
@@ -93,12 +94,42 @@ async function createAndSignIntent(
   };
 
   await repo.createSignedIntent(intent);
-  const deepLink = buildIntentDeepLink(config.pwaOrigin, intentId, hmacSig);
-  return { intent, deepLink };
+  return { intent };
 }
 
-function buildPwaAppUrl(pwaOrigin: string): string {
-  return `${pwaOrigin.replace(/\/+$/, "")}/app`;
+function appendMiniAppButton(
+  keyboard: InlineKeyboard,
+  label: string,
+  opts: {
+    isPrivateChat: boolean;
+    config: ServerConfig;
+    botUsername?: string | undefined;
+    intentId?: string | undefined;
+    sig?: string | undefined;
+    tab?: string | undefined;
+  },
+): InlineKeyboard {
+  if (opts.isPrivateChat) {
+    return keyboard.webApp(
+      label,
+      buildMiniAppWebAppUrl(opts.config.pwaOrigin, {
+        intentId: opts.intentId,
+        sig: opts.sig,
+        tab: opts.tab,
+      }),
+    );
+  }
+  return keyboard.url(
+    label,
+    buildTelegramMiniAppLink({
+      botUsername: opts.config.tgBotUsername ?? opts.botUsername,
+      shortName: opts.config.tgMiniAppShortName,
+      pwaOrigin: opts.config.pwaOrigin,
+      intentId: opts.intentId,
+      sig: opts.sig,
+      tab: opts.tab,
+    }),
+  );
 }
 
 function parsePositiveAmount(raw: string): string | null {
@@ -117,12 +148,26 @@ function parseAssetCode(raw: string): string | null {
 function divideAmountExact(totalAmount: string, count: number): string | null {
   try {
     const totalStroops = decimalToStroops7(totalAmount);
-    const shareStroops = totalStroops / BigInt(count);
+    const divisor = BigInt(count);
+    // Ceiling division so count * shareStroops never underpays the split requester
+    const shareStroops = (totalStroops + divisor - 1n) / divisor;
     if (shareStroops <= 0n) return null;
     return stroops7ToDecimal(shareStroops);
   } catch {
     return null;
   }
+}
+
+const CONFIRM_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function generateConfirmCode(): string {
+  const rand = new Uint8Array(6);
+  crypto.getRandomValues(rand);
+  let out = "";
+  for (const byte of rand) {
+    out += CONFIRM_CODE_ALPHABET[byte % CONFIRM_CODE_ALPHABET.length] ?? "A";
+  }
+  return out;
 }
 
 async function resolveRecipient(
@@ -169,17 +214,47 @@ async function resolveRecipient(
 }
 
 /**
- * Creates a Telegram Super-Bot instance backed by D1 + HMAC-signed Intent links.
- * Strictly Bot-only + Inline Mode (zero Mini App WebView, zero TON dependency, zero private keys).
+ * Creates a Telegram Multichain Super-Bot instance backed by D1 + Mini App initData/Intent auth.
+ * Compliant with Telegram ToS Clause 7.3 (Multichain Wallet Mini App: Stellar + TON Connect).
  */
 export function createTelegramBot(
   config: ServerConfig,
   repo: ServerRepository,
   deps: BotDependencies = {},
 ): Bot {
-  const bot = new Bot(config.tgBotToken);
+  const clientOpts: Record<string, unknown> = {};
+  if (config.telegramApiOrigin) {
+    clientOpts.apiRoot = config.telegramApiOrigin;
+  }
+  if (deps.fetchFn) {
+    clientOpts.fetch = deps.fetchFn;
+  }
+  const bot = new Bot(
+    config.tgBotToken,
+    Object.keys(clientOpts).length > 0
+      ? ({ client: clientOpts } as ConstructorParameters<typeof Bot>[1])
+      : undefined,
+  );
   const networkBadge = config.network.toUpperCase();
   const fetchFn = deps.fetchFn ?? fetch;
+
+  bot.catch((err) => {
+    console.error(
+      "Telegram bot update error:",
+      err.error instanceof Error ? err.error.message : "unknown",
+    );
+  });
+
+  async function requirePrivateChat(ctx: {
+    chat?: { type?: string } | undefined;
+    reply: (text: string) => Promise<unknown>;
+  }): Promise<boolean> {
+    if (ctx.chat?.type !== "private") {
+      await ctx.reply("Please run this command in a private DM with the bot for security.");
+      return false;
+    }
+    return true;
+  }
 
   bot.use(async (ctx, next) => {
     if (ctx.from?.username) {
@@ -265,17 +340,24 @@ export function createTelegramBot(
   }
 
   bot.command("start", async (ctx) => {
-    const keyboard = new InlineKeyboard().url(
-      "Open AstroWallet App",
-      buildPwaAppUrl(config.pwaOrigin),
+    const keyboard = appendMiniAppButton(
+      new InlineKeyboard(),
+      "Open AstroWallet Mini App",
+      {
+        isPrivateChat: ctx.chat?.type === "private",
+        config,
+        botUsername: ctx.me?.username,
+      },
     );
 
     await ctx.reply(
       [
-        `<b>AstroWallet [${networkBadge}]</b>`,
-        "Non-custodial Stellar &amp; Soroban Super-Bot.",
+        `<b>AstroWallet [${networkBadge}] — Telegram Multichain Wallet</b>`,
+        "Non-custodial Stellar (G.../C...) &amp; TON wallet running exclusively inside Telegram.",
         "",
+        "• Tap the button below to launch your encrypted Mini App vault",
         "• /connect — Link your SEP-0005 accounts",
+        "• /unlink — Unlink connected accounts from Telegram",
         "• /accounts — Switch default receiving account",
         "• /balance — Live balances across linked accounts",
         "• /pay &lt;amount&gt; &lt;asset&gt; &lt;@user|address&gt; [memo]",
@@ -296,10 +378,10 @@ export function createTelegramBot(
     await ctx.reply(
       [
         `<b>AstroWallet [${networkBadge}] Help</b>`,
-        "Your SEP-0005 seed phrase never leaves your phone. Sign intents in the PWA with your PIN or Fingerprint.",
+        "Your SEP-0005 seed phrase never leaves Telegram on your device. Sign transactions inside the Mini App with your PIN or biometrics.",
         "",
         "<b>Commands:</b>",
-        "/connect, /accounts, /balance, /pay, /request, /split, /scan, /swap, /reserve, /alerts",
+        "/connect, /unlink, /accounts, /balance, /pay, /request, /split, /scan, /swap, /reserve, /alerts",
         `<b>Inline Mode:</b> Type <code>${botHandle} pay 10 XLM @friend</code> in any chat.`,
       ].join("\n"),
       { parse_mode: "HTML" },
@@ -309,6 +391,7 @@ export function createTelegramBot(
   bot.command("connect", async (ctx) => {
     const from = ctx.from;
     if (!from) return;
+    if (!(await requirePrivateChat(ctx))) return;
 
     const tgId = String(from.id);
     const usernameLower = from.username?.toLowerCase();
@@ -316,6 +399,7 @@ export function createTelegramBot(
 
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = now + 300;
+    const confirmCode = generateConfirmCode();
     const challenge: ConnectChallengePayload = {
       challengeId: generateId("ch"),
       network: config.network,
@@ -325,29 +409,62 @@ export function createTelegramBot(
       expiresAt,
     };
 
-    const { deepLink } = await createAndSignIntent(config, repo, {
+    const { intent } = await createAndSignIntent(config, repo, {
       creatorTelegramUserId: tgId,
       actionType: "connect",
       chatId: String(ctx.chat.id),
       payload: {
         challenge,
         message: formatConnectChallengeMessage(challenge),
+        confirmCode,
       },
     });
 
-    const keyboard = new InlineKeyboard().url(
-      "Link Wallet (PIN / Fingerprint)",
-      deepLink,
+    const keyboard = appendMiniAppButton(
+      new InlineKeyboard(),
+      "Open Mini App & Link Wallet",
+      {
+        isPrivateChat: true,
+        config,
+        botUsername: ctx.me?.username,
+        intentId: intent.intentId,
+        sig: intent.hmacSig,
+      },
     );
 
-    await ctx.reply(formatConnectPrompt(config.network, 5), {
+    await ctx.reply(formatConnectPrompt(config.network, 5, confirmCode), {
       parse_mode: "HTML",
       reply_markup: keyboard,
     });
   });
 
+  bot.command("unlink", async (ctx) => {
+    if (!ctx.from) return;
+    if (!(await requirePrivateChat(ctx))) return;
+    const removed = await repo.unlinkUserAddresses(String(ctx.from.id));
+    await ctx.reply(
+      removed > 0
+        ? `Unlinked ${removed} connected wallet account(s) from this Telegram profile.`
+        : "No linked wallet accounts were found for this Telegram profile.",
+      { parse_mode: "HTML" },
+    );
+  });
+
+  bot.callbackQuery("unlink_self", async (ctx) => {
+    const removed = await repo.unlinkUserAddresses(String(ctx.from.id));
+    await ctx.answerCallbackQuery({
+      text: removed > 0 ? `Unlinked ${removed} account(s)` : "No linked accounts found",
+    });
+    if (ctx.callbackQuery.message) {
+      await ctx.editMessageText(
+        `🔒 Disconnected ${removed} wallet account(s) from your Telegram profile. Run /connect anytime to re-link.`,
+      );
+    }
+  });
+
   bot.command("accounts", async (ctx) => {
     if (!ctx.from) return;
+    if (!(await requirePrivateChat(ctx))) return;
     const tgId = String(ctx.from.id);
     const accounts = await repo.listLinkedAddresses(tgId);
     const keyboard = new InlineKeyboard();
@@ -391,6 +508,7 @@ export function createTelegramBot(
 
   bot.command("balance", async (ctx) => {
     if (!ctx.from) return;
+    if (!(await requirePrivateChat(ctx))) return;
     const tgId = String(ctx.from.id);
     const accounts = await repo.listLinkedAddresses(tgId);
     if (accounts.length === 0) {
@@ -464,12 +582,13 @@ export function createTelegramBot(
 
         const intentId = generateId("it");
         const claimId = await deriveClaimId(intentId);
-        const { intent, deepLink } = await createAndSignIntent(config, repo, {
+        const escrowExpiresAt = Math.floor(Date.now() / 1000) + 86_400 * 7;
+        const { intent } = await createAndSignIntent(config, repo, {
           intentId,
           creatorTelegramUserId: tgId,
           actionType: "claim",
           chatId: String(ctx.chat.id),
-          ttlSeconds: 86_400 * 7,
+          ttlSeconds: 300,
           payload: {
             amount,
             assetCode,
@@ -478,12 +597,20 @@ export function createTelegramBot(
             senderLabel: username,
             claimId,
             escrowContractId: config.claimEscrowContractId,
+            escrowExpiresAt,
           },
         });
 
-        const keyboard = new InlineKeyboard().url(
+        const keyboard = appendMiniAppButton(
+          new InlineKeyboard(),
           `Fund Escrow (${amount} ${assetCode})`,
-          deepLink,
+          {
+            isPrivateChat: ctx.chat?.type === "private",
+            config,
+            botUsername: ctx.me?.username,
+            intentId: intent.intentId,
+            sig: intent.hmacSig,
+          },
         );
         const sent = await ctx.reply(
           formatClaimLinkCard({
@@ -508,7 +635,7 @@ export function createTelegramBot(
     }
 
     const memo = args.length > 3 ? args.slice(3).join(" ").slice(0, 28) : undefined;
-    const { intent, deepLink } = await createAndSignIntent(config, repo, {
+    const { intent } = await createAndSignIntent(config, repo, {
       creatorTelegramUserId: tgId,
       actionType: "pay",
       chatId: String(ctx.chat.id),
@@ -523,9 +650,16 @@ export function createTelegramBot(
       },
     });
 
-    const keyboard = new InlineKeyboard().url(
-      "Sign with PIN / Fingerprint",
-      deepLink,
+    const keyboard = appendMiniAppButton(
+      new InlineKeyboard(),
+      "Sign in Telegram Mini App",
+      {
+        isPrivateChat: ctx.chat?.type === "private",
+        config,
+        botUsername: ctx.me?.username,
+        intentId: intent.intentId,
+        sig: intent.hmacSig,
+      },
     );
     const sent = await ctx.reply(
       formatPaymentIntentCard({
@@ -575,7 +709,7 @@ export function createTelegramBot(
     const { assetCode, assetIssuer } = assetRes;
 
     const memo = args.length > 2 ? args.slice(2).join(" ").slice(0, 28) : undefined;
-    const { intent, deepLink } = await createAndSignIntent(config, repo, {
+    const { intent } = await createAndSignIntent(config, repo, {
       creatorTelegramUserId: tgId,
       actionType: "request",
       chatId: String(ctx.chat.id),
@@ -590,7 +724,13 @@ export function createTelegramBot(
       },
     });
 
-    const keyboard = new InlineKeyboard().url("Pay with PIN / Fingerprint", deepLink);
+    const keyboard = appendMiniAppButton(new InlineKeyboard(), "Pay in Mini App", {
+      isPrivateChat: ctx.chat?.type === "private",
+      config,
+      botUsername: ctx.me?.username,
+      intentId: intent.intentId,
+      sig: intent.hmacSig,
+    });
     const sent = await ctx.reply(
       formatRequestCard({
         status: "pending",
@@ -644,7 +784,7 @@ export function createTelegramBot(
       await ctx.reply("Split amount per participant is too small.");
       return;
     }
-    const { intent, deepLink } = await createAndSignIntent(config, repo, {
+    const { intent } = await createAndSignIntent(config, repo, {
       creatorTelegramUserId: tgId,
       actionType: "split",
       chatId: String(ctx.chat.id),
@@ -660,9 +800,16 @@ export function createTelegramBot(
       },
     });
 
-    const keyboard = new InlineKeyboard().url(
+    const keyboard = appendMiniAppButton(
+      new InlineKeyboard(),
       `Pay Share (${share} ${assetCode})`,
-      deepLink,
+      {
+        isPrivateChat: ctx.chat?.type === "private",
+        config,
+        botUsername: ctx.me?.username,
+        intentId: intent.intentId,
+        sig: intent.hmacSig,
+      },
     );
     const sent = await ctx.reply(
       formatSplitCard({
@@ -711,6 +858,7 @@ export function createTelegramBot(
 
   bot.command("reserve", async (ctx) => {
     if (!ctx.from) return;
+    if (!(await requirePrivateChat(ctx))) return;
     const tgId = String(ctx.from.id);
     const linked = await repo.listLinkedAddresses(tgId);
     const classicAccounts = linked.filter(
@@ -742,7 +890,7 @@ export function createTelegramBot(
 
     const keyboard = new InlineKeyboard();
     if (reclaimCandidate?.summary) {
-      const { deepLink } = await createAndSignIntent(config, repo, {
+      const { intent } = await createAndSignIntent(config, repo, {
         creatorTelegramUserId: tgId,
         actionType: "reclaim_reserve",
         chatId: String(ctx.chat.id),
@@ -757,12 +905,23 @@ export function createTelegramBot(
           recipientLabel: "LumenWipe Reserve Reclaim",
         },
       });
-      keyboard.url(
-        `Reclaim +${reclaimCandidate.summary.reclaimableXlm} XLM in PWA`,
-        deepLink,
+      appendMiniAppButton(
+        keyboard,
+        `Reclaim +${reclaimCandidate.summary.reclaimableXlm} XLM`,
+        {
+          isPrivateChat: true,
+          config,
+          botUsername: ctx.me?.username,
+          intentId: intent.intentId,
+          sig: intent.hmacSig,
+        },
       );
     } else {
-      keyboard.url("Open AstroWallet App", buildPwaAppUrl(config.pwaOrigin));
+      appendMiniAppButton(keyboard, "Open AstroWallet Mini App", {
+        isPrivateChat: true,
+        config,
+        botUsername: ctx.me?.username,
+      });
     }
 
     await ctx.reply(
@@ -899,7 +1058,7 @@ export function createTelegramBot(
                 inputAmount: amount,
                 expectedOutputAmount: out,
                 provider: "soroswap",
-                priceImpactPct: data.priceImpactPct ?? "0.05",
+                priceImpactPct: data.priceImpactPct ?? "N/A",
                 unsignedXdr,
               };
             }
@@ -922,7 +1081,7 @@ export function createTelegramBot(
         });
       }
 
-      const { intent, deepLink } = await createAndSignIntent(config, repo, {
+      const { intent } = await createAndSignIntent(config, repo, {
         creatorTelegramUserId: tgId,
         actionType: "swap",
         chatId: String(ctx.chat.id),
@@ -937,9 +1096,16 @@ export function createTelegramBot(
         },
       });
 
-      const keyboard = new InlineKeyboard().url(
-        "Review & Sign Swap (PIN / Fingerprint)",
-        deepLink,
+      const keyboard = appendMiniAppButton(
+        new InlineKeyboard(),
+        "Review & Sign Swap",
+        {
+          isPrivateChat: ctx.chat?.type === "private",
+          config,
+          botUsername: ctx.me?.username,
+          intentId: intent.intentId,
+          sig: intent.hmacSig,
+        },
       );
 
       const sent = await ctx.reply(
@@ -993,24 +1159,24 @@ export function createTelegramBot(
             payloadJson: JSON.stringify(payload),
             sinceUnix: now - 60,
           });
-          const { intent, deepLink } = existing
-            ? {
-                intent: existing,
-                deepLink: buildIntentDeepLink(
-                  config.pwaOrigin,
-                  existing.intentId,
-                  existing.hmacSig,
-                ),
-              }
+          const { intent } = existing
+            ? { intent: existing }
             : await createAndSignIntent(config, repo, {
                 creatorTelegramUserId: tgId,
                 actionType: "pay",
                 payload,
               });
 
-          const keyboard = new InlineKeyboard().url(
-            "Sign with PIN / Fingerprint",
-            deepLink,
+          const keyboard = appendMiniAppButton(
+            new InlineKeyboard(),
+            "Sign in Mini App",
+            {
+              isPrivateChat: false,
+              config,
+              botUsername: ctx.me?.username,
+              intentId: intent.intentId,
+              sig: intent.hmacSig,
+            },
           );
 
           await ctx.answerInlineQuery(

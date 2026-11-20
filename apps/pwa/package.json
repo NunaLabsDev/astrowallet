@@ -15,6 +15,8 @@
     "@astrowallet/security-shield": "workspace:*",
     "@astrowallet/stellar-core": "workspace:*",
     "@astrowallet/tg-protocol": "workspace:*",
+    "@astrowallet/ton-core": "workspace:*",
+    "buffer": "^6.0.3",
     "qrcode": "^1.5.4",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

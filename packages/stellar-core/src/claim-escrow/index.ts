@@ -121,6 +121,7 @@ export function buildCreateClaimOperation(input: {
   amountStroops: bigint;
   claimPubkeyHex: string;
   expiresAtUnix: number;
+  cancellable?: boolean | undefined;
 }): xdr.Operation {
   if (input.amountStroops <= 0n) {
     throw new Error("Claim escrow amount must be positive");
@@ -138,6 +139,7 @@ export function buildCreateClaimOperation(input: {
       nativeToScVal(input.amountStroops, { type: "i128" }),
       nativeToScVal(claimPubkey, { type: "bytes" }),
       nativeToScVal(BigInt(Math.trunc(input.expiresAtUnix)), { type: "u64" }),
+      nativeToScVal(input.cancellable ?? true, { type: "bool" }),
     ],
   });
 }
@@ -182,6 +184,34 @@ export function buildRefundExpiredOperation(input: {
   return Operation.invokeContractFunction({
     contract: input.escrowContractId,
     function: "refund_expired",
+    args: [nativeToScVal(claimId, { type: "bytes" })],
+  });
+}
+
+export function buildRefundExpiredToOperation(input: {
+  escrowContractId: ContractAddress;
+  claimIdHex: string;
+  recipientAddress: StellarAddress;
+}): xdr.Operation {
+  const claimId = hexToBytes(input.claimIdHex, 32);
+  return Operation.invokeContractFunction({
+    contract: input.escrowContractId,
+    function: "refund_expired_to",
+    args: [
+      nativeToScVal(claimId, { type: "bytes" }),
+      new Address(input.recipientAddress).toScVal(),
+    ],
+  });
+}
+
+export function buildExtendClaimTtlOperation(input: {
+  escrowContractId: ContractAddress;
+  claimIdHex: string;
+}): xdr.Operation {
+  const claimId = hexToBytes(input.claimIdHex, 32);
+  return Operation.invokeContractFunction({
+    contract: input.escrowContractId,
+    function: "extend_claim_ttl",
     args: [nativeToScVal(claimId, { type: "bytes" })],
   });
 }

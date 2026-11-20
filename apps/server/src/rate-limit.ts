@@ -1,4 +1,5 @@
 import type { KVNamespace } from "@cloudflare/workers-types";
+import type { ServerRepository } from "./db/repository.js";
 
 export interface RateLimitResult {
   allowed: boolean;
@@ -25,10 +26,11 @@ export function clientKeyFromHeaders(headers: {
 }
 
 /**
- * Fixed-window per-minute counter. Uses KV when available (best-effort, eventually consistent)
- * and falls back to an in-memory map for local dev and unit tests.
+ * Fixed-window per-minute counter. Uses atomic D1 counters primarily, falling back to
+ * KV (best-effort) and an in-memory map for local unit tests.
  */
 export async function checkRateLimit(input: {
+  repository?: ServerRepository | undefined;
   cache?: KVNamespace | undefined;
   scope: string;
   clientKey: string;
@@ -39,6 +41,20 @@ export async function checkRateLimit(input: {
   const windowId = Math.floor(now / 60_000);
   const retryAfterSeconds = Math.max(1, 60 - Math.floor((now % 60_000) / 1000));
   const key = `rl:${input.scope}:${input.clientKey}:${windowId}`;
+
+  if (input.repository) {
+    const res = await input.repository.incrementRateLimit({
+      key: `rl:${input.scope}:${input.clientKey}`,
+      windowSec: 60,
+      limit: input.limitPerMin,
+      nowSec: Math.floor(now / 1000),
+    });
+    return {
+      allowed: res.allowed,
+      remaining: Math.max(0, input.limitPerMin - res.count),
+      retryAfterSeconds: res.retryAfterSeconds,
+    };
+  }
 
   if (input.cache) {
     const raw = await input.cache.get(key);

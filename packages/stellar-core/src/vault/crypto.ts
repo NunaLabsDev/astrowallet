@@ -13,11 +13,105 @@ export interface Argon2idParams {
 
 export const DEFAULT_ARGON2ID_PARAMS: Argon2idParams = Object.freeze({
   algorithm: "argon2id",
-  memoryKiB: 19456,
-  iterations: 2,
+  memoryKiB: 65_536,
+  iterations: 3,
   parallelism: 1,
   hashLength: 32,
 });
+
+export interface SecretStrengthResult {
+  score: 0 | 1 | 2 | 3 | 4;
+  level: "weak" | "fair" | "good" | "strong";
+  acceptable: boolean;
+  reasons: string[];
+}
+
+const COMMON_WEAK_SECRETS = new Set([
+  "000000",
+  "111111",
+  "222222",
+  "333333",
+  "444444",
+  "555555",
+  "666666",
+  "777777",
+  "888888",
+  "999999",
+  "123456",
+  "654321",
+  "123123",
+  "121212",
+  "012345",
+  "987654",
+  "112233",
+  "000123",
+  "1234567",
+  "12345678",
+  "87654321",
+  "password",
+  "passphrase",
+  "qwerty",
+  "astrowallet",
+]);
+
+function isStrictlySequentialDigits(secret: string): boolean {
+  if (!/^\d{6,}$/.test(secret)) return false;
+  let asc = true;
+  let desc = true;
+  for (let i = 1; i < secret.length; i += 1) {
+    const prev = secret.charCodeAt(i - 1);
+    const curr = secret.charCodeAt(i);
+    if (curr - prev !== 1) asc = false;
+    if (prev - curr !== 1) desc = false;
+  }
+  return asc || desc;
+}
+
+/**
+ * Evaluates PIN / passphrase strength to block trivial lock secrets (`000000`, `123456`, etc.).
+ */
+export function evaluateSecretStrength(secret: string): SecretStrengthResult {
+  const reasons: string[] = [];
+  if (secret.length < 6) {
+    reasons.push("Must be at least 6 characters");
+    return { score: 0, level: "weak", acceptable: false, reasons };
+  }
+
+  const uniqueChars = new Set(secret).size;
+  if (uniqueChars <= 1) {
+    reasons.push("Avoid repeating the same character");
+  }
+  if (COMMON_WEAK_SECRETS.has(secret.toLowerCase())) {
+    reasons.push("Avoid common easily-guessed PINs or passwords");
+  }
+  if (isStrictlySequentialDigits(secret)) {
+    reasons.push("Avoid sequential digits");
+  }
+  if (uniqueChars === 2 && secret.length <= 6) {
+    reasons.push("Use at least 3 distinct digits or characters");
+  }
+
+  if (reasons.length > 0) {
+    return { score: 1, level: "weak", acceptable: false, reasons };
+  }
+
+  let score: 0 | 1 | 2 | 3 | 4 = 2;
+  const hasMixedClasses =
+    (/[a-z]/i.test(secret) && /\d/.test(secret)) ||
+    /[^a-zA-Z0-9]/.test(secret);
+
+  if (secret.length >= 10 || (secret.length >= 8 && uniqueChars >= 6)) {
+    score = 3;
+  }
+  if (hasMixedClasses && secret.length >= 8 && uniqueChars >= 6) {
+    score = 4;
+  } else if (secret.length >= 12 && uniqueChars >= 7) {
+    score = 4;
+  }
+
+  const level = score === 4 ? "strong" : score === 3 ? "good" : "fair";
+  return { score, level, acceptable: true, reasons: [] };
+}
 
 export interface VaultAccountMetadata {
   index: number;

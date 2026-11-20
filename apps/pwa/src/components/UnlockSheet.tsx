@@ -1,15 +1,14 @@
 import { useEffect, useState, type FormEvent } from "react";
+import {
+  clearPinLockoutState,
+  getPinLockoutState,
+  recordFailedPinAttempt,
+} from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
-import { IconFingerprint, IconGlobe, IconLock } from "./Icons.js";
+import { IconFingerprint, IconLock } from "./Icons.js";
 
-const PIN_COOLDOWN_SECONDS = [5, 15, 30, 60] as const;
-
-export function UnlockSheet({
-  onExploreSite,
-}: {
-  onExploreSite?: (() => void) | undefined;
-}) {
+export function UnlockSheet() {
   const {
     config,
     unlockWithPin,
@@ -21,9 +20,19 @@ export function UnlockSheet({
   const [pin, setPin] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [failedAttempts, setFailedAttempts] = useState(0);
   const [cooldownUntilMs, setCooldownUntilMs] = useState(0);
   const [remainingSec, setRemainingSec] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    void getPinLockoutState().then((state) => {
+      if (cancelled) return;
+      setCooldownUntilMs(state.lockedUntilMs);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (cooldownUntilMs <= Date.now()) {
@@ -46,21 +55,20 @@ export function UnlockSheet({
     setError(null);
     try {
       await unlockWithPin(pin);
+      await clearPinLockoutState();
       setPin("");
-      setFailedAttempts(0);
       setCooldownUntilMs(0);
       setRemainingSec(0);
     } catch (err) {
-      const nextFails = failedAttempts + 1;
-      setFailedAttempts(nextFails);
-      if (nextFails >= 3) {
-        const idx = Math.min(nextFails - 3, PIN_COOLDOWN_SECONDS.length - 1);
-        const sec = PIN_COOLDOWN_SECONDS[idx] ?? 60;
-        setCooldownUntilMs(Date.now() + sec * 1000);
+      const nextState = await recordFailedPinAttempt();
+      if (nextState.lockedUntilMs > Date.now()) {
+        const sec = Math.max(1, Math.ceil((nextState.lockedUntilMs - Date.now()) / 1000));
+        setCooldownUntilMs(nextState.lockedUntilMs);
         setRemainingSec(sec);
         setError(`Too many failed PIN attempts. Wait ${sec}s before retrying.`);
       } else {
-        setError(err instanceof Error ? err.message : "Invalid PIN or passphrase");
+        const baseMsg = err instanceof Error ? err.message : "Invalid PIN or passphrase";
+        setError(`${baseMsg} (${nextState.failedAttempts}/5 attempts before lockout)`);
       }
     } finally {
       setBusy(false);
@@ -72,6 +80,9 @@ export function UnlockSheet({
     setError(null);
     try {
       await unlockWithBiometric();
+      await clearPinLockoutState();
+      setCooldownUntilMs(0);
+      setRemainingSec(0);
     } catch (err) {
       setError(
         err instanceof Error
@@ -147,20 +158,11 @@ export function UnlockSheet({
               onClick={handleFingerprint}
             >
               <IconFingerprint size={16} />
-              <span>Use Fingerprint</span>
+              <span>Use Biometrics</span>
             </button>
           )}
         </div>
       </form>
-
-      {onExploreSite && (
-        <div className="aw-unlock-footer">
-          <button type="button" className="aw-chip-btn" onClick={onExploreSite}>
-            <IconGlobe size={14} />
-            <span>Explore AstroWallet Overview</span>
-          </button>
-        </div>
-      )}
     </section>
   );
 }

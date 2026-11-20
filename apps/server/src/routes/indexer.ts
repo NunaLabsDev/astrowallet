@@ -1,4 +1,6 @@
+import { decimalToStroops7 } from "@astrowallet/defi";
 import type { ServerConfig } from "@astrowallet/domain";
+import { fetchSep42VerifiedAssets } from "@astrowallet/security-shield";
 import { formatIncomingAlertCard } from "@astrowallet/tg-protocol";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -16,6 +18,8 @@ type IndexerRouteEnv = {
   };
 };
 
+const MIN_NATIVE_ALERT_STROOPS = 500_000n; // 0.05 XLM dust spam filter
+
 const RawIndexerEventSchema = z.object({
   txHash: z.string().min(8).optional(),
   transaction_hash: z.string().min(8).optional(),
@@ -26,6 +30,8 @@ const RawIndexerEventSchema = z.object({
   amount: z.union([z.string(), z.number()]),
   assetCode: z.string().min(1).max(16).optional(),
   asset_code: z.string().min(1).max(16).optional(),
+  assetIssuer: z.string().min(8).optional(),
+  asset_issuer: z.string().min(8).optional(),
   ledger: z.number().int().nonnegative().optional(),
 });
 
@@ -35,6 +41,7 @@ interface NormalizedIndexerEvent {
   to: string;
   amount: string;
   assetCode: string;
+  assetIssuer?: string | undefined;
 }
 
 function constantTimeEqual(a: string, b: string): boolean {
@@ -92,12 +99,14 @@ function normalizeEvents(rawJson: unknown): NormalizedIndexerEvent[] {
     }
     const rawCode = parsed.assetCode ?? parsed.asset_code ?? "XLM";
     const assetCode = rawCode.toLowerCase() === "native" ? "XLM" : rawCode;
+    const rawIssuer = parsed.assetIssuer ?? parsed.asset_issuer;
     out.push({
       txHash,
       from,
       to,
       amount: String(parsed.amount),
       assetCode,
+      ...(rawIssuer ? { assetIssuer: rawIssuer } : {}),
     });
   }
   return out;
@@ -168,8 +177,34 @@ export function createIndexerRoutes(deps: IndexerRoutesDeps = {}): Hono<IndexerR
       }
     }
 
+    const verifiedAssets =
+      config.sep42AssetListUrls.length > 0
+        ? await fetchSep42VerifiedAssets(config.sep42AssetListUrls).catch(() => [])
+        : [];
+
     let alertsSent = 0;
     for (const ev of events) {
+      if (ev.assetCode === "XLM" && !ev.assetIssuer) {
+        try {
+          if (decimalToStroops7(ev.amount) < MIN_NATIVE_ALERT_STROOPS) {
+            continue;
+          }
+        } catch {
+          continue;
+        }
+      }
+      const isVerifiedAsset =
+        ev.assetCode === "XLM" && !ev.assetIssuer
+          ? true
+          : Boolean(
+              ev.assetIssuer &&
+                verifiedAssets.some(
+                  (v) =>
+                    v.code.toUpperCase() === ev.assetCode.toUpperCase() &&
+                    v.issuer === ev.assetIssuer,
+                ),
+            );
+
       const matches = watchedByAddress.get(ev.to);
       if (!matches) continue;
       for (const recipient of matches) {
@@ -186,12 +221,14 @@ export function createIndexerRoutes(deps: IndexerRoutesDeps = {}): Hono<IndexerR
               address: recipient.address,
               amount: ev.amount,
               assetCode: ev.assetCode,
+              assetIssuer: ev.assetIssuer,
+              isVerifiedAsset,
               fromAddress: ev.from,
               txHash: ev.txHash,
               network: config.network,
             }),
           },
-          deps.telegramApiDeps,
+          { apiOrigin: config.telegramApiOrigin, ...(deps.telegramApiDeps ?? {}) },
         );
         if (ok) {
           alertsSent += 1;

@@ -6,7 +6,7 @@
 2. **Hexagonal Monorepo Boundaries:** Pure domain models, cryptographic custody, ledger protocols, security analysis, and Telegram/PWA adapters are strictly decoupled. Neither React state, IndexedDB, nor `grammY` webhook logic may leak into `@astrowallet/domain` or ledger adapters.
 3. **Honest Multi-Account Custody (`G...` Classic + Optional `C...` Smart):** One non-custodial **SEP-0005** seed phrase (`m/44'/148'/i'`) controls multiple linked Classic accounts (`G...`) and acts as the on-chain Recovery Guardian for optional **Soroban Smart Accounts (`C...`)**. Both account classes are labeled transparently with 1-tap `SAC` transfers between them.
 4. **Fail-Closed "Scan & Shield" Clear-Signing:** Never display opaque Base64 XDRs. Every signing intent passes through zero-WASM decoding, Soroban simulation, reserve/memo validation, and directory threat rules before keys touch it.
-5. **Genuine Telegram Super-Bot Connectivity (ToS-Compliant):** Operates purely as a standard Telegram Bot (`grammY` + Inline Mode + `InlineKeyboardButton` HTTPS Intent Links)—zero Mini App WebView, zero TON Connect dependency, and zero private keys anywhere on Telegram or backend storage.
+5. **Telegram-Exclusive Multichain Mini App (ToS Clause 7.3 Compliant):** Operates exclusively inside Telegram as a Mini App (`web_app` in private chats and `https://t.me/<bot>[/<short_name>]?startapp=...` in groups/inline) with verified `Telegram.WebApp.initData` (`POST /v1/tg/auth`). Native Stellar (`G...`/`C...`) and TON (`WalletContractV4`/`V5R1`, SLIP-0010 `m/44'/607'/i'`) custody live in the same UI, external app connections run exclusively via **TON Connect v2**, and zero private keys ever touch Telegram `CloudStorage` or backend servers.
 6. **Zero-Hardcoding Production Parity:** Every network passphrase, RPC/Horizon URL, contract ID, and API base comes from Zod-validated environment configuration (`STELLAR_NETWORK=testnet|mainnet`). Switching environments requires zero code changes.
 
 ---
@@ -23,6 +23,10 @@ astrowallet/
 │   │   ├── classic/            #   SEP-0005 HD (m/44'/148'/i'), M... muxed, reserves, paths, claimables
 │   │   ├── smart-account/      #   smart-account-kit + OpenZeppelin stellar-contracts (secp256r1 + Guardian)
 │   │   └── rpc/                #   Env-driven RPC & Horizon failover + SAC bridge helpers
+│   ├── ton-core/               # Isolated TON custody & TON Connect v2 engine:
+│   │   ├── derivation/         #   BIP-39 + SLIP-0010 (m/44'/607'/i') WalletContractV4 / V5R1
+│   │   ├── client/             #   Toncenter JSON-RPC v2 failover + signed BOC broadcast
+│   │   └── ton-connect/        #   TON Connect v2 NaCl box SSE bridge, ton_proof & tx validator
 │   ├── security-shield/        # Reusable pre-sign pipeline (PWA + Telegram /scan):
 │   │   ├── decoder/            #   Zero-WASM @stellar/stellar-sdk + contract.Spec (SEP-46/47/48)
 │   │   ├── simulator/          #   simulateTransaction balance diffs & TTL auto-restore checks
@@ -30,16 +34,17 @@ astrowallet/
 │   │   └── raw-xdr-worker/     #   Lazy Web Worker for @stellar/stellar-xdr-json (~3 MB WASM on-demand only)
 │   ├── defi/                   # Modular DeFi & Ramp adapters behind SwapPort / RampPort:
 │   │   ├── v1/                 #   Soroswap Aggregator (via Worker proxy) + Horizon Path Payments
-│   │   └── v2-plugins/         #   Circle CCTP, MoonPay/Transak, Blend, DeFindex, SEP-24 (pluggable)
-│   └── tg-protocol/            # Shared Bot <-> PWA protocol:
-│                               #   HMAC-signed Intent Tokens, /connect challenge verification,
-│                               #   Claim Link payloads, and live Telegram card formatters
+│   │   └── v2-plugins/         #   Circle CCTP decimal guard, Blend, DeFindex, SEP-24 (pluggable)
+│   └── tg-protocol/            # Shared Bot <-> Mini App protocol:
+│                               #   Telegram initData HMAC verification, 15m session tokens,
+│                               #   HMAC-signed Intent Tokens, startapp routing & card formatters
 ├── apps/
-│   ├── pwa/                    # Mobile-first Apple Liquid Glass PWA (React + Vite + Tailwind + Astro Navigators):
-│   │                           #   PIN + optional Fingerprint auth, Multi-Account Switcher, Clear-Sign Sheet,
-│   │                           #   Intent Executor, QR Scanner, WalletConnect v2 / Stellar Wallets Kit
+│   ├── pwa/                    # Telegram-Exclusive Liquid Glass Mini App (React + Vite + Astro Navigators):
+│   │                           #   TelegramOnlyGate, PIN + Telegram BiometricManager / WebAuthn,
+│   │                           #   Multi-Account Switcher, Clear-Sign Sheet, TON Wallet & TON Connect v2
 │   └── server/                 # Unified Cloudflare Worker (Hono + grammY + D1 + KV + Durable Objects):
 │                               #   /tg/webhook         -> Standard + Inline Telegram Super-Bot
+│                               #   /v1/tg/*            -> initData auth, /me & link-challenge/confirm
 │                               #   /v1/intents         -> Create/verify HMAC-signed intents + edit chat cards
 │                               #   /v1/relay           -> Rate-limited proxy to OpenZeppelin Channels
 │                               #   /v1/proxy/*         -> Edge cache CORS proxy (StellarExpert, SEP-1, Soroswap)
@@ -53,15 +58,17 @@ astrowallet/
 
 ```mermaid
 flowchart TD
-    PWA["apps/pwa (Liquid Glass UI + IndexedDB Vault)"]
+    PWA["apps/pwa (Telegram Mini App + IndexedDB Vault)"]
     SRV["apps/server (Cloudflare Worker: Hono + grammY + D1/KV/DO)"]
-    TG["packages/tg-protocol (Signed Intents + Card Formatters)"]
+    TG["packages/tg-protocol (initData Auth + Signed Intents + Cards)"]
     SEC["packages/security-shield (Zero-WASM Decode + Sim + Rules)"]
     DEFI["packages/defi (Soroswap + Path Payments)"]
     CORE["packages/stellar-core (SEP-0005 + Smart Account + RPC)"]
+    TON["packages/ton-core (SLIP-0010 TON + TON Connect v2)"]
     DOM["packages/domain (Pure Ports + Zod Env/Intent Schemas)"]
 
     PWA --> CORE
+    PWA --> TON
     PWA --> SEC
     PWA --> DEFI
     PWA --> TG
@@ -73,6 +80,7 @@ flowchart TD
     SRV --> DOM
 
     CORE --> DOM
+    TON --> DOM
     SEC --> DOM
     DEFI --> DOM
     TG --> DOM
@@ -144,51 +152,50 @@ Base64 XDR / Intent / Address
      - **Primary Production Ingestion (`POST /webhooks/indexer`):** **Goldsky Turbo Pipelines** (or **Mercury** webhooks) stream `transfers` and Soroban contract events directly to `apps/server` with HMAC signature verification.
      - **Testnet / Self-Hosted Poller Fallback (`CHAIN_WATCHER` Durable Object):** A Cloudflare Durable Object maintains an alarm-driven Stellar RPC ledger cursor for registered D1 addresses so Testnet real-time Telegram alerts work reliably with zero paid indexer dependencies.
 
-### E. Genuine Telegram Super-Bot Architecture (`apps/server` + `tg-protocol`)
+### E. Telegram-Exclusive Multichain Mini App & Super-Bot (`apps/server` + `tg-protocol`)
 
-AstroWallet uses a **standard Telegram Bot + Inline Mode** (`grammY` on Cloudflare Workers)—never a Telegram Mini App—keeping it 100% exempt from Telegram's Jan 2025 TON exclusivity rules:
+AstroWallet runs **exclusively inside Telegram** as a Mini App launched from `@AstroWalletAppBot` and complies with **Telegram Bot ToS Clause 7.3 (*Multichain Wallets*)**:
 
-1. **Slash Commands & Inline Flows:**
-   - `/start` — Onboarding overview + `/connect` trigger + network badge (`TESTNET`/`MAINNET`).
-   - `/connect` — Cryptographically links `telegram_user_id` (immutable PK) and `@username` to 1 or N public addresses (`G...` / `C...`) derived from the user's on-device SEP-0005 seed.
-   - `/accounts` & `/balance` — Multi-account balance summary (`Primary`, `Savings`, `Smart C...`), labels, and quick switch.
-   - `/pay <amount> <asset> <@user|G...|C...|M...>` & Inline `@AstroWalletBot pay ...` — Creates a server-stored **Signed Intent**, posts an interactive chat card, and updates the card in real time on confirmation.
-   - `/request <amount> <asset> [note]` & `/split <amount> <asset> <count>` — Shareable group payment/split cards with live completion tracking.
-   - `/scan <address|contract|tx_hash|xdr>` — Public ecosystem utility running `security-shield` right inside Telegram chats.
-   - `/swap <amount> <from> <to>` — Live **Soroswap** quote + 1-tap Signed Intent handoff to PWA.
-   - `/alerts` & `/reserve` — Configure incoming tx/security notifications and inspect Classic subentry reserves (`@lumenwipe/sdk`).
-2. **Viral Onboarding — Telegram Claim Links:**
-   - Sending assets to an `@username` that has not run `/connect` deposits into a minimal Soroban **Claim-Link Escrow** (with expiry refund protection) and posts a claim card in Telegram.
-   - The recipient taps the link, generates a non-custodial SEP-0005 wallet (or `C...` Smart Account) in the PWA in seconds, proves their one-time bot claim token, and receives the funds directly on-chain.
-3. **Cloudflare D1 Relational Schema (Zero Secrets Stored):**
-   - `tg_users`: `telegram_user_id` (PK), `username_lower` (indexed, mutable), `alerts_enabled`, `created_at`
+1. **Zero Public Website & Cryptographic `initData` Sessions:**
+   - Standalone marketing routes are removed; `TelegramOnlyGate` blocks browser access outside Telegram (unless `VITE_ALLOW_DEV_OUTSIDE_TELEGRAM=true` on Testnet dev).
+   - `POST /v1/tg/auth` verifies `Telegram.WebApp.initData` via HMAC-SHA256 (`WebAppData` + `TG_BOT_TOKEN`, `auth_date <= 300s`) and issues a short-lived (`15m`) Mini App Bearer session token. Unverified `initDataUnsafe` is never trusted by the server.
+   - Bot keyboards use native `web_app` buttons in private chats and `https://t.me/<bot>[/<short_name>]?startapp=i-<intentId>-<sig>` (or `t-<tab>`) deep links in groups and inline queries.
+2. **Multichain Custody & ToS §7.3–7.4 Compliance:**
+   - **Stellar (`G...`/`C...`)** and **TON (`WalletContractV4`/`V5R1`, BIP-39 + SLIP-0010 `m/44'/607'/i'`)** non-custodial wallets operate inside the same Mini App UI.
+   - External dApp sessions operate **exclusively via TON Connect v2** (`@astrowallet/ton-core` encrypted NaCl X25519 SSE bridge); `window.stellar`, WalletConnect/Reown non-TON connectors, and external non-TON dApp catalogs are strictly removed.
+   - Secrets, mnemonics, and PINs **never** touch `Telegram.WebApp.CloudStorage`, `localStorage`, `sessionStorage`, server logs, or D1/KV. Optional `BiometricManager` + Bot API 9.0 device `SecureStorage` complements local Argon2id + AES-GCM-256 IndexedDB storage and `.agvault.json` encrypted backups.
+3. **Slash Commands, In-App Sync & Inline Flows:**
+   - `/start`, `/connect`, plus one-tap **Sync Wallet with Telegram** inside the Mini App (`POST /v1/tg/link-challenge` → client SEP-53 proof → `POST /v1/tg/link-confirm`) binding `telegram_user_id` (PK) and `@username` to verified public `G...`/`C...` addresses.
+   - `/accounts`, `/balance`, `/pay`, `/request`, `/split`, `/scan`, `/swap`, `/alerts`, `/reserve`, and Inline `@AstroWalletAppBot pay ...` creating HMAC-signed Intent cards edited live on confirmation.
+4. **Viral Onboarding — Telegram Claim Links V2:**
+   - Sending assets to an unregistered `@username` locks funds in the Soroban **Claim-Link Escrow** (`#k=` ephemeral secret stays client-side in URL fragment). Recipients open the Mini App inside Telegram, create/unlock their non-custodial wallet in seconds, and claim on-chain.
+5. **Cloudflare D1 Relational Schema (Zero Secrets Stored):**
+   - `tg_users`: `telegram_user_id` (PK), `username_lower` (unique normalized index), `alerts_enabled`, `created_at`
    - `linked_addresses`: `id`, `telegram_user_id` (FK), `address` (`G...`/`C...`), `kind` (`classic`|`smart`), `label`, `is_default`, `verified_sig_hash`, `created_at`
    - `signed_intents`: `intent_id` (PK), `creator_tg_id`, `action_type`, `payload_json`, `hmac_sig`, `chat_id`, `inline_message_id`, `status` (`pending`|`signed`|`confirmed`|`expired`), `tx_hash`, `expires_at`
    - `claim_links`: `claim_id` (PK), `sender_address`, `recipient_tg_username`, `asset`, `amount`, `escrow_contract_id`, `status`, `expires_at`
-4. **Telegram → PWA Handoff & iOS Browser Guard:**
-   - Inline keyboard buttons use standard `InlineKeyboardButton({ url: "https://<PWA_ORIGIN>/intent/<id>?sig=<hmac>" })` (never TMA `openLink()`).
-   - If the PWA detects Telegram's embedded iOS browser where WebAuthn Fingerprint may be restricted, it displays an immediate non-blocking glass banner: **"Confirm with PIN now"** (always works) alongside **"Open in Safari / Chrome for Fingerprint"**.
 
-#### End-to-End Telegram Payment & Live Card Update Sequence
+#### End-to-End Telegram Mini App Payment & Live Card Update Sequence
 
 ```mermaid
 sequenceDiagram
     actor User as Sender - Telegram Chat
     participant Bot as apps/server - grammY Worker
     participant DB as Cloudflare D1
-    participant PWA as apps/pwa - Liquid Glass
+    participant TMA as apps/pwa - Telegram Mini App
     participant Chain as Stellar Network and OZ Channels
 
     User->>Bot: /pay 10 USDC @alice or Inline Query
     Bot->>DB: Resolve @alice verified address + save 5m Signed Intent
-    Bot-->>User: Post chat card with Sign with PIN / Fingerprint button
-    User->>PWA: Tap Intent URL https://pwa/intent/...
-    PWA->>Bot: GET /v1/intents/:id verify HMAC + TTL
-    PWA->>Chain: Run Scan & Shield decode + simulateTransaction
-    PWA-->>User: Show Clear-Sign Glass Sheet + Navigator Shield
-    User->>PWA: Authorize via PIN Argon2id or Fingerprint
-    PWA->>Chain: Submit signed tx direct or /v1/relay FeeBump
-    PWA->>Bot: POST /v1/intents/:id/confirm txHash
+    Bot-->>User: Post chat card with web_app or startapp Mini App button
+    User->>TMA: Open Mini App inside Telegram
+    TMA->>Bot: POST /v1/tg/auth verify HMAC initData -> 15m Bearer token
+    TMA->>Bot: GET /v1/intents/:id verify HMAC + TTL
+    TMA->>Chain: Run Scan & Shield decode + simulateTransaction
+    TMA-->>User: Show Clear-Sign Glass Sheet + Navigator Shield
+    User->>TMA: Authorize via PIN Argon2id or Telegram Biometrics
+    TMA->>Chain: Submit signed tx direct or /v1/relay FeeBump
+    TMA->>Bot: POST /v1/intents/:id/confirm txHash
     Bot->>Chain: Verify tx confirmed on Stellar RPC
     Bot->>DB: Mark intent confirmed
     Bot-->>User: editMessageText Confirmed 10 USDC + Explorer link
@@ -199,6 +206,6 @@ sequenceDiagram
 ## 4. Visual & Security Boundary Summary
 
 - **UI Surface:** Built strictly according to [`docs/DESIGN_SYSTEM.md`](docs/DESIGN_SYSTEM.md) using the 5-color palette (`#F15A24`, `#F5C928`, `#8050C8`, `#A58BE0`, `#172C69`), Apple Liquid Glass elevation limits (max 2–3 simultaneous blur layers), and deterministic **Astro Navigators** state visuals.
-- **PWA Security Headers (`_headers` / Cloudflare):**
-  `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' <CONFIGURED_RPC_AND_API_ORIGINS>; object-src 'none'; frame-ancestors 'none'; base-uri 'self';`
+- **Mini App Security Headers (`_headers` / Cloudflare):**
+  `default-src 'self'; script-src 'self' https://telegram.org 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: https:; connect-src 'self' <CONFIGURED_STELLAR_TON_AND_API_ORIGINS>; worker-src 'self'; object-src 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'self'; form-action 'self';`
 - **Multi-Network Runtime Config:** Validated at boot by `@astrowallet/domain` Zod schemas—zero hardcoded passphrases, endpoints, or contract addresses in application source.

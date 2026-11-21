@@ -45,9 +45,19 @@ function createPhase4MemoryRepo(): ServerRepository {
   const claims = new Map<string, ClaimLink>();
   const splitPayments = new Map<string, Array<{ txHash: string; amount: string }>>();
   const dedupKeys = new Set<string>();
+  const rateLimits = new Map<string, number>();
+  const relayBudget = new Map<string, bigint>();
+  const tgUpdates = new Set<number>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
+      if (usernameLower) {
+        for (const [id, existing] of users.entries()) {
+          if (id !== telegramUserId && existing.usernameLower === usernameLower) {
+            users.set(id, { ...existing, usernameLower: undefined });
+          }
+        }
+      }
       const next: TelegramUserRecord = {
         telegramUserId,
         usernameLower,
@@ -79,6 +89,17 @@ function createPhase4MemoryRepo(): ServerRepository {
       return false;
     },
     async unlinkAddress() {
+      return false;
+    },
+    async unlinkUserAddresses(telegramUserId) {
+      const prev = bindings.get(telegramUserId)?.length ?? 0;
+      bindings.delete(telegramUserId);
+      return prev;
+    },
+    async isAddressLinked(address) {
+      for (const list of bindings.values()) {
+        if (list.some((item) => item.address === address)) return true;
+      }
       return false;
     },
     async listWatchedAccounts() {
@@ -163,6 +184,32 @@ function createPhase4MemoryRepo(): ServerRepository {
       }
       return null;
     },
+    async incrementRateLimit({ key, windowSec, limit, nowSec }) {
+      const now = nowSec ?? Math.floor(Date.now() / 1000);
+      const bucketKey = `${key}:${Math.floor(now / windowSec)}`;
+      const nextCount = (rateLimits.get(bucketKey) ?? 0) + 1;
+      rateLimits.set(bucketKey, nextCount);
+      return {
+        allowed: nextCount <= limit,
+        count: nextCount,
+        retryAfterSeconds: windowSec,
+      };
+    },
+    async tryConsumeRelayBudget({ dayUtc, feeStroops, dailyBudgetStroops }) {
+      const prev = relayBudget.get(dayUtc) ?? 0n;
+      const next = prev + BigInt(feeStroops);
+      if (next > BigInt(dailyBudgetStroops)) {
+        return { allowed: false, spentStroops: prev.toString() };
+      }
+      relayBudget.set(dayUtc, next);
+      return { allowed: true, spentStroops: next.toString() };
+    },
+    async claimTelegramUpdateId(updateId) {
+      if (tgUpdates.has(updateId)) return false;
+      tgUpdates.add(updateId);
+      return true;
+    },
+    async purgeExpiredRecords() {},
   };
 }
 

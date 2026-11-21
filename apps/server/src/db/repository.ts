@@ -48,6 +48,8 @@ export interface ServerRepository {
   listLinkedAddresses(telegramUserId: string): Promise<readonly TelegramUserBinding[]>;
   setDefaultLinkedAddress(telegramUserId: string, address: string): Promise<boolean>;
   unlinkAddress(telegramUserId: string, address: string): Promise<boolean>;
+  unlinkUserAddresses(telegramUserId: string): Promise<number>;
+  isAddressLinked(address: string): Promise<boolean>;
   listWatchedAccounts(): Promise<readonly WatchedAccountRecord[]>;
 
   createSignedIntent(intent: SignedIntent): Promise<SignedIntent>;
@@ -88,6 +90,20 @@ export interface ServerRepository {
     payloadJson: string;
     sinceUnix: number;
   }): Promise<SignedIntent | null>;
+
+  incrementRateLimit(input: {
+    key: string;
+    windowSec: number;
+    limit: number;
+    nowSec?: number | undefined;
+  }): Promise<{ allowed: boolean; count: number; retryAfterSeconds: number }>;
+  tryConsumeRelayBudget(input: {
+    dayUtc: string;
+    feeStroops: string;
+    dailyBudgetStroops: string;
+  }): Promise<{ allowed: boolean; spentStroops: string }>;
+  claimTelegramUpdateId(updateId: number, nowSec?: number): Promise<boolean>;
+  purgeExpiredRecords(nowSec: number): Promise<void>;
 }
 
 interface RawUserRow {
@@ -180,7 +196,8 @@ export function createD1Repository(db: D1Database): ServerRepository {
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
       const now = Math.floor(Date.now() / 1000);
-      await db
+      const cleanUsername = usernameLower?.trim().replace(/^@/, "").toLowerCase() || null;
+      const upsertStmt = db
         .prepare(
           `INSERT INTO tg_users (telegram_user_id, username_lower, alerts_enabled, created_at, updated_at)
            VALUES (?, ?, 1, ?, ?)
@@ -188,8 +205,18 @@ export function createD1Repository(db: D1Database): ServerRepository {
              username_lower = COALESCE(excluded.username_lower, tg_users.username_lower),
              updated_at = excluded.updated_at`,
         )
-        .bind(telegramUserId, usernameLower ?? null, now, now)
-        .run();
+        .bind(telegramUserId, cleanUsername, now, now);
+
+      if (cleanUsername) {
+        const clearStaleStmt = db
+          .prepare(
+            "UPDATE tg_users SET username_lower = NULL WHERE username_lower = ? AND telegram_user_id != ?",
+          )
+          .bind(cleanUsername, telegramUserId);
+        await db.batch([clearStaleStmt, upsertStmt]);
+      } else {
+        await upsertStmt.run();
+      }
 
       const row = await db
         .prepare(
@@ -237,7 +264,8 @@ export function createD1Repository(db: D1Database): ServerRepository {
 
     async linkVerifiedAddresses({ telegramUserId, usernameLower, accounts }) {
       const now = Math.floor(Date.now() / 1000);
-      await db
+      const cleanUsername = usernameLower?.trim().replace(/^@/, "").toLowerCase() || null;
+      const upsertStmt = db
         .prepare(
           `INSERT INTO tg_users (telegram_user_id, username_lower, alerts_enabled, created_at, updated_at)
            VALUES (?, ?, 1, ?, ?)
@@ -245,8 +273,18 @@ export function createD1Repository(db: D1Database): ServerRepository {
              username_lower = COALESCE(excluded.username_lower, tg_users.username_lower),
              updated_at = excluded.updated_at`,
         )
-        .bind(telegramUserId, usernameLower ?? null, now, now)
-        .run();
+        .bind(telegramUserId, cleanUsername, now, now);
+
+      if (cleanUsername) {
+        const clearStaleStmt = db
+          .prepare(
+            "UPDATE tg_users SET username_lower = NULL WHERE username_lower = ? AND telegram_user_id != ?",
+          )
+          .bind(cleanUsername, telegramUserId);
+        await db.batch([clearStaleStmt, upsertStmt]);
+      } else {
+        await upsertStmt.run();
+      }
 
       const existing = await this.listLinkedAddresses(telegramUserId);
       const hasDefaultAlready = existing.some((item) => item.isDefault);
@@ -363,6 +401,22 @@ export function createD1Repository(db: D1Database): ServerRepository {
         .bind(telegramUserId, address)
         .run();
       return (res.meta?.changes ?? 0) > 0;
+    },
+
+    async unlinkUserAddresses(telegramUserId) {
+      const res = await db
+        .prepare("DELETE FROM linked_addresses WHERE telegram_user_id = ?")
+        .bind(telegramUserId)
+        .run();
+      return res.meta?.changes ?? 0;
+    },
+
+    async isAddressLinked(address) {
+      const row = await db
+        .prepare("SELECT 1 AS hit FROM linked_addresses WHERE address = ? LIMIT 1")
+        .bind(address)
+        .first<{ hit: number }>();
+      return Boolean(row);
     },
 
     async listWatchedAccounts() {
@@ -573,6 +627,91 @@ export function createD1Repository(db: D1Database): ServerRepository {
         )
         .first<RawIntentRow>();
       return row ? mapIntentRow(row) : null;
+    },
+
+    async incrementRateLimit({ key, windowSec, limit, nowSec }) {
+      const now = nowSec ?? Math.floor(Date.now() / 1000);
+      const windowId = Math.floor(now / windowSec);
+      const resetAt = (windowId + 1) * windowSec;
+      const bucketKey = `${key}:${windowId}`;
+      const row = await db
+        .prepare(
+          `INSERT INTO rate_limits (key, count, reset_at)
+           VALUES (?, 1, ?)
+           ON CONFLICT(key) DO UPDATE SET count = rate_limits.count + 1
+           RETURNING count`,
+        )
+        .bind(bucketKey, resetAt)
+        .first<{ count: number }>();
+      const count = row?.count ?? 1;
+      return {
+        allowed: count <= limit,
+        count,
+        retryAfterSeconds: Math.max(1, resetAt - now),
+      };
+    },
+
+    async tryConsumeRelayBudget({ dayUtc, feeStroops, dailyBudgetStroops }) {
+      if (!/^\d+$/.test(feeStroops) || !/^\d+$/.test(dailyBudgetStroops)) {
+        return { allowed: false, spentStroops: "0" };
+      }
+      const feeInt = Number(BigInt(feeStroops));
+      const budgetInt = Number(BigInt(dailyBudgetStroops));
+      if (!Number.isSafeInteger(feeInt) || !Number.isSafeInteger(budgetInt)) {
+        return { allowed: false, spentStroops: "0" };
+      }
+
+      await db
+        .prepare(
+          "INSERT OR IGNORE INTO relay_daily_usage (day_utc, spent_stroops, tx_count) VALUES (?, '0', 0)",
+        )
+        .bind(dayUtc)
+        .run();
+
+      const updated = await db
+        .prepare(
+          `UPDATE relay_daily_usage
+           SET spent_stroops = CAST(CAST(spent_stroops AS INTEGER) + ? AS TEXT),
+               tx_count = tx_count + 1
+           WHERE day_utc = ? AND (CAST(spent_stroops AS INTEGER) + ?) <= ?
+           RETURNING spent_stroops`,
+        )
+        .bind(feeInt, dayUtc, feeInt, budgetInt)
+        .first<{ spent_stroops: string }>();
+
+      if (updated) {
+        return { allowed: true, spentStroops: updated.spent_stroops };
+      }
+      const current = await db
+        .prepare("SELECT spent_stroops FROM relay_daily_usage WHERE day_utc = ?")
+        .bind(dayUtc)
+        .first<{ spent_stroops: string }>();
+      return {
+        allowed: false,
+        spentStroops: current?.spent_stroops ?? dailyBudgetStroops,
+      };
+    },
+
+    async claimTelegramUpdateId(updateId, nowSec) {
+      const now = nowSec ?? Math.floor(Date.now() / 1000);
+      const res = await db
+        .prepare("INSERT OR IGNORE INTO processed_tg_updates (update_id, processed_at) VALUES (?, ?)")
+        .bind(updateId, now)
+        .run();
+      return (res.meta?.changes ?? 0) > 0;
+    },
+
+    async purgeExpiredRecords(nowSec) {
+      await db.batch([
+        db.prepare("DELETE FROM signed_intents WHERE expires_at < ?").bind(nowSec - 3600),
+        db.prepare("DELETE FROM rate_limits WHERE reset_at < ?").bind(nowSec - 300),
+        db
+          .prepare("DELETE FROM processed_tg_updates WHERE processed_at < ?")
+          .bind(nowSec - 7 * 86_400),
+        db
+          .prepare("DELETE FROM processed_alerts WHERE created_at < ?")
+          .bind(nowSec - 30 * 86_400),
+      ]);
     },
   };
 }

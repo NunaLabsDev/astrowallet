@@ -1,5 +1,9 @@
 import { useState, type FormEvent } from "react";
-import { generateMnemonicPhrase, validateMnemonicPhrase } from "@astrowallet/stellar-core";
+import {
+  evaluateSecretStrength,
+  generateMnemonicPhrase,
+  validateMnemonicPhrase,
+} from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import {
@@ -28,13 +32,27 @@ export function OnboardingSheet() {
   const [pin, setPin] = useState<string>("");
   const [confirmPin, setConfirmPin] = useState<string>("");
   const [confirmedBackup, setConfirmedBackup] = useState<boolean>(false);
+  const [quizWord3, setQuizWord3] = useState<string>("");
+  const [quizWord7, setQuizWord7] = useState<string>("");
+  const [quizWord11, setQuizWord11] = useState<string>("");
   const [copiedSeed, setCopiedSeed] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
+  const pinStrength = evaluateSecretStrength(pin);
+  const words = generatedMnemonic.split(" ");
+
+  const isQuizPassed = () =>
+    quizWord3.trim().toLowerCase() === (words[2] ?? "").toLowerCase() &&
+    quizWord7.trim().toLowerCase() === (words[6] ?? "").toLowerCase() &&
+    quizWord11.trim().toLowerCase() === (words[10] ?? "").toLowerCase();
+
   const handleRegenerate = () => {
     setGeneratedMnemonic(generateMnemonicPhrase(128));
     setConfirmedBackup(false);
+    setQuizWord3("");
+    setQuizWord7("");
+    setQuizWord11("");
     setCopiedSeed(false);
   };
 
@@ -54,6 +72,10 @@ export function OnboardingSheet() {
       setError("Please confirm that you saved your 12-word recovery phrase offline.");
       return;
     }
+    if (!isQuizPassed()) {
+      setError("Verify words #3, #7, and #11 from your 12-word phrase to continue.");
+      return;
+    }
     setCreateStep(2);
   };
 
@@ -63,6 +85,11 @@ export function OnboardingSheet() {
 
     if (mode === "create" && createStep === 1) {
       handleAdvanceToPin();
+      return;
+    }
+
+    if (mode !== "restore_agvault" && !pinStrength.acceptable) {
+      setError(pinStrength.reasons[0] ?? "Choose a stronger PIN or passphrase.");
       return;
     }
 
@@ -76,8 +103,8 @@ export function OnboardingSheet() {
       return;
     }
 
-    if (mode === "create" && !confirmedBackup) {
-      setError("Confirm that you have written down your 12-word recovery phrase.");
+    if (mode === "create" && (!confirmedBackup || !isQuizPassed())) {
+      setError("Confirm and verify your 12-word recovery phrase backup first.");
       return;
     }
 
@@ -100,8 +127,6 @@ export function OnboardingSheet() {
       setBusy(false);
     }
   };
-
-  const words = generatedMnemonic.split(" ");
 
   return (
     <section
@@ -236,6 +261,42 @@ export function OnboardingSheet() {
                   I wrote down these 12 words offline. AstroWallet never stores seeds on any server.
                 </span>
               </label>
+
+              <div
+                className="aw-banner"
+                style={{ display: "grid", gap: 8, marginTop: 10 }}
+                aria-label="Backup word verification quiz"
+              >
+                <div style={{ fontSize: 12, fontWeight: 600 }}>
+                  Confirm backup: enter words #3, #7, and #11
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
+                  <input
+                    type="text"
+                    className="aw-input"
+                    placeholder="Word #3"
+                    aria-label="Word #3"
+                    value={quizWord3}
+                    onChange={(e) => setQuizWord3(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="aw-input"
+                    placeholder="Word #7"
+                    aria-label="Word #7"
+                    value={quizWord7}
+                    onChange={(e) => setQuizWord7(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="aw-input"
+                    placeholder="Word #11"
+                    aria-label="Word #11"
+                    value={quizWord11}
+                    onChange={(e) => setQuizWord11(e.target.value)}
+                  />
+                </div>
+              </div>
             </div>
 
             {error && (
@@ -247,7 +308,7 @@ export function OnboardingSheet() {
             <button
               type="button"
               className="aw-btn-primary"
-              disabled={!confirmedBackup}
+              disabled={!confirmedBackup || !isQuizPassed()}
               onClick={handleAdvanceToPin}
             >
               Continue to PIN Setup →
@@ -318,13 +379,30 @@ export function OnboardingSheet() {
               </div>
             </div>
 
+            {pin.length > 0 && (
+              <div
+                className={pinStrength.acceptable ? "aw-banner" : "aw-banner aw-banner--warn"}
+                style={{ fontSize: 12 }}
+                aria-live="polite"
+              >
+                <strong>PIN / Passphrase Strength: {pinStrength.level.toUpperCase()}</strong>
+                {!pinStrength.acceptable && pinStrength.reasons[0] && (
+                  <div style={{ marginTop: 2 }}>{pinStrength.reasons[0]}</div>
+                )}
+              </div>
+            )}
+
             {error && (
               <div className="aw-banner aw-banner--danger" role="alert">
                 {error}
               </div>
             )}
 
-            <button type="submit" className="aw-btn-primary" disabled={busy}>
+            <button
+              type="submit"
+              className="aw-btn-primary"
+              disabled={busy || !pinStrength.acceptable}
+            >
               <IconLock size={16} />
               <span>
                 {busy
@@ -396,13 +474,30 @@ export function OnboardingSheet() {
               </div>
             </div>
 
+            {pin.length > 0 && (
+              <div
+                className={pinStrength.acceptable ? "aw-banner" : "aw-banner aw-banner--warn"}
+                style={{ fontSize: 12 }}
+                aria-live="polite"
+              >
+                <strong>PIN / Passphrase Strength: {pinStrength.level.toUpperCase()}</strong>
+                {!pinStrength.acceptable && pinStrength.reasons[0] && (
+                  <div style={{ marginTop: 2 }}>{pinStrength.reasons[0]}</div>
+                )}
+              </div>
+            )}
+
             {error && (
               <div className="aw-banner aw-banner--danger" role="alert">
                 {error}
               </div>
             )}
 
-            <button type="submit" className="aw-btn-primary" disabled={busy}>
+            <button
+              type="submit"
+              className="aw-btn-primary"
+              disabled={busy || !pinStrength.acceptable}
+            >
               <IconLock size={16} />
               <span>
                 {busy

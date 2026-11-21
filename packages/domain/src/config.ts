@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { ContractAddressSchema, type ContractAddress } from "./accounts.js";
+import {
+  ContractAddressSchema,
+  TonNetworkSchema,
+  type ContractAddress,
+  type TonNetwork,
+} from "./accounts.js";
 
 export const StellarNetworkSchema = z.enum(["testnet", "mainnet"]);
 export type StellarNetwork = z.infer<typeof StellarNetworkSchema>;
@@ -63,6 +68,29 @@ const OptionalNonEmptyStringSchema = z.preprocess(
   z.string().trim().min(1).optional(),
 );
 
+function parseBooleanWithDefault(defaultValue: boolean) {
+  return z.preprocess((val) => {
+    if (typeof val === "boolean") return val;
+    if (typeof val === "string") {
+      const normalized = val.trim().toLowerCase();
+      if (normalized === "") return undefined;
+      if (normalized === "true" || normalized === "1") return true;
+      if (normalized === "false" || normalized === "0") return false;
+    }
+    return val;
+  }, z.boolean().default(defaultValue));
+}
+
+const OptionalShortNameSchema = (field: string) =>
+  z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9_]{3,64}$/, `${field} must be 3-64 alphanumeric/underscore characters`)
+      .optional(),
+  );
+
 function parseContractCsv(field: string) {
   return z
     .preprocess(
@@ -96,6 +124,54 @@ function parsePositiveIntWithDefault(defaultValue: number, max: number) {
     emptyToUndefined,
     z.coerce.number().int().min(1).max(max).default(defaultValue),
   );
+}
+
+function parsePositiveStroopsStringWithDefault(field: string, defaultValue: string) {
+  return z.preprocess(
+    (val) => emptyToUndefined(val) ?? defaultValue,
+    z
+      .union([z.string(), z.number()])
+      .transform((v) => String(v).trim())
+      .refine(
+        (v) => /^\d+$/.test(v) && BigInt(v) > 0n,
+        `${field} must be a positive integer string in stroops`,
+      ),
+  );
+}
+
+function validateNetworkCoherence(
+  network: StellarNetwork,
+  passphrase: string,
+  urls: ReadonlyArray<string | undefined>,
+  ctx: z.RefinementCtx,
+  passphrasePath: string,
+  urlPath: string,
+) {
+  if (network === "mainnet" && /\btest\b/i.test(passphrase)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [passphrasePath],
+      message: `${passphrasePath} cannot reference a test network when network=mainnet`,
+    });
+  }
+  if (network === "testnet" && /\bpublic\b/i.test(passphrase)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [passphrasePath],
+      message: `${passphrasePath} cannot reference a public mainnet passphrase when network=testnet`,
+    });
+  }
+  if (network === "mainnet") {
+    for (const u of urls) {
+      if (u && u.trim().toLowerCase().startsWith("http://")) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [urlPath],
+          message: `Plaintext http:// endpoint "${u}" is strictly forbidden when network=mainnet`,
+        });
+      }
+    }
+  }
 }
 
 function parseUrlCsv(field: string, required: boolean) {
@@ -152,6 +228,12 @@ const RawPwaEnvSchema = z
         (v) => /^[A-Za-z0-9_]{5,32}$/.test(v),
         "VITE_TG_BOT_USERNAME must be a valid Telegram bot username (5-32 chars)",
       ),
+    VITE_TG_MINI_APP_SHORT_NAME: OptionalShortNameSchema("VITE_TG_MINI_APP_SHORT_NAME"),
+    VITE_TON_NETWORK: z.preprocess(emptyToUndefined, TonNetworkSchema.optional()),
+    VITE_TON_RPC_URLS: parseUrlCsv("VITE_TON_RPC_URLS", false),
+    VITE_TON_BRIDGE_URL: OptionalUrlSchema("VITE_TON_BRIDGE_URL"),
+    VITE_TON_EXPLORER_BASE_URL: OptionalUrlSchema("VITE_TON_EXPLORER_BASE_URL"),
+    VITE_ALLOW_DEV_OUTSIDE_TELEGRAM: parseBooleanWithDefault(false),
     VITE_FRIENDBOT_URL: OptionalUrlSchema("VITE_FRIENDBOT_URL"),
     VITE_SMART_ACCOUNT_WASM_HASH: z.preprocess(
       emptyToUndefined,
@@ -171,6 +253,11 @@ const RawPwaEnvSchema = z
     ),
     VITE_SEP42_ASSET_LIST_URLS: parseUrlCsv("VITE_SEP42_ASSET_LIST_URLS", false),
     VITE_EXPLORER_BASE_URL: OptionalUrlSchema("VITE_EXPLORER_BASE_URL"),
+    VITE_SOROBITS_EXPLORER_URL: OptionalUrlSchema("VITE_SOROBITS_EXPLORER_URL"),
+    VITE_SOROBAN_MAX_RESOURCE_FEE_STROOPS: parsePositiveStroopsStringWithDefault(
+      "VITE_SOROBAN_MAX_RESOURCE_FEE_STROOPS",
+      "5000000",
+    ),
     VITE_REOWN_PROJECT_ID: OptionalNonEmptyStringSchema,
     VITE_CCTP_BRIDGE_URL: OptionalUrlSchema("VITE_CCTP_BRIDGE_URL"),
     VITE_CCTP_FORWARDER_CONTRACT_ID: z.preprocess(
@@ -188,6 +275,36 @@ const RawPwaEnvSchema = z
         message: "VITE_FRIENDBOT_URL is strictly forbidden when VITE_STELLAR_NETWORK=mainnet",
       });
     }
+    if (env.VITE_STELLAR_NETWORK === "mainnet" && env.VITE_ALLOW_DEV_OUTSIDE_TELEGRAM) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["VITE_ALLOW_DEV_OUTSIDE_TELEGRAM"],
+        message:
+          "VITE_ALLOW_DEV_OUTSIDE_TELEGRAM=true is strictly forbidden when VITE_STELLAR_NETWORK=mainnet",
+      });
+    }
+    validateNetworkCoherence(
+      env.VITE_STELLAR_NETWORK,
+      env.VITE_STELLAR_NETWORK_PASSPHRASE,
+      [
+        ...env.VITE_STELLAR_RPC_URLS,
+        ...env.VITE_HORIZON_URLS,
+        env.VITE_API_BASE_URL,
+        env.VITE_PWA_ORIGIN,
+        ...env.VITE_SEP42_ASSET_LIST_URLS,
+        env.VITE_EXPLORER_BASE_URL,
+        env.VITE_SOROBITS_EXPLORER_URL,
+        env.VITE_CCTP_BRIDGE_URL,
+        env.VITE_MOONPAY_WIDGET_URL,
+        env.VITE_TRANSAK_WIDGET_URL,
+        ...env.VITE_TON_RPC_URLS,
+        env.VITE_TON_BRIDGE_URL,
+        env.VITE_TON_EXPLORER_BASE_URL,
+      ],
+      ctx,
+      "VITE_STELLAR_NETWORK_PASSPHRASE",
+      "VITE_STELLAR_NETWORK",
+    );
   });
 
 export interface PwaConfig {
@@ -198,12 +315,20 @@ export interface PwaConfig {
   apiBaseUrl: string;
   pwaOrigin: string;
   tgBotUsername: string;
+  tgMiniAppShortName?: string | undefined;
+  tonNetwork: TonNetwork;
+  tonRpcUrls: string[];
+  tonBridgeUrl?: string | undefined;
+  tonExplorerBaseUrl?: string | undefined;
+  allowDevOutsideTelegram: boolean;
   friendbotUrl?: string | undefined;
   smartAccountWasmHash?: string | undefined;
   claimEscrowContractId?: string | undefined;
   sorobitsContractId?: string | undefined;
   sep42AssetListUrls: string[];
   explorerBaseUrl?: string | undefined;
+  sorobitsExplorerUrl?: string | undefined;
+  sorobanMaxResourceFeeStroops: string;
   reownProjectId?: string | undefined;
   cctpBridgeUrl?: string | undefined;
   cctpForwarderContractId?: ContractAddress | undefined;
@@ -221,12 +346,20 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     apiBaseUrl: parsed.VITE_API_BASE_URL,
     pwaOrigin: parsed.VITE_PWA_ORIGIN,
     tgBotUsername: parsed.VITE_TG_BOT_USERNAME,
+    tgMiniAppShortName: parsed.VITE_TG_MINI_APP_SHORT_NAME,
+    tonNetwork: parsed.VITE_TON_NETWORK ?? parsed.VITE_STELLAR_NETWORK,
+    tonRpcUrls: parsed.VITE_TON_RPC_URLS,
+    tonBridgeUrl: parsed.VITE_TON_BRIDGE_URL,
+    tonExplorerBaseUrl: parsed.VITE_TON_EXPLORER_BASE_URL,
+    allowDevOutsideTelegram: parsed.VITE_ALLOW_DEV_OUTSIDE_TELEGRAM,
     friendbotUrl: parsed.VITE_FRIENDBOT_URL,
     smartAccountWasmHash: parsed.VITE_SMART_ACCOUNT_WASM_HASH,
     claimEscrowContractId: parsed.VITE_CLAIM_ESCROW_CONTRACT_ID,
     sorobitsContractId: parsed.VITE_SOROBITS_CONTRACT_ID,
     sep42AssetListUrls: parsed.VITE_SEP42_ASSET_LIST_URLS,
     explorerBaseUrl: parsed.VITE_EXPLORER_BASE_URL,
+    sorobitsExplorerUrl: parsed.VITE_SOROBITS_EXPLORER_URL,
+    sorobanMaxResourceFeeStroops: parsed.VITE_SOROBAN_MAX_RESOURCE_FEE_STROOPS,
     reownProjectId: parsed.VITE_REOWN_PROJECT_ID,
     cctpBridgeUrl: parsed.VITE_CCTP_BRIDGE_URL,
     cctpForwarderContractId: parsed.VITE_CCTP_FORWARDER_CONTRACT_ID,
@@ -255,9 +388,40 @@ const RawServerEnvSchema = z
       emptyToUndefined,
       ContractAddressSchema.optional(),
     ),
+    SMART_ACCOUNT_WASM_HASH: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .regex(/^[a-fA-F0-9]{64}$/, "SMART_ACCOUNT_WASM_HASH must be 64 hex chars")
+        .optional(),
+    ),
     RELAY_ALLOWED_CONTRACTS: parseContractCsv("RELAY_ALLOWED_CONTRACTS"),
     RELAY_RATE_LIMIT_PER_MIN: parsePositiveIntWithDefault(10, 1000),
     PROXY_RATE_LIMIT_PER_MIN: parsePositiveIntWithDefault(60, 5000),
+    RELAY_MAX_OPERATIONS: parsePositiveIntWithDefault(5, 20),
+    RELAY_MAX_FEE_STROOPS: parsePositiveStroopsStringWithDefault(
+      "RELAY_MAX_FEE_STROOPS",
+      "2000000",
+    ),
+    RELAY_DAILY_BUDGET_STROOPS: parsePositiveStroopsStringWithDefault(
+      "RELAY_DAILY_BUDGET_STROOPS",
+      "500000000",
+    ),
+    TELEGRAM_API_ORIGIN: OptionalUrlSchema("TELEGRAM_API_ORIGIN"),
+    TG_BOT_USERNAME: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .transform((v) => v.replace(/^@/, ""))
+        .refine(
+          (v) => /^[A-Za-z0-9_]{5,32}$/.test(v),
+          "TG_BOT_USERNAME must be a valid Telegram bot username (5-32 chars)",
+        )
+        .optional(),
+    ),
+    TG_MINI_APP_SHORT_NAME: OptionalShortNameSchema("TG_MINI_APP_SHORT_NAME"),
     TG_BOT_TOKEN: z
       .string({ required_error: "TG_BOT_TOKEN is required" })
       .trim()
@@ -282,6 +446,24 @@ const RawServerEnvSchema = z
         message: "FRIENDBOT_URL is strictly forbidden when STELLAR_NETWORK=mainnet",
       });
     }
+    validateNetworkCoherence(
+      env.STELLAR_NETWORK,
+      env.STELLAR_NETWORK_PASSPHRASE,
+      [
+        ...env.STELLAR_RPC_URLS,
+        ...env.HORIZON_URLS,
+        env.PWA_ORIGIN,
+        ...env.ALLOWED_ORIGINS,
+        env.STELLAR_EXPERT_API_BASE,
+        env.OZ_CHANNELS_API_URL,
+        env.SOROSWAP_API_BASE,
+        ...env.SEP42_ASSET_LIST_URLS,
+        env.TELEGRAM_API_ORIGIN,
+      ],
+      ctx,
+      "STELLAR_NETWORK_PASSPHRASE",
+      "STELLAR_NETWORK",
+    );
   });
 
 export interface ServerConfig {
@@ -297,9 +479,16 @@ export interface ServerConfig {
   soroswapApiBase?: string | undefined;
   sep42AssetListUrls: string[];
   claimEscrowContractId?: ContractAddress | undefined;
+  smartAccountWasmHash?: string | undefined;
   relayAllowedContracts: string[];
   relayRateLimitPerMin: number;
   proxyRateLimitPerMin: number;
+  relayMaxOperations: number;
+  relayMaxFeeStroops: string;
+  relayDailyBudgetStroops: string;
+  telegramApiOrigin?: string | undefined;
+  tgBotUsername?: string | undefined;
+  tgMiniAppShortName?: string | undefined;
   tgBotToken: string;
   tgWebhookSecret: string;
   intentHmacSecret: string;
@@ -323,9 +512,16 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     soroswapApiBase: parsed.SOROSWAP_API_BASE,
     sep42AssetListUrls: parsed.SEP42_ASSET_LIST_URLS,
     claimEscrowContractId: parsed.CLAIM_ESCROW_CONTRACT_ID,
+    smartAccountWasmHash: parsed.SMART_ACCOUNT_WASM_HASH,
     relayAllowedContracts: parsed.RELAY_ALLOWED_CONTRACTS,
     relayRateLimitPerMin: parsed.RELAY_RATE_LIMIT_PER_MIN,
     proxyRateLimitPerMin: parsed.PROXY_RATE_LIMIT_PER_MIN,
+    relayMaxOperations: parsed.RELAY_MAX_OPERATIONS,
+    relayMaxFeeStroops: parsed.RELAY_MAX_FEE_STROOPS,
+    relayDailyBudgetStroops: parsed.RELAY_DAILY_BUDGET_STROOPS,
+    telegramApiOrigin: parsed.TELEGRAM_API_ORIGIN,
+    tgBotUsername: parsed.TG_BOT_USERNAME,
+    tgMiniAppShortName: parsed.TG_MINI_APP_SHORT_NAME,
     tgBotToken: parsed.TG_BOT_TOKEN,
     tgWebhookSecret: parsed.TG_WEBHOOK_SECRET,
     intentHmacSecret: parsed.INTENT_HMAC_SECRET,

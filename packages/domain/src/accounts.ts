@@ -102,6 +102,34 @@ export interface AccountReserveCalculationInput {
   }[] | undefined;
 }
 
+const STROOPS_PER_XLM = 10_000_000n;
+const RESERVE_PER_ENTRY_STROOPS = 5_000_000n;
+
+function parseDecimalToStroops(raw: string): bigint | null {
+  const cleaned = raw.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(cleaned)) {
+    return null;
+  }
+  const [wholePart = "0", fracPart = ""] = cleaned.split(".");
+  const frac7 = fracPart.slice(0, 7).padEnd(7, "0");
+  return BigInt(wholePart) * STROOPS_PER_XLM + BigInt(frac7);
+}
+
+function formatStroops7(stroops: bigint): string {
+  const nonNeg = stroops > 0n ? stroops : 0n;
+  const whole = nonNeg / STROOPS_PER_XLM;
+  const frac = (nonNeg % STROOPS_PER_XLM).toString().padStart(7, "0");
+  return `${whole.toString()}.${frac}`;
+}
+
+function formatStroopsTenths(stroops: bigint): string {
+  const nonNeg = stroops > 0n ? stroops : 0n;
+  const tenths = nonNeg / 1_000_000n;
+  const whole = tenths / 10n;
+  const dec = tenths % 10n;
+  return `${whole.toString()}.${dec.toString()}`;
+}
+
 /**
  * Computes Classic Stellar XLM reserves: (2 + subentries + sponsoring - sponsored) * 0.5 XLM,
  * spendable XLM after reserves and selling liabilities, and zero-balance trustlines eligible for reclaim.
@@ -114,24 +142,22 @@ export function calculateAccountReserveSummary(
   const numSponsoring = Math.max(0, Math.trunc(input.numSponsoring ?? 0));
   const numSponsored = Math.max(0, Math.trunc(input.numSponsored ?? 0));
   const effectiveEntries = Math.max(0, baseEntries + subentryCount + numSponsoring - numSponsored);
-  const minReserveNum = effectiveEntries * 0.5;
 
-  const nativeBal = Number(input.nativeBalanceXlm);
-  const sellingLiab = Number(input.sellingLiabilitiesXlm ?? "0");
-  const spendableNum = Math.max(
-    0,
-    (Number.isFinite(nativeBal) ? nativeBal : 0) -
-      minReserveNum -
-      (Number.isFinite(sellingLiab) ? sellingLiab : 0),
-  );
+  const minReserveStroops = BigInt(effectiveEntries) * RESERVE_PER_ENTRY_STROOPS;
+  const nativeStroops = parseDecimalToStroops(input.nativeBalanceXlm) ?? 0n;
+  const sellingLiabStroops = parseDecimalToStroops(input.sellingLiabilitiesXlm ?? "0") ?? 0n;
+  const rawSpendable = nativeStroops - minReserveStroops - sellingLiabStroops;
+  const spendableStroops = rawSpendable > 0n ? rawSpendable : 0n;
 
   const reclaimableTrustlines: ZeroBalanceTrustline[] = [];
   for (const item of input.balances ?? []) {
+    const parsedBal = parseDecimalToStroops(item.balance);
     if (
       item.assetCode !== "XLM" &&
       item.assetIssuer &&
       ClassicAddressSchema.safeParse(item.assetIssuer).success &&
-      Number(item.balance) === 0
+      parsedBal !== null &&
+      parsedBal === 0n
     ) {
       reclaimableTrustlines.push({
         assetCode: item.assetCode,
@@ -140,15 +166,40 @@ export function calculateAccountReserveSummary(
     }
   }
 
+  const reclaimableStroops = BigInt(reclaimableTrustlines.length) * RESERVE_PER_ENTRY_STROOPS;
+
   return {
     baseEntries,
     subentryCount,
     numSponsoring,
     numSponsored,
     effectiveEntries,
-    minReserveXlm: minReserveNum.toFixed(1),
-    spendableXlm: spendableNum.toFixed(7),
+    minReserveXlm: formatStroopsTenths(minReserveStroops),
+    spendableXlm: formatStroops7(spendableStroops),
     reclaimableTrustlines,
-    reclaimableXlm: (reclaimableTrustlines.length * 0.5).toFixed(1),
+    reclaimableXlm: formatStroopsTenths(reclaimableStroops),
   };
+}
+
+export const TonNetworkSchema = z.enum(["testnet", "mainnet"]);
+export type TonNetwork = z.infer<typeof TonNetworkSchema>;
+
+export const TonAddressSchema = z
+  .string()
+  .trim()
+  .refine(
+    (v) => /^-?\d+:[0-9a-fA-F]{64}$/.test(v) || /^[A-Za-z0-9+/_-]{48}$/.test(v),
+    "Invalid TON address (expected raw workchain:hex or 48-char friendly address)",
+  );
+export type TonAddress = z.infer<typeof TonAddressSchema>;
+
+export interface TonAccountSummary {
+  derivationPath: string;
+  friendlyAddress: TonAddress;
+  bounceableAddress: TonAddress;
+  rawAddress: TonAddress;
+  publicKeyHex: string;
+  walletStateInitBase64: string;
+  network: TonNetwork;
+  version: "v4r2" | "v5r1";
 }

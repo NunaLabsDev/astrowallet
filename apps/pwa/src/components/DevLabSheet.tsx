@@ -19,7 +19,7 @@ import {
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
-import { DappConnectSheet } from "./DappConnectSheet.js";
+import { TonConnectSheet } from "./TonConnectSheet.js";
 import {
   IconCheck,
   IconCode,
@@ -33,13 +33,7 @@ import {
   IconZap,
 } from "./Icons.js";
 
-type DevSubTab = "network" | "contracts" | "xdr" | "crypto" | "dapp";
-
-const SEP43_SNIPPET = `// SEP-43 Provider (injected while AstroWallet vault is unlocked)
-const publicKey = await window.stellar.getPublicKey();
-const { signedXdr } = await window.stellar.signTransaction(unsignedXdr, {
-  networkPassphrase,
-});`;
+type DevSubTab = "network" | "contracts" | "xdr" | "crypto" | "tonconnect";
 
 export function DevLabSheet() {
   const {
@@ -109,8 +103,6 @@ export function DevLabSheet() {
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
   const caip2 = expectedCaip2ChainId(config.network);
-  const sep43Injected =
-    typeof window !== "undefined" && Boolean((window as unknown as { stellar?: unknown }).stellar);
 
   const loadTelemetry = async () => {
     setTelemetryLoading(true);
@@ -385,7 +377,7 @@ export function DevLabSheet() {
               <span className="glass-pill glass-pill--gold">Developer Workbench</span>
               <span className="glass-pill">{caip2}</span>
               <span className="glass-pill glass-pill--trust">
-                {sep43Injected ? "SEP-43 Injected" : "SEP-43 Standby"}
+                TON Connect v2 · §7.3
               </span>
             </div>
             <div style={{ fontSize: 18, fontWeight: 700, letterSpacing: "-0.02em" }}>
@@ -404,7 +396,7 @@ export function DevLabSheet() {
               ["contracts", "Contracts"],
               ["xdr", "XDR Lab"],
               ["crypto", "Crypto & Keys"],
-              ["dapp", "dApp Bridge"],
+              ["tonconnect", "TON Connect"],
             ] as const
           ).map(([id, label]) => (
             <button
@@ -420,7 +412,7 @@ export function DevLabSheet() {
               {id === "contracts" && <IconCode size={13} />}
               {id === "xdr" && <IconTerminal size={13} />}
               {id === "crypto" && <IconKey size={13} />}
-              {id === "dapp" && <IconPlug size={13} />}
+              {id === "tonconnect" && <IconPlug size={13} />}
               <span>{label}</span>
             </button>
           ))}
@@ -520,21 +512,6 @@ export function DevLabSheet() {
               </form>
             </section>
           )}
-
-          <section className="glass-card" style={{ display: "grid", gap: 10 }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div style={{ fontWeight: 700, fontSize: 14 }}>SEP-43 Browser Integration Snippet</div>
-              <button
-                type="button"
-                className="aw-chip-btn"
-                onClick={() => void copyValue("sep43", SEP43_SNIPPET)}
-              >
-                {copiedKey === "sep43" ? <IconCheck size={13} /> : <IconCopy size={13} />}
-                <span>{copiedKey === "sep43" ? "Copied" : "Copy Snippet"}</span>
-              </button>
-            </div>
-            <pre className="aw-code-block">{SEP43_SNIPPET}</pre>
-          </section>
         </div>
       )}
 
@@ -1038,8 +1015,8 @@ export function DevLabSheet() {
         </div>
       )}
 
-      {/* Sub-Tab 5: dApp Bridge */}
-      {subTab === "dapp" && <DappConnectSheet />}
+      {/* Sub-Tab 5: TON Connect v2 */}
+      {subTab === "tonconnect" && <TonConnectSheet />}
     </div>
   );
 }

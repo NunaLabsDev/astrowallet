@@ -16,10 +16,13 @@ import {
   classifyVerdict,
   clearSep42AssetCache,
   createSecurityShield,
+  decodeAuthEntryXdr,
+  evaluateSorobanInvocation,
   fetchSep42VerifiedAssets,
   filterSpamClaimableBalances,
   sanitizeMemoPhishing,
   scanTransactionEnvelopeXdr,
+  simulateSorobanTransaction,
 } from "./index.js";
 
 const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
@@ -396,5 +399,266 @@ describe("Scan & Shield deterministic pre-sign rules", () => {
     expect(
       fakeReport.findings.some((f) => f.code === "SPOOFED_PROTECTED_ASSET"),
     ).toBe(true);
+  });
+
+  it("decodes both HashIdPreimage Soroban auth variants and SorobanAuthorizationEntry XDR", () => {
+    const contractId = StrKey.encodeContract(new Uint8Array(32).fill(9));
+    const networkId = new Uint8Array(32).fill(0xab);
+    const rootInvocation = new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+        new xdr.InvokeContractArgs({
+          contractAddress: new Address(contractId).toScAddress(),
+          functionName: "upgrade",
+          args: [],
+        }),
+      ),
+      subInvocations: [],
+    });
+
+    const legacyPreimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+      new xdr.HashIdPreimageSorobanAuthorization({
+        networkId,
+        nonce: 42n,
+        signatureExpirationLedger: 950_000,
+        invocation: rootInvocation,
+      }),
+    );
+    const legacyDecoded = decodeAuthEntryXdr(legacyPreimage.toXDR("base64"));
+    expect(legacyDecoded.kind).toBe("hash_id_preimage");
+    expect(legacyDecoded.networkIdHex).toBe("ab".repeat(32));
+    expect(legacyDecoded.nonce).toBe("42");
+    expect(legacyDecoded.signatureExpirationLedger).toBe(950_000);
+    expect(legacyDecoded.invocation.contractId).toBe(contractId);
+    expect(legacyDecoded.invocation.functionName).toBe("upgrade");
+
+    const withAddrPreimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorizationWithAddress(
+      new xdr.HashIdPreimageSorobanAuthorizationWithAddress({
+        networkId,
+        nonce: 77n,
+        signatureExpirationLedger: 960_000,
+        address: new Address(SOURCE_KP.publicKey()).toScAddress(),
+        invocation: rootInvocation,
+      }),
+    );
+    const withAddrDecoded = decodeAuthEntryXdr(withAddrPreimage.toXDR("base64"));
+    expect(withAddrDecoded.kind).toBe("hash_id_preimage");
+    expect(withAddrDecoded.address).toBe(SOURCE_KP.publicKey());
+    expect(withAddrDecoded.invocation.functionName).toBe("upgrade");
+
+    const authEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+      rootInvocation,
+    });
+    const entryDecoded = decodeAuthEntryXdr(authEntry.toXDR("base64"));
+    expect(entryDecoded.kind).toBe("soroban_authorization_entry");
+    expect(entryDecoded.credentialsType).toBe("sorobanCredentialsSourceAccount");
+    expect(entryDecoded.invocation.functionName).toBe("upgrade");
+
+    expect(() => decodeAuthEntryXdr("not-valid-base64-xdr")).toThrow(/Invalid/i);
+  });
+
+  it("evaluates Soroban invocations, setOptions lockouts, and Classic clawback/flags rules", () => {
+    const upgradeFindings = evaluateSorobanInvocation({
+      contractId: StrKey.encodeContract(new Uint8Array(32).fill(5)),
+      functionName: "upgrade",
+      args: [],
+      subInvocations: [],
+    });
+    expect(classifyVerdict(upgradeFindings)).toBe("malicious");
+    expect(upgradeFindings.some((f) => f.code === "MALICIOUS_SOROBAN_FUNCTION" && f.blocksSigning)).toBe(true);
+
+    const addSignerFindings = evaluateSorobanInvocation({
+      functionName: "add_signer",
+      args: [],
+      subInvocations: [],
+    });
+    expect(classifyVerdict(addSignerFindings)).toBe("malicious");
+
+    const burnFindings = evaluateSorobanInvocation({
+      functionName: "burn",
+      args: ["100"],
+      subInvocations: [],
+    });
+    expect(classifyVerdict(burnFindings)).toBe("malicious");
+
+    const transferFindings = evaluateSorobanInvocation({
+      functionName: "transfer",
+      args: ["100"],
+      subInvocations: [],
+    });
+    expect(classifyVerdict(transferFindings)).toBe("warning");
+    expect(transferFindings.some((f) => f.code === "SOROBAN_TOKEN_TRANSFER")).toBe(true);
+
+    const lockoutTx = buildTestTxXdr((b) => {
+      b.addOperation(
+        Operation.setOptions({
+          masterWeight: 1,
+          lowThreshold: 5,
+          medThreshold: 5,
+          highThreshold: 5,
+        }),
+      );
+    });
+    const lockoutReport = scanTransactionEnvelopeXdr(lockoutTx, {
+      networkPassphrase: TESTNET_PASSPHRASE,
+    }).report;
+    expect(lockoutReport.verdict).toBe("malicious");
+    expect(
+      lockoutReport.findings.some((f) => f.code === "MALICIOUS_SET_OPTIONS_THRESHOLD_LOCKOUT"),
+    ).toBe(true);
+
+    const clawbackTx = buildTestTxXdr((b) => {
+      b.addOperation(
+        Operation.clawback({
+          asset: new Asset("USDC", OFFICIAL_USDC_ISSUER),
+          from: DEST_KP.publicKey(),
+          amount: "5",
+        }),
+      );
+    });
+    const clawbackReport = scanTransactionEnvelopeXdr(clawbackTx, {
+      networkPassphrase: TESTNET_PASSPHRASE,
+      verifiedAssets: [{ code: "USDC", issuer: OFFICIAL_USDC_ISSUER }],
+    }).report;
+    expect(clawbackReport.verdict).toBe("malicious");
+    expect(clawbackReport.findings.some((f) => f.code === "MALICIOUS_CLAWBACK")).toBe(true);
+
+    const flagsTx = buildTestTxXdr((b) => {
+      b.addOperation(
+        Operation.setTrustLineFlags({
+          trustor: DEST_KP.publicKey(),
+          asset: new Asset("USDC", OFFICIAL_USDC_ISSUER),
+          flags: { authorized: false },
+        }),
+      );
+    });
+    const flagsReport = scanTransactionEnvelopeXdr(flagsTx, {
+      networkPassphrase: TESTNET_PASSPHRASE,
+      verifiedAssets: [{ code: "USDC", issuer: OFFICIAL_USDC_ISSUER }],
+    }).report;
+    expect(flagsReport.verdict).toBe("warning");
+    expect(flagsReport.findings.some((f) => f.code === "TRUSTLINE_FLAGS_CHANGE")).toBe(true);
+  });
+
+  it("extracts accurate assetCode and assetIssuer from XDR LedgerEntry stateChanges", async () => {
+    const beforeAcc = new xdr.LedgerEntry({
+      lastModifiedLedgerSeq: 1,
+      data: xdr.LedgerEntryData.account(
+        new xdr.AccountEntry({
+          accountId: xdr.PublicKey.publicKeyTypeEd25519(SOURCE_KP.rawPublicKey()),
+          balance: 100_000_000n,
+          seqNum: 1n,
+          numSubEntries: 0,
+          inflationDest: null,
+          flags: 0,
+          homeDomain: "",
+          thresholds: new Uint8Array(4),
+          signers: [],
+          ext: xdr.AccountEntryExt.v0(),
+        }),
+      ),
+      ext: xdr.LedgerEntryExt.v0(),
+    }).toXDR("base64");
+
+    const afterAcc = new xdr.LedgerEntry({
+      lastModifiedLedgerSeq: 2,
+      data: xdr.LedgerEntryData.account(
+        new xdr.AccountEntry({
+          accountId: xdr.PublicKey.publicKeyTypeEd25519(SOURCE_KP.rawPublicKey()),
+          balance: 85_000_000n,
+          seqNum: 2n,
+          numSubEntries: 0,
+          inflationDest: null,
+          flags: 0,
+          homeDomain: "",
+          thresholds: new Uint8Array(4),
+          signers: [],
+          ext: xdr.AccountEntryExt.v0(),
+        }),
+      ),
+      ext: xdr.LedgerEntryExt.v0(),
+    }).toXDR("base64");
+
+    const issuerKp = Keypair.fromPublicKey(OFFICIAL_USDC_ISSUER);
+    const usdcAsset = xdr.TrustLineAsset.assetTypeCreditAlphanum4(
+      new xdr.AlphaNum4({
+        assetCode: "USDC",
+        issuer: xdr.PublicKey.publicKeyTypeEd25519(issuerKp.rawPublicKey()),
+      }),
+    );
+
+    const beforeTl = new xdr.LedgerEntry({
+      lastModifiedLedgerSeq: 1,
+      data: xdr.LedgerEntryData.trustline(
+        new xdr.TrustLineEntry({
+          accountId: xdr.PublicKey.publicKeyTypeEd25519(SOURCE_KP.rawPublicKey()),
+          asset: usdcAsset,
+          balance: 10_000_000n,
+          limit: 1_000_000_000n,
+          flags: 1,
+          ext: xdr.TrustLineEntryExt.v0(),
+        }),
+      ),
+      ext: xdr.LedgerEntryExt.v0(),
+    }).toXDR("base64");
+
+    const afterTl = new xdr.LedgerEntry({
+      lastModifiedLedgerSeq: 2,
+      data: xdr.LedgerEntryData.trustline(
+        new xdr.TrustLineEntry({
+          accountId: xdr.PublicKey.publicKeyTypeEd25519(SOURCE_KP.rawPublicKey()),
+          asset: usdcAsset,
+          balance: 35_000_000n,
+          limit: 1_000_000_000n,
+          flags: 1,
+          ext: xdr.TrustLineEntryExt.v0(),
+        }),
+      ),
+      ext: xdr.LedgerEntryExt.v0(),
+    }).toXDR("base64");
+
+    const sim = await simulateSorobanTransaction(
+      ["https://rpc-test.example"],
+      "AAAA",
+      async () =>
+        new Response(
+          JSON.stringify({
+            result: {
+              minResourceFee: "12345",
+              stateChanges: [
+                { before: beforeAcc, after: afterAcc },
+                { before: beforeTl, after: afterTl },
+                {
+                  before: { address: SOURCE_KP.publicKey(), balance: "10000000" },
+                  after: { address: SOURCE_KP.publicKey(), balance: "20000000" },
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+    );
+
+    expect(sim.ok).toBe(true);
+    expect(sim.balanceDiffs).toEqual([
+      {
+        address: SOURCE_KP.publicKey(),
+        assetCode: "XLM",
+        assetIssuer: undefined,
+        delta: "-1.5000000",
+      },
+      {
+        address: SOURCE_KP.publicKey(),
+        assetCode: "USDC",
+        assetIssuer: OFFICIAL_USDC_ISSUER,
+        delta: "+2.5000000",
+      },
+      {
+        address: SOURCE_KP.publicKey(),
+        assetCode: "UNKNOWN",
+        assetIssuer: undefined,
+        delta: "+1.0000000",
+      },
+    ]);
   });
 });

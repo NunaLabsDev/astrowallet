@@ -13,6 +13,7 @@ Before editing or bootstrapping any package, read in this order:
 4. [`docs/DESIGN_SYSTEM.md`](docs/DESIGN_SYSTEM.md) — Apple Liquid Glass tokens, 5-color palette, Fingerprint/PIN UX, and **Astro Navigators** visuals.
 5. [`PLAN.md`](PLAN.md) — Vertical-slice execution milestones and explicit v2 deferrals.
 6. [`docs/FEASIBILITY_OPTIMIZATION_AND_TOOLING.md`](docs/FEASIBILITY_OPTIMIZATION_AND_TOOLING.md) — Verified 2026 SDK packages, iOS storage traps, and API limits.
+7. **Official Stellar AI Resources:** [`developers.stellar.org/llms.txt`](https://developers.stellar.org/llms.txt) and workspace plugin [`.agents/plugins/stellar-dev/`](.agents/plugins/stellar-dev/plugin.json) (Stellar Official Skills + `stellar-docs` MCP server).
 
 ---
 
@@ -47,13 +48,14 @@ Enforce this DAG in `tsconfig` / ESLint boundaries (`no-restricted-imports`):
 
 | Package / App | May Import From | Strictly Forbidden From Importing |
 | :--- | :--- | :--- |
-| **`@astrowallet/domain`** | `zod` only (pure TS types, ports, schemas) | `@stellar/stellar-sdk`, DOM/Window/IndexedDB, React, `grammy`, Hono, Cloudflare APIs |
-| **`@astrowallet/stellar-core`** | `@astrowallet/domain`, `@stellar/stellar-sdk`, `smart-account-kit`, `hash-wasm`, `@noble/hashes` | React, DOM UI components, `grammy`, Hono, `apps/*` |
-| **`@astrowallet/security-shield`** | `@astrowallet/domain`, `@stellar/stellar-sdk` (lazy worker `@stellar/stellar-xdr-json`) | React, `grammy`, Cloudflare bindings directly (use injected fetcher port) |
-| **`@astrowallet/defi`** | `@astrowallet/domain`, `@stellar/stellar-sdk`, `@soroswap/sdk`, `@lumenwipe/sdk` | React, `grammy`, raw secret keys (`sk_` keys live in `apps/server` proxy only) |
-| **`@astrowallet/tg-protocol`** | `@astrowallet/domain`, Web Crypto / `@noble/ed25519` | React, IndexedDB, DOM APIs |
+| **`@astrowallet/domain`** | `zod` only (pure TS types, ports, schemas) | `@stellar/stellar-sdk`, `@ton/*`, DOM/Window/IndexedDB, React, `grammy`, Hono, Cloudflare APIs |
+| **`@astrowallet/stellar-core`** | `@astrowallet/domain`, `@stellar/stellar-sdk`, `smart-account-kit`, `hash-wasm`, `@noble/hashes` | React, DOM UI components, `grammy`, Hono, `@astrowallet/ton-core`, `apps/*` |
+| **`@astrowallet/ton-core`** | `@astrowallet/domain`, `@ton/core`, `@ton/ton`, `@noble/hashes`, `@scure/bip39`, `tweetnacl` | React, DOM UI components, `grammy`, Hono, `@stellar/*`, peer `@astrowallet/*`, `cloudflare:*` |
+| **`@astrowallet/security-shield`** | `@astrowallet/domain`, `@stellar/stellar-sdk` (lazy worker `@stellar/stellar-xdr-json`) | React, `grammy`, `@astrowallet/ton-core`, Cloudflare bindings directly (use injected fetcher port) |
+| **`@astrowallet/defi`** | `@astrowallet/domain`, `@stellar/stellar-sdk`, `@soroswap/sdk`, `@lumenwipe/sdk` | React, `grammy`, `@astrowallet/ton-core`, raw secret keys (`sk_` keys live in `apps/server` proxy only) |
+| **`@astrowallet/tg-protocol`** | `@astrowallet/domain`, Web Crypto / `@noble/ed25519` | React, IndexedDB, DOM APIs, `@astrowallet/ton-core` |
 | **`apps/pwa`** | All `@astrowallet/*` client packages (NEVER `sk_*` server secrets) | `grammy`, Cloudflare D1/KV, server signing secrets |
-| **`apps/server`** | `@astrowallet/domain`, `@astrowallet/security-shield`, `@astrowallet/defi`, `@astrowallet/tg-protocol`, `hono`, `grammy` | React, DOM/IndexedDB, user private keys |
+| **`apps/server`** | `@astrowallet/domain`, `@astrowallet/security-shield`, `@astrowallet/defi`, `@astrowallet/tg-protocol`, `hono`, `grammy` | React, DOM/IndexedDB, `@astrowallet/stellar-core`, `@astrowallet/ton-core`, user private keys |
 
 ### Rule 6 — Honest Classic (`G...`) vs Smart Account (`C...`) Boundaries
 - Never hide Stellar protocol constraints behind fake abstractions:
@@ -61,10 +63,14 @@ Enforce this DAG in `tsconfig` / ESLint boundaries (`no-restricted-imports`):
   - **Smart Account (`C...`):** Supports gasless Soroban contract invocations (`OpenZeppelin Channels`), Fingerprint `secp256r1` auth, session keys, and spending limits—**cannot** directly place Classic SDEX orderbook offers or receive un-muxed raw memo CEX deposits (must use `M...` muxed encoding or transfer to linked `G...`).
 - Expose 1-tap `SAC` transfers between the user's linked `G...` and `C...` accounts so both work seamlessly together.
 
-### Rule 7 — Telegram 2025 ToS Compliance & Real Bot Architecture
-- **Pure Bot + Inline Mode + Signed Intent Links (`InlineKeyboardButton({ url })`)**—zero Telegram Mini App (TMA) WebView and zero TON requirement.
-- **Never** reference `Telegram.WebApp.openLink()` (that API exists only in Mini Apps). Standard bot buttons open HTTPS Intent URLs (`/intent/<signed_id>`), and the PWA detects embedded in-app browsers cleanly when offering Fingerprint vs PIN fallback.
-- Every actionable bot link carries a short-lived (`<= 5 min`) **HMAC-signed server Intent Token** stored in D1/KV so group chats cannot spoof transaction parameters.
+### Rule 7 — Telegram Mini App Exclusivity & ToS Clause 7.3 (Multichain Wallets) Compliance
+- **100% Telegram-Exclusive Mini App (Zero Website):** `apps/pwa` runs exclusively inside Telegram as a Mini App launched from `@AstroWalletAppBot` (`web_app` in private chats and `https://t.me/<bot>[/<short_name>]?startapp=...` in groups/inline). Standalone marketing landing pages are removed and access outside Telegram is blocked (unless `VITE_ALLOW_DEV_OUTSIDE_TELEGRAM=true` on Testnet dev).
+- **Clause 7.3 (Multichain Wallets) Compliance:**
+  - Both Stellar (`G...`/`C...`) and TON (`WalletContractV4`/`WalletContractV5R1`, BIP-39 + SLIP-0010 `m/44'/607'/i'`) non-custodial asset management happen directly inside the Mini App UI.
+  - External app/dApp connections inside the Mini App operate **exclusively via TON Connect v2**. Never inject `window.stellar`, ship WalletConnect/Reown non-TON external dApp connectors, or embed non-TON external app catalogs/promotions (ToS §7.3–7.4).
+- **Cryptographic Identity & Sessions:** Server verifies `Telegram.WebApp.initData` via HMAC-SHA256 (`WebAppData` + `TG_BOT_TOKEN`, `auth_date <= 300s`) on `POST /v1/tg/auth` and mints short-lived (`15m`) Mini App session tokens. **Never** trust unverified `initDataUnsafe`. Every bot action link still carries a short-lived HMAC-signed Intent Token.
+- **Key Storage Safety (Rule 4 Preserved):** Secrets, mnemonics, and PINs **never** touch `Telegram.WebApp.CloudStorage`, `localStorage`, `sessionStorage`, server logs, or D1/KV. Optional `BiometricManager` + `SecureStorage` (Bot API 9.0 local device Keychain/Keystore) complements mandatory client-side Argon2id + AES-GCM-256 IndexedDB custody and `.agvault.json` export.
+- **Telegram-Scoped CSP Framing:** Security headers allow framing **only** by Telegram Web/clients (`frame-ancestors https://web.telegram.org https://*.telegram.org`) and `script-src 'self' https://telegram.org 'wasm-unsafe-eval'`.
 
 ---
 
@@ -83,11 +89,17 @@ All configuration uses explicit Zod schemas in `@astrowallet/domain`. Nothing us
 | `VITE_API_BASE_URL` | `https://api-testnet.astrowallet.example` | `https://api.astrowallet.example` | Points to `apps/server` Worker |
 | `VITE_PWA_ORIGIN` | `https://testnet.astrowallet.example` | `https://app.astrowallet.example` | WebAuthn `rpId` origin anchor |
 | `VITE_TG_BOT_USERNAME` | `AstroWalletTestBot` | `AstroWalletBot` | Deep-link builder only |
+| `VITE_TG_MINI_APP_SHORT_NAME` | `wallet` | `wallet` | Optional BotFather Mini App short name (`t.me/<bot>/<short_name>`) |
+| `VITE_TON_NETWORK` | `testnet` | `mainnet` | Defaults to `VITE_STELLAR_NETWORK` |
+| `VITE_TON_RPC_URLS` | Comma-separated TON RPC URLs | Comma-separated TON RPC URLs | Toncenter JSON-RPC v2 endpoints (HTTPS on mainnet) |
+| `VITE_TON_BRIDGE_URL` | TON Connect SSE bridge URL | TON Connect SSE bridge URL | TON Connect v2 encrypted bridge (`https://...`) |
+| `VITE_TON_EXPLORER_BASE_URL` | Testnet TON explorer URL | Mainnet TON explorer URL | Optional transaction/address explorer link |
+| `VITE_ALLOW_DEV_OUTSIDE_TELEGRAM` | `false` (or `true` locally) | *(forbidden: must be `false`)* | Zod rejects if `true` when `mainnet` |
 | `VITE_FRIENDBOT_URL` | `https://friendbot.stellar.org` | *(unset — forbidden on mainnet)* | Zod rejects if set when `mainnet` |
 | `VITE_SMART_ACCOUNT_WASM_HASH` | Testnet OZ account WASM hash | Mainnet audited OZ WASM hash | Enables counterfactual `C...` |
 | `VITE_CLAIM_ESCROW_CONTRACT_ID` | Testnet escrow `C...` *(Phase 2)* | Mainnet audited escrow `C...` | Optional until Phase 2 Claim Links |
 | `VITE_SEP42_ASSET_LIST_URLS` | Verified testnet SAL JSON URLs | SDF `assets.stellar.org` SAL JSON URLs | Anti-spoof token registry |
-| `VITE_REOWN_PROJECT_ID` | Reown project ID | Reown project ID | Optional until Phase 3 WalletConnect |
+| `VITE_REOWN_PROJECT_ID` | Optional legacy env key | *(unused in Mini App)* | Retained only for config compatibility; disabled under §7.3 |
 
 ### B. Server Worker Env & Secrets (`apps/server` — Cloudflare `wrangler.toml` + `wrangler secret`)
 
@@ -95,7 +107,8 @@ All configuration uses explicit Zod schemas in `@astrowallet/domain`. Nothing us
 | :--- | :--- | :--- |
 | `STELLAR_NETWORK` / `STELLAR_NETWORK_PASSPHRASE` | Env Var | Must match `apps/pwa` network (validated on every `/v1/intents` call) |
 | `STELLAR_RPC_URLS` / `HORIZON_URLS` | Env Var | Comma-separated RPC & Horizon endpoints for simulation, poller, and `/scan` |
-| `PWA_ORIGIN` / `ALLOWED_ORIGINS` | Env Var | Strict CORS allowlist + signed intent link generator |
+| `PWA_ORIGIN` / `ALLOWED_ORIGINS` | Env Var | Strict CORS allowlist + Mini App URL builder |
+| `TG_BOT_USERNAME` / `TG_MINI_APP_SHORT_NAME` | Env Var | Group/inline `https://t.me/<bot>/<short_name>?startapp=...` link builder |
 | `STELLAR_EXPERT_API_BASE` | Env Var | Base URL for Open Directory / blocked domains proxy |
 | `OZ_CHANNELS_API_URL` | Env Var | `https://channels.openzeppelin.com/testnet` or `https://channels.openzeppelin.com` |
 | `SOROSWAP_API_BASE` | Env Var | Soroswap aggregator API base URL |
@@ -124,5 +137,5 @@ No PR or Milestone is marked complete until **all** checks pass after the final 
 3. **Zero-Hardcoding Audit:** Search diff for raw URLs, `Test SDF Network`, `Public Global`, `sk_`, or private keys—only allowed inside `.env.example` and test fixtures.
 4. **Bundle & CSP Verification:**
    - Initial PWA load excludes `@stellar/stellar-xdr-json` (~3 MB WASM stays lazy-loaded in Worker).
-   - CSP forbids `'unsafe-inline'`, `'unsafe-eval'`, and framing (`frame-ancestors 'none'`).
+   - CSP forbids `'unsafe-inline'`, `'unsafe-eval'`, and unrestricted framing (`frame-ancestors https://web.telegram.org https://*.telegram.org` only).
 5. **Secret Scan:** Gitleaks / pre-commit secret scan clean.

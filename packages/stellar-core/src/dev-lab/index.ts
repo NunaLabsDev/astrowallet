@@ -287,15 +287,25 @@ function txContainsSorobanOp(envelopeXdr: string, networkPassphrase: string): bo
 /**
  * Creates a full Soroban RPC + XDR + Federation Developer client backed by RPC/Horizon failover.
  */
+class NonRetryableDevLabError extends Error {}
+
 export function createSorobanDevClient(input: {
   rpcUrls: readonly string[];
   horizonUrls?: readonly string[] | undefined;
   networkPassphrase: string;
+  maxResourceFeeStroops?: string | bigint | undefined;
 }) {
   const rpcEndpoints = createFailoverEndpoints(input.rpcUrls);
   const horizonEndpoints = createFailoverEndpoints(
     input.horizonUrls && input.horizonUrls.length > 0 ? input.horizonUrls : input.rpcUrls,
   );
+  const maxResourceFeeStroops =
+    typeof input.maxResourceFeeStroops === "bigint"
+      ? input.maxResourceFeeStroops
+      : typeof input.maxResourceFeeStroops === "string" &&
+          /^\d+$/.test(input.maxResourceFeeStroops.trim())
+        ? BigInt(input.maxResourceFeeStroops.trim())
+        : 5_000_000n;
 
   async function withRpcFailover<T>(fn: (server: rpc.Server) => Promise<T>): Promise<T> {
     const urls = rpcEndpoints.list();
@@ -306,6 +316,9 @@ export function createSorobanDevClient(input: {
       try {
         return await fn(server);
       } catch (err) {
+        if (err instanceof NonRetryableDevLabError) {
+          throw err;
+        }
         lastError = err;
         rpcEndpoints.next();
       }
@@ -407,10 +420,23 @@ export function createSorobanDevClient(input: {
     const contract = new Contract(params.contractId);
     const sourceAddress = params.sourceKeypair.publicKey();
 
-    return withRpcFailover(async (server) => {
+    const assembled = await withRpcFailover(async (server) => {
       const sourceAccount = await server.getAccount(sourceAddress);
+      let inclusionFee = BASE_FEE;
+      try {
+        const feeStats = await server.getFeeStats();
+        const raw = Number(
+          feeStats.sorobanInclusionFee?.p90 ?? feeStats.sorobanInclusionFee?.mode ?? BASE_FEE,
+        );
+        if (Number.isFinite(raw) && raw >= Number(BASE_FEE)) {
+          inclusionFee = String(Math.min(Math.trunc(raw), 50_000));
+        }
+      } catch {
+        inclusionFee = BASE_FEE;
+      }
+
       const tx = new TransactionBuilder(sourceAccount, {
-        fee: BASE_FEE,
+        fee: inclusionFee,
         networkPassphrase: input.networkPassphrase,
       })
         .addOperation(contract.call(params.fnName.trim(), ...scArgs))
@@ -418,16 +444,30 @@ export function createSorobanDevClient(input: {
         .build();
 
       const sim = await server.simulateTransaction(tx);
+      if (rpc.Api.isSimulationRestore(sim)) {
+        throw new NonRetryableDevLabError(
+          "Soroban archived state restore required before invocation",
+        );
+      }
       if (rpc.Api.isSimulationError(sim)) {
-        throw new Error(`Soroban simulation failed: ${sim.error}`);
+        throw new NonRetryableDevLabError(`Soroban simulation failed: ${sim.error}`);
+      }
+      const simResourceFee = BigInt(sim.minResourceFee || "0");
+      if (simResourceFee > maxResourceFeeStroops) {
+        throw new NonRetryableDevLabError(
+          `Soroban simulated resource fee (${simResourceFee}) exceeds limit (${maxResourceFeeStroops})`,
+        );
       }
 
-      const assembled = rpc.assembleTransaction(tx, sim).build();
-      assembled.sign(params.sourceKeypair);
+      return rpc.assembleTransaction(tx, sim).build();
+    });
 
+    assembled.sign(params.sourceKeypair);
+
+    return withRpcFailover(async (server) => {
       const sent = await server.sendTransaction(assembled);
       if (sent.status === "ERROR") {
-        throw new Error(`Soroban sendTransaction ERROR (${sent.hash})`);
+        throw new NonRetryableDevLabError(`Soroban sendTransaction ERROR (${sent.hash})`);
       }
 
       let polled = await server.getTransaction(sent.hash);
@@ -441,23 +481,19 @@ export function createSorobanDevClient(input: {
       }
 
       if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
-        throw new Error(`Soroban transaction failed on ledger (${sent.hash})`);
+        throw new NonRetryableDevLabError(`Soroban transaction failed on ledger (${sent.hash})`);
       }
-
-      if (polled.status === rpc.Api.GetTransactionStatus.SUCCESS) {
-        return {
-          hash: sent.hash,
-          ledger: polled.ledger,
-          status: polled.status,
-          decodedResult: polled.returnValue ? toJsonSafe(scValToNative(polled.returnValue)) : null,
-        };
+      if (polled.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+        throw new NonRetryableDevLabError(
+          `Soroban transaction confirmation timed out (${sent.hash})`,
+        );
       }
 
       return {
         hash: sent.hash,
-        ledger: sent.latestLedger,
-        status: sent.status,
-        decodedResult: null,
+        ledger: polled.ledger,
+        status: polled.status,
+        decodedResult: polled.returnValue ? toJsonSafe(scValToNative(polled.returnValue)) : null,
       };
     });
   }
@@ -498,7 +534,7 @@ export function createSorobanDevClient(input: {
       return withRpcFailover(async (server) => {
         const sent = await server.sendTransaction(parsed);
         if (sent.status === "ERROR") {
-          throw new Error(`Soroban RPC rejected signed XDR (${sent.hash})`);
+          throw new NonRetryableDevLabError(`Soroban RPC rejected signed XDR (${sent.hash})`);
         }
         let polled = await server.getTransaction(sent.hash);
         for (
@@ -510,14 +546,16 @@ export function createSorobanDevClient(input: {
           polled = await server.getTransaction(sent.hash);
         }
         if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
-          throw new Error(`Soroban transaction failed (${sent.hash})`);
+          throw new NonRetryableDevLabError(`Soroban transaction failed (${sent.hash})`);
+        }
+        if (polled.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+          throw new NonRetryableDevLabError(
+            `Soroban transaction confirmation timed out (${sent.hash})`,
+          );
         }
         return {
           hash: sent.hash,
-          ledger:
-            polled.status === rpc.Api.GetTransactionStatus.SUCCESS
-              ? polled.ledger
-              : sent.latestLedger,
+          ledger: polled.ledger,
           channel: "soroban-rpc" as const,
         };
       });

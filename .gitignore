@@ -14,6 +14,8 @@ coverage/
 .dev.vars.*
 !.env.example
 !.dev.vars.example
+.secrets/
+*.agvault.json
 *.session
 *.session-journal
 *.log

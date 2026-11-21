@@ -6,11 +6,15 @@ import type {
   SignedIntent,
   TelegramUserBinding,
 } from "@astrowallet/domain";
+import { deriveCounterfactualContractAddress } from "@astrowallet/security-shield";
 import {
+  computeTelegramInitDataHash,
   deriveClaimId,
+  encodeStartAppTabParam,
   formatConnectChallengeMessage,
   formatSmartAccountLinkMessage,
   signIntentToken,
+  signMiniAppSessionToken,
   type ConnectChallengePayload,
 } from "@astrowallet/tg-protocol";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -102,20 +106,58 @@ async function generateTestSigner() {
   };
 }
 
+async function signRelayWalletAuth(
+  signer: Awaited<ReturnType<typeof generateTestSigner>>,
+  network: "testnet" | "mainnet",
+  mode: "soroban" | "feebump",
+  rawPayload: string,
+  nonce = `nonce_${crypto.randomUUID().slice(0, 8)}`,
+  timestamp = Math.floor(Date.now() / 1000),
+) {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawPayload)),
+  );
+  const payloadHash = Array.from(digest)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+  const msg = `astrowallet-relay:v1:${network}:${mode}:${payloadHash}:${timestamp}:${nonce}`;
+  return {
+    address: signer.address,
+    timestamp,
+    nonce,
+    payloadHash,
+    signatureBase64: await signer.signChallenge(msg),
+  };
+}
+
 function createMemoryRepo(): ServerRepository {
   const users = new Map<string, TelegramUserRecord>();
   const bindings = new Map<string, TelegramUserBinding[]>();
   const intents = new Map<string, SignedIntent>();
   const claims = new Map<string, ClaimLink>();
-  const splitPayments = new Map<string, Array<{ txHash: string; amount: string }>>();
+  const splitPayments = new Map<
+    string,
+    Array<{ txHash: string; amount: string; payerAddress?: string }>
+  >();
   const dedupKeys = new Set<string>();
+  const rateLimits = new Map<string, number>();
+  const relayBudget = new Map<string, bigint>();
+  const tgUpdates = new Set<number>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
+      const cleanUsername = usernameLower?.trim().replace(/^@/, "").toLowerCase();
+      if (cleanUsername) {
+        for (const [id, existing] of users.entries()) {
+          if (id !== telegramUserId && existing.usernameLower === cleanUsername) {
+            users.set(id, { ...existing, usernameLower: undefined });
+          }
+        }
+      }
       const prev = users.get(telegramUserId);
       const next: TelegramUserRecord = {
         telegramUserId,
-        usernameLower: usernameLower ?? prev?.usernameLower,
+        usernameLower: cleanUsername ?? prev?.usernameLower,
         alertsEnabled: prev?.alertsEnabled ?? true,
       };
       users.set(telegramUserId, next);
@@ -176,6 +218,17 @@ function createMemoryRepo(): ServerRepository {
       const next = list.filter((b) => b.address !== address);
       bindings.set(telegramUserId, next);
       return next.length !== list.length;
+    },
+    async unlinkUserAddresses(telegramUserId) {
+      const count = bindings.get(telegramUserId)?.length ?? 0;
+      bindings.delete(telegramUserId);
+      return count;
+    },
+    async isAddressLinked(address) {
+      for (const list of bindings.values()) {
+        if (list.some((item) => item.address === address)) return true;
+      }
+      return false;
     },
     async listWatchedAccounts() {
       const out = [];
@@ -242,9 +295,12 @@ function createMemoryRepo(): ServerRepository {
       }
       return false;
     },
-    async recordSplitPayment({ intentId, txHash, amount }) {
+    async recordSplitPayment({ intentId, payerAddress, txHash, amount }) {
       const list = splitPayments.get(intentId) ?? [];
-      list.push({ txHash: txHash.toLowerCase(), amount });
+      if (payerAddress && list.some((p) => p.payerAddress === payerAddress)) {
+        throw new Error("UNIQUE constraint failed: intent_payments.payer_address");
+      }
+      list.push({ txHash: txHash.toLowerCase(), amount, payerAddress });
       splitPayments.set(intentId, list);
       return { paidCount: list.length };
     },
@@ -275,6 +331,32 @@ function createMemoryRepo(): ServerRepository {
       }
       return null;
     },
+    async incrementRateLimit({ key, windowSec, limit, nowSec }) {
+      const now = nowSec ?? Math.floor(Date.now() / 1000);
+      const bucketKey = `${key}:${Math.floor(now / windowSec)}`;
+      const nextCount = (rateLimits.get(bucketKey) ?? 0) + 1;
+      rateLimits.set(bucketKey, nextCount);
+      return {
+        allowed: nextCount <= limit,
+        count: nextCount,
+        retryAfterSeconds: windowSec,
+      };
+    },
+    async tryConsumeRelayBudget({ dayUtc, feeStroops, dailyBudgetStroops }) {
+      const prev = relayBudget.get(dayUtc) ?? 0n;
+      const next = prev + BigInt(feeStroops);
+      if (next > BigInt(dailyBudgetStroops)) {
+        return { allowed: false, spentStroops: prev.toString() };
+      }
+      relayBudget.set(dayUtc, next);
+      return { allowed: true, spentStroops: next.toString() };
+    },
+    async claimTelegramUpdateId(updateId) {
+      if (tgUpdates.has(updateId)) return false;
+      tgUpdates.add(updateId);
+      return true;
+    },
+    async purgeExpiredRecords() {},
   };
 }
 
@@ -350,13 +432,43 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       network: "testnet",
       creatorTelegramUserId: "5551234",
       actionType: "connect",
-      payloadJson: JSON.stringify({ challenge, message }),
+      payloadJson: JSON.stringify({ challenge, message, confirmCode: "AB12CD" }),
       hmacSig,
       chatId: "5551234",
       status: "pending",
       expiresAt,
       createdAt: now,
     });
+
+    // GET /v1/intents/:id must strip confirmCode from response payload
+    const getRes = await app.request(`/v1/intents/${intentId}?sig=${hmacSig}`, { method: "GET" }, TEST_ENV);
+    expect(getRes.status).toBe(200);
+    const getJson = (await getRes.json()) as { payload?: { confirmCode?: string } };
+    expect(getJson.payload?.confirmCode).toBeUndefined();
+
+    // Wrong confirmCode must fail with 403
+    const badCodeRes = await app.request(
+      `/v1/intents/${intentId}/connect`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: hmacSig,
+          confirmCode: "ZZZZZZ",
+          accounts: [
+            {
+              address: signer0.address,
+              kind: "classic",
+              label: "Primary",
+              isDefault: true,
+              signatureBase64: await signer0.signChallenge(message),
+            },
+          ],
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(badCodeRes.status).toBe(403);
 
     // Tampered signature must fail with 401
     const badRes = await app.request(
@@ -366,6 +478,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sig: hmacSig,
+          confirmCode: "AB12CD",
           accounts: [
             {
               address: signer0.address,
@@ -389,6 +502,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sig: hmacSig,
+          confirmCode: "ab12cd",
           accounts: [
             {
               address: signer0.address,
@@ -502,7 +616,22 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
   });
 
   it("rejects mainnet configuration with FRIENDBOT_URL and serves Phase 2 proxy/relay endpoints", async () => {
+    const repo = createMemoryRepo();
+    const relaySigner = await generateTestSigner();
+    await repo.linkVerifiedAddresses({
+      telegramUserId: "70001",
+      accounts: [
+        {
+          address: relaySigner.address,
+          kind: "classic",
+          label: "Main",
+          isDefault: true,
+          verifiedSigHash: "sig_0",
+        },
+      ],
+    });
     const app = createApp({
+      createRepo: () => repo,
       fetchFn: async (url) => {
         const str = String(url);
         if (str.includes("/paths/strict-send")) {
@@ -567,7 +696,13 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(scanRes.status).toBe(200);
 
-    // Phase 2 OpenZeppelin Channels relay proxy (Origin + valid benign XDR)
+    // Phase 2 OpenZeppelin Channels relay proxy (walletAuth + allowlisted contracts + valid benign XDR)
+    const walletAuth = await signRelayWalletAuth(
+      relaySigner,
+      "testnet",
+      "feebump",
+      BENIGN_PAYMENT_TX_XDR,
+    );
     const relayRes = await app.request(
       "/v1/relay/submit",
       {
@@ -579,11 +714,13 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         body: JSON.stringify({
           mode: "feebump",
           signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          walletAuth,
         }),
       },
       {
         ...TEST_ENV,
         OZ_CHANNELS_API_URL: "https://channels.openzeppelin.com/testnet",
+        RELAY_ALLOWED_CONTRACTS: SOROBAN_HOST_FN_CONTRACT,
       },
     );
     expect(relayRes.status).toBe(200);
@@ -769,8 +906,21 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(reserve.summary?.reclaimableTrustlines).toHaveLength(1);
   });
 
-  it("enforces relay policy gates: Origin/intentAuth, Scan & Shield XDR, contract allowlist, and rate limits", async () => {
+  it("enforces relay policy gates: cryptographic auth, contract allowlist, Scan & Shield, daily budget, and rate limits", async () => {
     const repo = createMemoryRepo();
+    const relaySigner = await generateTestSigner();
+    await repo.linkVerifiedAddresses({
+      telegramUserId: "9001",
+      accounts: [
+        {
+          address: relaySigner.address,
+          kind: "classic",
+          label: "Main",
+          isDefault: true,
+          verifiedSigHash: "sig_relay_1",
+        },
+      ],
+    });
     const app = createApp({
       createRepo: () => repo,
       fetchFn: async (url) => {
@@ -788,11 +938,11 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       ...TEST_ENV,
       OZ_CHANNELS_API_URL: "https://channels.openzeppelin.com/testnet",
       RELAY_ALLOWED_CONTRACTS: SOROBAN_HOST_FN_CONTRACT,
-      RELAY_RATE_LIMIT_PER_MIN: "6",
+      RELAY_RATE_LIMIT_PER_MIN: "7",
     };
 
-    // 1. Unauthenticated request (neither Origin nor intentAuth) -> 403
-    const unauthRes = await app.request(
+    // 0. Empty RELAY_ALLOWED_CONTRACTS fails closed -> 503
+    const emptyAllowlistRes = await app.request(
       "/v1/relay/submit",
       {
         method: "POST",
@@ -800,14 +950,20 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         body: JSON.stringify({
           mode: "feebump",
           signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          walletAuth: await signRelayWalletAuth(
+            relaySigner,
+            "testnet",
+            "feebump",
+            BENIGN_PAYMENT_TX_XDR,
+          ),
         }),
       },
-      relayEnv,
+      { ...relayEnv, RELAY_ALLOWED_CONTRACTS: "" },
     );
-    expect(unauthRes.status).toBe(403);
+    expect(emptyAllowlistRes.status).toBe(503);
 
-    // 2. Malicious accountMerge XDR -> 403 Scan & Shield block
-    const maliciousRes = await app.request(
+    // 1. Origin header alone (without walletAuth or intentAuth) -> 403
+    const originOnlyRes = await app.request(
       "/v1/relay/submit",
       {
         method: "POST",
@@ -817,7 +973,28 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         },
         body: JSON.stringify({
           mode: "feebump",
+          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+        }),
+      },
+      relayEnv,
+    );
+    expect(originOnlyRes.status).toBe(403);
+
+    // 2. Malicious accountMerge XDR -> 403 Scan & Shield block
+    const maliciousRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
           signedTxXdrBase64: MALICIOUS_MERGE_TX_XDR,
+          walletAuth: await signRelayWalletAuth(
+            relaySigner,
+            "testnet",
+            "feebump",
+            MALICIOUS_MERGE_TX_XDR,
+          ),
         }),
       },
       relayEnv,
@@ -829,13 +1006,16 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       "/v1/relay/submit",
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: TEST_ENV.PWA_ORIGIN,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: "feebump",
           signedTxXdrBase64: "not_valid_xdr_base64_string",
+          walletAuth: await signRelayWalletAuth(
+            relaySigner,
+            "testnet",
+            "feebump",
+            "not_valid_xdr_base64_string",
+          ),
         }),
       },
       relayEnv,
@@ -876,53 +1056,80 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(intentRelayRes.status).toBe(200);
 
-    // 5. Soroban contract allowlist enforcement (403 when disallowed, 200 when allowed)
+    // 5. Soroban contract allowlist enforcement & single-use walletAuth nonce anti-replay
     const disallowedRes = await app.request(
       "/v1/relay/submit",
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: TEST_ENV.PWA_ORIGIN,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: "soroban",
           funcXdrBase64: SOROBAN_HOST_FN_XDR,
+          walletAuth: await signRelayWalletAuth(
+            relaySigner,
+            "testnet",
+            "soroban",
+            SOROBAN_HOST_FN_XDR,
+          ),
         }),
       },
       { ...relayEnv, RELAY_ALLOWED_CONTRACTS: OTHER_CONTRACT },
     );
     expect(disallowedRes.status).toBe(403);
 
+    const replayProof = await signRelayWalletAuth(
+      relaySigner,
+      "testnet",
+      "soroban",
+      SOROBAN_HOST_FN_XDR,
+      "fixed_nonce_001",
+    );
     const allowedSorobanRes = await app.request(
       "/v1/relay/submit",
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: TEST_ENV.PWA_ORIGIN,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: "soroban",
           funcXdrBase64: SOROBAN_HOST_FN_XDR,
+          walletAuth: replayProof,
         }),
       },
       relayEnv,
     );
     expect(allowedSorobanRes.status).toBe(200);
 
-    // 6. Rate limit enforcement -> 7th request in window returns 429
+    // Replaying same nonce must fail -> 403
+    const replayedRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "soroban",
+          funcXdrBase64: SOROBAN_HOST_FN_XDR,
+          walletAuth: replayProof,
+        }),
+      },
+      relayEnv,
+    );
+    expect(replayedRes.status).toBe(403);
+
+    // 6. Rate limit enforcement -> 9th request in window returns 429
     const limitedRes = await app.request(
       "/v1/relay/submit",
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Origin: TEST_ENV.PWA_ORIGIN,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: "soroban",
           funcXdrBase64: SOROBAN_HOST_FN_XDR,
+          walletAuth: await signRelayWalletAuth(
+            relaySigner,
+            "testnet",
+            "soroban",
+            SOROBAN_HOST_FN_XDR,
+          ),
         }),
       },
       relayEnv,
@@ -1078,12 +1285,20 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       network: "testnet",
       creatorTelegramUserId: "555777",
       actionType: "connect",
-      payloadJson: JSON.stringify({ challenge, message }),
+      payloadJson: JSON.stringify({ challenge, message, confirmCode: "SM88RT" }),
       hmacSig: sig,
       status: "pending",
       expiresAt,
       createdAt: now,
     });
+
+    const wasmHash = "ab".repeat(32);
+    const derivedSmartAddr = (await deriveCounterfactualContractAddress({
+      guardianAddress: guardian.address,
+      wasmHashHex: wasmHash,
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })) as ContractAddress;
+    const smartEnv = { ...TEST_ENV, SMART_ACCOUNT_WASM_HASH: wasmHash };
 
     const wrongSmartSigRes = await app.request(
       `/v1/intents/${intentId}/connect`,
@@ -1092,9 +1307,10 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sig,
+          confirmCode: "SM88RT",
           accounts: [
             {
-              address: SOROBAN_HOST_FN_CONTRACT,
+              address: derivedSmartAddr,
               kind: "smart",
               label: "Smart Account",
               guardianAddress: guardian.address,
@@ -1103,18 +1319,20 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
           ],
         }),
       },
-      TEST_ENV,
+      smartEnv,
     );
     expect(wrongSmartSigRes.status).toBe(401);
 
-    const boundMessage = formatSmartAccountLinkMessage(message, SOROBAN_HOST_FN_CONTRACT);
-    const validSmartRes = await app.request(
+    // Mismatched counterfactual C... under configured SMART_ACCOUNT_WASM_HASH must fail -> 403
+    const mismatchBoundMsg = formatSmartAccountLinkMessage(message, SOROBAN_HOST_FN_CONTRACT);
+    const mismatchedSmartRes = await app.request(
       `/v1/intents/${intentId}/connect`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sig,
+          confirmCode: "SM88RT",
           accounts: [
             {
               address: guardian.address,
@@ -1128,17 +1346,48 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
               kind: "smart",
               label: "Smart Account",
               guardianAddress: guardian.address,
+              signatureBase64: await guardian.signChallenge(mismatchBoundMsg),
+            },
+          ],
+        }),
+      },
+      smartEnv,
+    );
+    expect(mismatchedSmartRes.status).toBe(403);
+
+    const boundMessage = formatSmartAccountLinkMessage(message, derivedSmartAddr);
+    const validSmartRes = await app.request(
+      `/v1/intents/${intentId}/connect`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig,
+          confirmCode: "SM88RT",
+          accounts: [
+            {
+              address: guardian.address,
+              kind: "classic",
+              label: "Primary",
+              isDefault: true,
+              signatureBase64: await guardian.signChallenge(message),
+            },
+            {
+              address: derivedSmartAddr,
+              kind: "smart",
+              label: "Smart Account",
+              guardianAddress: guardian.address,
               signatureBase64: await guardian.signChallenge(boundMessage),
             },
           ],
         }),
       },
-      TEST_ENV,
+      smartEnv,
     );
     expect(validSmartRes.status).toBe(200);
     const linked = await repo.listLinkedAddresses("555777");
     expect(linked).toHaveLength(2);
-    expect(linked.some((a) => a.kind === "smart" && a.address === SOROBAN_HOST_FN_CONTRACT)).toBe(
+    expect(linked.some((a) => a.kind === "smart" && a.address === derivedSmartAddr)).toBe(
       true,
     );
   });
@@ -1340,5 +1589,462 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(seenInvokes[1]).toEqual({ fn: "claim", arg0: expectedClaimId });
     expect((await repo.getClaimLink(expectedClaimId))?.status).toBe("claimed");
     expect(editedCards[1]).toContain("Claim Link Claimed");
+  });
+
+  it("enforces daily relay budget, streaming 128KB stellar.toml cap, update_id dedup, and dust/SEP-42 indexer filtering", async () => {
+    const repo = createMemoryRepo();
+    const signer = await generateTestSigner();
+    await repo.linkVerifiedAddresses({
+      telegramUserId: "444000",
+      usernameLower: "dave",
+      accounts: [
+        {
+          address: signer.address,
+          kind: "classic",
+          label: "Main",
+          isDefault: true,
+          verifiedSigHash: "sig_dave",
+        },
+      ],
+    });
+
+    const alerts: string[] = [];
+    const app = createApp({
+      createRepo: () => repo,
+      telegramApiDeps: {
+        fetchFn: async (_url, init) => {
+          const parsed = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+          if (parsed.text) alerts.push(parsed.text);
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+      },
+      fetchFn: async (url) => {
+        const str = String(url);
+        if (str.includes("/getMe")) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: {
+                id: 1,
+                is_bot: true,
+                first_name: "AstroWallet",
+                username: "AstroWalletTestBot",
+                can_join_groups: true,
+                can_read_all_group_messages: false,
+                supports_inline_queries: true,
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (str.includes("channels.openzeppelin.com")) {
+          return new Response(JSON.stringify({ hash: "e".repeat(64), status: "submitted" }), {
+            status: 200,
+          });
+        }
+        if (str.includes("stellar.toml")) {
+          const chunk = new Uint8Array(40 * 1024).fill(65);
+          const stream = new ReadableStream<Uint8Array>({
+            start(controller) {
+              for (let i = 0; i < 4; i += 1) controller.enqueue(chunk); // 160 KB > 128 KB
+              controller.close();
+            },
+          });
+          return new Response(stream, { status: 200 });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    // 1. Relay daily budget exhaustion -> 429
+    const tightBudgetEnv = {
+      ...TEST_ENV,
+      OZ_CHANNELS_API_URL: "https://channels.openzeppelin.com/testnet",
+      RELAY_ALLOWED_CONTRACTS: SOROBAN_HOST_FN_CONTRACT,
+      RELAY_MAX_FEE_STROOPS: "100",
+      RELAY_DAILY_BUDGET_STROOPS: "150",
+    };
+    const r1 = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          walletAuth: await signRelayWalletAuth(
+            signer,
+            "testnet",
+            "feebump",
+            BENIGN_PAYMENT_TX_XDR,
+          ),
+        }),
+      },
+      tightBudgetEnv,
+    );
+    expect(r1.status).toBe(200);
+    const r2 = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          walletAuth: await signRelayWalletAuth(
+            signer,
+            "testnet",
+            "feebump",
+            BENIGN_PAYMENT_TX_XDR,
+          ),
+        }),
+      },
+      tightBudgetEnv,
+    );
+    expect(r2.status).toBe(429);
+
+    // 2. Streaming stellar.toml > 128 KB returns 413 even without Content-Length
+    const tomlRes = await app.request(
+      "/v1/proxy/stellar-toml?domain=issuer.example.org",
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(tomlRes.status).toBe(413);
+
+    // 3. Telegram webhook duplicate update_id short-circuits cleanly
+    const tgDup1 = await app.request(
+      "/tg/webhook",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": TEST_ENV.TG_WEBHOOK_SECRET,
+        },
+        body: JSON.stringify({ update_id: 987654321 }),
+      },
+      TEST_ENV,
+    );
+    // Second request with identical update_id returns duplicate: true immediately
+    const tgDup2 = await app.request(
+      "/tg/webhook",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": TEST_ENV.TG_WEBHOOK_SECRET,
+        },
+        body: JSON.stringify({ update_id: 987654321 }),
+      },
+      TEST_ENV,
+    );
+    expect(tgDup2.status).toBe(200);
+    expect(((await tgDup2.json()) as { duplicate?: boolean }).duplicate).toBe(true);
+    expect(tgDup1.status).not.toBe(401);
+
+    // 4. Indexer drops native dust < 0.05 XLM and marks unverified non-SEP-42 issuers
+    const idxEnv = { ...TEST_ENV, INDEXER_WEBHOOK_SECRET: "idx-secret-123" };
+    const idxRes = await app.request(
+      "/webhooks/indexer",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Indexer-Secret": "idx-secret-123",
+        },
+        body: JSON.stringify({
+          events: [
+            {
+              txHash: "1a".repeat(32),
+              from: "GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOOHSUJUJ6",
+              to: signer.address,
+              amount: "0.0001000",
+              assetCode: "XLM",
+            },
+            {
+              txHash: "2b".repeat(32),
+              from: "GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOOHSUJUJ6",
+              to: signer.address,
+              amount: "10.0000000",
+              assetCode: "USDC",
+              assetIssuer: "GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOOHSUJUJ6",
+            },
+          ],
+        }),
+      },
+      idxEnv,
+    );
+    expect(idxRes.status).toBe(200);
+    const idxJson = (await idxRes.json()) as { alertsSent: number };
+    expect(idxJson.alertsSent).toBe(1);
+    expect(alerts[0]).toContain("Unverified");
+  });
+
+  it("authenticates Mini App initData sessions, prevents cross-user intent access, and emits native web_app vs t.me startapp bot buttons", async () => {
+    const repo = createMemoryRepo();
+    const sentPayloads: Array<{ url: string; body: Record<string, unknown> }> = [];
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        if (url.includes("/getMe")) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: {
+                id: 999000,
+                is_bot: true,
+                first_name: "AstroWallet",
+                username: "AstroWalletTestBot",
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/sendMessage")) {
+          const parsedBody = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
+          sentPayloads.push({ url, body: parsedBody });
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              result: { message_id: 101, chat: { id: Number(parsedBody.chat_id ?? 1) } },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    const miniAppEnv = {
+      ...TEST_ENV,
+      TG_BOT_USERNAME: "AstroWalletTestBot",
+      TG_MINI_APP_SHORT_NAME: "wallet",
+    };
+
+    // 1. Valid Telegram.WebApp.initData exchanges cleanly for a 15m Mini App sessionToken
+    const now = Math.floor(Date.now() / 1000);
+    const initPairs: Array<[string, string]> = [
+      ["auth_date", String(now - 5)],
+      ["start_param", encodeStartAppTabParam("ton")],
+      ["user", JSON.stringify({ id: 777111, username: "alice_tg", first_name: "Alice" })],
+    ];
+    initPairs.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const initHash = await computeTelegramInitDataHash(
+      initPairs.map(([k, v]) => `${k}=${v}`).join("\n"),
+      miniAppEnv.TG_BOT_TOKEN,
+    );
+    const initParams = new URLSearchParams(Object.fromEntries(initPairs));
+    initParams.set("hash", initHash);
+
+    const authRes = await app.request(
+      "/v1/tg/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: initParams.toString() }),
+      },
+      miniAppEnv,
+    );
+    expect(authRes.status).toBe(200);
+    const authJson = (await authRes.json()) as {
+      sessionToken: string;
+      startParam: string;
+      user: { id: string };
+    };
+    expect(authJson.startParam).toBe("t-ton");
+    expect(authJson.user.id).toBe("777111");
+
+    // Bad initData fails closed (401)
+    const badAuthRes = await app.request(
+      "/v1/tg/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: `${initParams.toString()}&extra=tamper` }),
+      },
+      miniAppEnv,
+    );
+    expect(badAuthRes.status).toBe(401);
+
+    // 2. Link wallet directly inside Mini App via /v1/tg/link-challenge + /v1/tg/link-confirm
+    const signer = await generateTestSigner();
+    const challengeRes = await app.request(
+      "/v1/tg/link-challenge",
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${authJson.sessionToken}` },
+      },
+      miniAppEnv,
+    );
+    expect(challengeRes.status).toBe(200);
+    const challengeJson = (await challengeRes.json()) as {
+      intentId: string;
+      sig: string;
+      message: string;
+    };
+
+    const sigB64 = await signer.signChallenge(challengeJson.message);
+    const confirmRes = await app.request(
+      "/v1/tg/link-confirm",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authJson.sessionToken}`,
+        },
+        body: JSON.stringify({
+          intentId: challengeJson.intentId,
+          sig: challengeJson.sig,
+          accounts: [
+            {
+              address: signer.address,
+              kind: "classic",
+              label: "MiniApp Primary",
+              isDefault: true,
+              signatureBase64: sigB64,
+            },
+          ],
+        }),
+      },
+      miniAppEnv,
+    );
+    expect(confirmRes.status).toBe(200);
+
+    const meRes = await app.request(
+      "/v1/tg/me",
+      { headers: { Authorization: `Bearer ${authJson.sessionToken}` } },
+      miniAppEnv,
+    );
+    expect(meRes.status).toBe(200);
+    const meJson = (await meRes.json()) as { linkedAccounts: Array<{ address: string }> };
+    expect(meJson.linkedAccounts.some((a) => a.address === signer.address)).toBe(true);
+
+    // 3. Session-authenticated POST /v1/intents/:id/connect works without manual confirmCode,
+    // while another user's sessionToken is blocked with 403!
+    const bob = await signMiniAppSessionToken(
+      {
+        telegramUserId: "999222",
+        network: "testnet",
+        issuedAt: now,
+        expiresAt: now + 900,
+      },
+      miniAppEnv.INTENT_HMAC_SECRET,
+    );
+    const ch2: ConnectChallengePayload = {
+      challengeId: "ch_session_1",
+      network: "testnet",
+      telegramUserId: "777111",
+      issuedAt: now,
+      expiresAt: now + 300,
+    };
+    const msg2 = formatConnectChallengeMessage(ch2);
+    const sig2 = await signIntentToken(
+      { intentId: "it_conn_session", network: "testnet", telegramUserId: "777111", expiresAt: now + 300 },
+      miniAppEnv.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId: "it_conn_session",
+      network: "testnet",
+      creatorTelegramUserId: "777111",
+      actionType: "connect",
+      payloadJson: JSON.stringify({ message: msg2, confirmCode: "ZZ99AA" }),
+      hmacSig: sig2,
+      status: "pending",
+      expiresAt: now + 300,
+      createdAt: now,
+    });
+
+    const bobGet = await app.request(
+      `/v1/intents/it_conn_session?sig=${sig2}`,
+      { headers: { Authorization: `Bearer ${bob}` } },
+      miniAppEnv,
+    );
+    expect(bobGet.status).toBe(403);
+
+    const aliceConnect = await app.request(
+      `/v1/intents/it_conn_session/connect`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${authJson.sessionToken}`,
+        },
+        body: JSON.stringify({
+          sig: sig2,
+          accounts: [
+            {
+              address: signer.address,
+              kind: "classic",
+              label: "Primary",
+              signatureBase64: await signer.signChallenge(msg2),
+            },
+          ],
+        }),
+      },
+      miniAppEnv,
+    );
+    expect(aliceConnect.status).toBe(200);
+
+    // 4. Bot emits web_app button in private DM and t.me/...?startapp=... in groups
+    const startWebhook = await app.request(
+      "/tg/webhook",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": miniAppEnv.TG_WEBHOOK_SECRET,
+        },
+        body: JSON.stringify({
+          update_id: 445501,
+          message: {
+            message_id: 10,
+            date: now,
+            chat: { id: 777111, type: "private" },
+            from: { id: 777111, is_bot: false, first_name: "Alice", username: "alice_tg" },
+            text: "/start",
+            entities: [{ offset: 0, length: 6, type: "bot_command" }],
+          },
+        }),
+      },
+      miniAppEnv,
+    );
+    expect(startWebhook.status).toBe(200);
+
+    const groupPayWebhook = await app.request(
+      "/tg/webhook",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": miniAppEnv.TG_WEBHOOK_SECRET,
+        },
+        body: JSON.stringify({
+          update_id: 445502,
+          message: {
+            message_id: 11,
+            date: now,
+            chat: { id: -100123456, type: "supergroup", title: "Stellar Group" },
+            from: { id: 777111, is_bot: false, first_name: "Alice", username: "alice_tg" },
+            text: `/pay 5 XLM ${signer.address}`,
+            entities: [{ offset: 0, length: 4, type: "bot_command" }],
+          },
+        }),
+      },
+      miniAppEnv,
+    );
+    expect(groupPayWebhook.status).toBe(200);
+
+    const startMsg = sentPayloads[0]?.body as {
+      reply_markup?: { inline_keyboard?: Array<Array<{ web_app?: { url: string }; url?: string }>> };
+    };
+    expect(startMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.web_app?.url).toBe(
+      "https://testnet.astrowallet.example/app",
+    );
+
+    const groupMsg = sentPayloads[1]?.body as {
+      reply_markup?: { inline_keyboard?: Array<Array<{ web_app?: { url: string }; url?: string }>> };
+    };
+    const groupUrl = groupMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.url ?? "";
+    expect(groupUrl).toMatch(/^https:\/\/t\.me\/AstroWalletTestBot\/wallet\?startapp=i-/);
   });
 });

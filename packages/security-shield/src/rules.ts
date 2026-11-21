@@ -64,6 +64,20 @@ export function classifyVerdict(findings: readonly SecurityFinding[]): ThreatVer
   return "benign";
 }
 
+const DANGEROUS_SOROBAN_FUNCTIONS = new Set([
+  "update_current_contract_wasm",
+  "upgrade",
+  "add_signer",
+  "add_context_rule",
+  "update_context_rule",
+  "remove_signer",
+  "burn",
+  "burn_from",
+  "clawback",
+  "set_admin",
+  "set_authorized",
+]);
+
 function checkSorobanInvocation(
   inv: DecodedSorobanInvocation,
   depth: number,
@@ -84,7 +98,15 @@ function checkSorobanInvocation(
   }
 
   const fnLower = inv.functionName.toLowerCase();
-  if (fnLower === "approve" || fnLower === "transfer_from") {
+  if (DANGEROUS_SOROBAN_FUNCTIONS.has(fnLower)) {
+    findings.push({
+      code: "MALICIOUS_SOROBAN_FUNCTION",
+      severity: "malicious",
+      title: `Dangerous Soroban Function Blocked (${inv.functionName})`,
+      description: `Invocation targets "${inv.functionName}" on ${inv.contractId ?? "a contract"}, which can upgrade contract code, alter signers/rules, or burn/confiscate assets.`,
+      blocksSigning: true,
+    });
+  } else if (fnLower === "approve" || fnLower === "transfer_from") {
     findings.push({
       code: depth > 0 ? "SOROBAN_NESTED_TOKEN_APPROVAL" : "SOROBAN_TOKEN_APPROVAL",
       severity: depth > 0 ? "malicious" : "warning",
@@ -98,11 +120,31 @@ function checkSorobanInvocation(
           : `Contract requests "${inv.functionName}" permission. Verify the spender and allowance limit.`,
       blocksSigning: depth > 0,
     });
+  } else if (fnLower === "transfer") {
+    findings.push({
+      code: "SOROBAN_TOKEN_TRANSFER",
+      severity: "warning",
+      title: "Soroban Token Transfer",
+      description: `Invocation calls "${inv.functionName}" on ${inv.contractId ?? "a token contract"}. Verify the recipient and exact amount.`,
+      blocksSigning: false,
+    });
   }
 
   for (const sub of inv.subInvocations) {
     checkSorobanInvocation(sub, depth + 1, directory, findings);
   }
+}
+
+/**
+ * Evaluates a decoded Soroban authorization/invocation tree (e.g. from `stellar_signAuthEntry`).
+ */
+export function evaluateSorobanInvocation(
+  invocation: DecodedSorobanInvocation,
+  context: Pick<SecurityRuleContext, "directoryEntries"> = {},
+): SecurityFinding[] {
+  const findings: SecurityFinding[] = [];
+  checkSorobanInvocation(invocation, 0, context.directoryEntries, findings);
+  return findings;
 }
 
 /**
@@ -148,18 +190,34 @@ export function evaluateDecodedTransaction(
           blocksSigning: true,
         });
       }
-      if (
-        op.lowThreshold !== undefined ||
-        op.medThreshold !== undefined ||
-        op.highThreshold !== undefined
-      ) {
-        findings.push({
-          code: "SET_OPTIONS_THRESHOLD_CHANGE",
-          severity: "warning",
-          title: "Account Multisig Threshold Modification",
-          description: "Transaction alters your account signing thresholds.",
-          blocksSigning: false,
-        });
+      const thresholds = [op.lowThreshold, op.medThreshold, op.highThreshold].filter(
+        (v): v is number => v !== undefined,
+      );
+      if (thresholds.length > 0) {
+        const masterWeight = op.masterWeight;
+        const exceedsMaster =
+          masterWeight !== undefined && thresholds.some((threshold) => threshold > masterWeight);
+        const exceedsDefaultWithoutSigner =
+          !op.signerKey && thresholds.some((threshold) => threshold > 10);
+
+        if (exceedsMaster || exceedsDefaultWithoutSigner) {
+          findings.push({
+            code: "MALICIOUS_SET_OPTIONS_THRESHOLD_LOCKOUT",
+            severity: "malicious",
+            title: "Multisig Threshold Lockout Blocked (setOptions)",
+            description:
+              "Transaction raises signing thresholds above effective weight without adding a co-signer, risking permanent account lockout.",
+            blocksSigning: true,
+          });
+        } else {
+          findings.push({
+            code: "SET_OPTIONS_THRESHOLD_CHANGE",
+            severity: "warning",
+            title: "Account Multisig Threshold Modification",
+            description: "Transaction alters your account signing thresholds.",
+            blocksSigning: false,
+          });
+        }
       }
     }
 
@@ -171,6 +229,27 @@ export function evaluateDecodedTransaction(
         title: "Account Destruction & Full Balance Drain (accountMerge)",
         description: `Transaction permanently closes your account and sweeps 100% of remaining XLM to ${op.destination ?? "destination"}.`,
         blocksSigning: true,
+      });
+    }
+
+    // 2b. Classic Clawback & Trustline Flag Risk Rules
+    if (op.type === "clawback" || op.type === "clawbackClaimableBalance") {
+      findings.push({
+        code: "MALICIOUS_CLAWBACK",
+        severity: "malicious",
+        title: "Asset Clawback Operation Blocked",
+        description: `Transaction invokes "${op.type}", which forcibly confiscates or burns regulated asset balances.`,
+        blocksSigning: true,
+      });
+    }
+
+    if (op.type === "setTrustLineFlags") {
+      findings.push({
+        code: "TRUSTLINE_FLAGS_CHANGE",
+        severity: "warning",
+        title: "Asset Trustline Flags Modification",
+        description: "Transaction modifies trustline authorization or clawback flags on an asset.",
+        blocksSigning: false,
       });
     }
 

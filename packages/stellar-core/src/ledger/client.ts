@@ -149,6 +149,7 @@ export interface StellarClient {
     assetCode: string;
     assetIssuer?: string | undefined;
     expiresAtUnix: number;
+    cancellable?: boolean | undefined;
   }): Promise<{
     hash: string;
     ledger: number;
@@ -234,6 +235,43 @@ async function resolveDynamicFeeStroops(server: Horizon.Server): Promise<string>
   }
 }
 
+async function resolveSorobanInclusionFeeStroops(server: rpc.Server): Promise<string> {
+  try {
+    const stats = await server.getFeeStats();
+    const raw = Number(
+      stats.sorobanInclusionFee?.p90 ?? stats.sorobanInclusionFee?.mode ?? BASE_FEE,
+    );
+    const base = Number(BASE_FEE);
+    if (!Number.isFinite(raw) || raw < base) {
+      return BASE_FEE;
+    }
+    return String(Math.min(Math.trunc(raw), 50_000));
+  } catch {
+    return BASE_FEE;
+  }
+}
+
+class NonRetryableSorobanError extends Error {}
+
+const DEFAULT_SOROBAN_MAX_RESOURCE_FEE_STROOPS = 5_000_000n;
+const accountSequenceQueues = new Map<string, Promise<unknown>>();
+
+function enqueueAccountTx<T>(accountId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = accountSequenceQueues.get(accountId) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  accountSequenceQueues.set(accountId, settled);
+  void settled.then(() => {
+    if (accountSequenceQueues.get(accountId) === settled) {
+      accountSequenceQueues.delete(accountId);
+    }
+  });
+  return next;
+}
+
 /**
  * Creates a live Horizon + Soroban RPC client driven strictly by validated environment configuration.
  */
@@ -241,12 +279,26 @@ export function createStellarClient(
   config: Pick<
     PwaConfig | ServerConfig,
     "network" | "networkPassphrase" | "horizonUrls" | "friendbotUrl"
-  > & { rpcUrls?: readonly string[] | undefined },
+  > & {
+    rpcUrls?: readonly string[] | undefined;
+    sorobanMaxResourceFeeStroops?: string | bigint | undefined;
+    sorobanPollIntervalMs?: number | undefined;
+    rpcServerFactory?: ((url: string) => rpc.Server) | undefined;
+    horizonServerFactory?: ((url: string) => Horizon.Server) | undefined;
+  },
 ): StellarClient {
   const endpoints = createFailoverEndpoints(config.horizonUrls);
   const rpcEndpoints = config.rpcUrls?.length
     ? createFailoverEndpoints(config.rpcUrls)
     : null;
+  const maxResourceFeeStroops =
+    typeof config.sorobanMaxResourceFeeStroops === "bigint"
+      ? config.sorobanMaxResourceFeeStroops
+      : typeof config.sorobanMaxResourceFeeStroops === "string" &&
+          /^\d+$/.test(config.sorobanMaxResourceFeeStroops.trim())
+        ? BigInt(config.sorobanMaxResourceFeeStroops.trim())
+        : DEFAULT_SOROBAN_MAX_RESOURCE_FEE_STROOPS;
+  const pollIntervalMs = config.sorobanPollIntervalMs ?? 1_000;
 
   async function withHorizonFailover<T>(
     fn: (server: Horizon.Server) => Promise<T>,
@@ -255,9 +307,11 @@ export function createStellarClient(
     let lastError: unknown;
     for (let i = 0; i < urls.length; i += 1) {
       const url = endpoints.current();
-      const server = new Horizon.Server(url, {
-        allowHttp: url.startsWith("http://"),
-      });
+      const server = config.horizonServerFactory
+        ? config.horizonServerFactory(url)
+        : new Horizon.Server(url, {
+            allowHttp: url.startsWith("http://"),
+          });
       try {
         return await fn(server);
       } catch (err) {
@@ -281,12 +335,17 @@ export function createStellarClient(
     let lastError: unknown;
     for (let i = 0; i < urls.length; i += 1) {
       const url = rpcEndpoints.current();
-      const server = new rpc.Server(url, {
-        allowHttp: url.startsWith("http://"),
-      });
+      const server = config.rpcServerFactory
+        ? config.rpcServerFactory(url)
+        : new rpc.Server(url, {
+            allowHttp: url.startsWith("http://"),
+          });
       try {
         return await fn(server);
       } catch (err) {
+        if (err instanceof NonRetryableSorobanError) {
+          throw err;
+        }
         lastError = err;
         rpcEndpoints.next();
       }
@@ -300,33 +359,35 @@ export function createStellarClient(
     memoInput?: TypedMemoInput,
   ): Promise<{ hash: string; ledger: number }> {
     const sourceAddress = sourceKeypair.publicKey();
-    const { sourceAccount, fee } = await withHorizonFailover(async (server) => {
-      const [acc, dynamicFee] = await Promise.all([
-        server.loadAccount(sourceAddress),
-        resolveDynamicFeeStroops(server),
-      ]);
-      return { sourceAccount: acc, fee: dynamicFee };
+    return enqueueAccountTx(sourceAddress, async () => {
+      const { sourceAccount, fee } = await withHorizonFailover(async (server) => {
+        const [acc, dynamicFee] = await Promise.all([
+          server.loadAccount(sourceAddress),
+          resolveDynamicFeeStroops(server),
+        ]);
+        return { sourceAccount: acc, fee: dynamicFee };
+      });
+      const builder = new TransactionBuilder(sourceAccount, {
+        fee,
+        networkPassphrase: config.networkPassphrase,
+      });
+
+      for (const op of operations) {
+        builder.addOperation(op);
+      }
+
+      if (memoInput && memoInput.kind !== "none") {
+        builder.addMemo(buildStellarMemo(memoInput));
+      }
+
+      const tx = builder.setTimeout(60).build();
+      tx.sign(sourceKeypair);
+      const result = await withHorizonFailover((server) => server.submitTransaction(tx));
+      return {
+        hash: result.hash,
+        ledger: result.ledger,
+      };
     });
-    const builder = new TransactionBuilder(sourceAccount, {
-      fee,
-      networkPassphrase: config.networkPassphrase,
-    });
-
-    for (const op of operations) {
-      builder.addOperation(op);
-    }
-
-    if (memoInput && memoInput.kind !== "none") {
-      builder.addMemo(buildStellarMemo(memoInput));
-    }
-
-    const tx = builder.setTimeout(60).build();
-    tx.sign(sourceKeypair);
-    const result = await withHorizonFailover((server) => server.submitTransaction(tx));
-    return {
-      hash: result.hash,
-      ledger: result.ledger,
-    };
   }
 
   async function submitSorobanOperation(
@@ -335,51 +396,79 @@ export function createStellarClient(
     memoInput?: TypedMemoInput,
   ): Promise<{ hash: string; ledger: number }> {
     const sourceAddress = sourceKeypair.publicKey();
-    return withRpcFailover(async (server) => {
-      const sourceAccount = await server.getAccount(sourceAddress);
-      const builder = new TransactionBuilder(sourceAccount, {
-        fee: BASE_FEE,
-        networkPassphrase: config.networkPassphrase,
-      }).addOperation(operation);
+    return enqueueAccountTx(sourceAddress, async () => {
+      const preparedTx = await withRpcFailover(async (server) => {
+        const [sourceAccount, inclusionFee] = await Promise.all([
+          server.getAccount(sourceAddress),
+          resolveSorobanInclusionFeeStroops(server),
+        ]);
+        const builder = new TransactionBuilder(sourceAccount, {
+          fee: inclusionFee,
+          networkPassphrase: config.networkPassphrase,
+        }).addOperation(operation);
 
-      if (memoInput && memoInput.kind !== "none") {
-        builder.addMemo(buildStellarMemo(memoInput));
-      }
+        if (memoInput && memoInput.kind !== "none") {
+          builder.addMemo(buildStellarMemo(memoInput));
+        }
 
-      const tx = builder.setTimeout(60).build();
-      const sim = await server.simulateTransaction(tx);
-      if (rpc.Api.isSimulationError(sim)) {
-        throw new Error(`Soroban simulation failed: ${sim.error}`);
-      }
+        const tx = builder.setTimeout(60).build();
+        const sim = await server.simulateTransaction(tx);
+        if (rpc.Api.isSimulationRestore(sim)) {
+          throw new NonRetryableSorobanError(
+            "Soroban archived state restore required before submission",
+          );
+        }
+        if (rpc.Api.isSimulationError(sim)) {
+          throw new NonRetryableSorobanError(`Soroban simulation failed: ${sim.error}`);
+        }
 
-      const assembled = rpc.assembleTransaction(tx, sim).build();
-      assembled.sign(sourceKeypair);
-      const sent = await server.sendTransaction(assembled);
-      if (sent.status === "ERROR") {
-        throw new Error(`Soroban sendTransaction failed (${sent.hash})`);
-      }
+        const simulatedResourceFee = BigInt(sim.minResourceFee || "0");
+        if (simulatedResourceFee > maxResourceFeeStroops) {
+          throw new NonRetryableSorobanError(
+            `Soroban simulated resource fee (${simulatedResourceFee} stroops) exceeds limit (${maxResourceFeeStroops} stroops)`,
+          );
+        }
 
-      let polled = await server.getTransaction(sent.hash);
-      for (
-        let i = 0;
-        i < 18 && polled.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
-        i += 1
-      ) {
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        polled = await server.getTransaction(sent.hash);
-      }
+        return rpc.assembleTransaction(tx, sim).build();
+      });
 
-      if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
-        throw new Error(`Soroban transaction failed on ledger (${sent.hash})`);
-      }
+      // Assemble and sign exactly once before broadcasting across failover RPC nodes
+      preparedTx.sign(sourceKeypair);
 
-      return {
-        hash: sent.hash,
-        ledger:
-          polled.status === rpc.Api.GetTransactionStatus.SUCCESS
-            ? polled.ledger
-            : sent.latestLedger,
-      };
+      return withRpcFailover(async (server) => {
+        const sent = await server.sendTransaction(preparedTx);
+        if (sent.status === "ERROR") {
+          throw new NonRetryableSorobanError(`Soroban sendTransaction failed (${sent.hash})`);
+        }
+
+        let polled = await server.getTransaction(sent.hash);
+        for (
+          let i = 0;
+          i < 18 && polled.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
+          i += 1
+        ) {
+          if (pollIntervalMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+          }
+          polled = await server.getTransaction(sent.hash);
+        }
+
+        if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
+          throw new NonRetryableSorobanError(
+            `Soroban transaction failed on ledger (${sent.hash})`,
+          );
+        }
+        if (polled.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+          throw new NonRetryableSorobanError(
+            `Soroban transaction confirmation timed out (${sent.hash})`,
+          );
+        }
+
+        return {
+          hash: sent.hash,
+          ledger: polled.ledger,
+        };
+      });
     });
   }
 
@@ -759,6 +848,7 @@ export function createStellarClient(
     assetCode: string;
     assetIssuer?: string | undefined;
     expiresAtUnix: number;
+    cancellable?: boolean | undefined;
   }): Promise<{
     hash: string;
     ledger: number;
@@ -779,6 +869,7 @@ export function createStellarClient(
       amountStroops: decimalToStroops7(input.amount),
       claimPubkeyHex: ephemeral.publicKeyHex,
       expiresAtUnix: input.expiresAtUnix,
+      cancellable: input.cancellable,
     });
     const res = await submitSorobanOperation(input.sourceKeypair, op);
     return {

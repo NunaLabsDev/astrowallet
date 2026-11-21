@@ -3,6 +3,7 @@ import {
   DEFAULT_ARGON2ID_PARAMS,
   decryptVaultPayload,
   encryptVaultPayload,
+  evaluateSecretStrength,
   parseAgVaultBackup,
   serializeAgVaultBackup,
   type Argon2idParams,
@@ -62,13 +63,33 @@ describe("Argon2id + AES-GCM-256 non-custodial vault", () => {
     expect(decrypted.accounts).toHaveLength(2);
   });
 
-  it("supports default OWASP mobile Argon2id parameters", async () => {
+  it("supports default OWASP 64 MiB Argon2id parameters", async () => {
+    expect(DEFAULT_ARGON2ID_PARAMS.memoryKiB).toBe(65_536);
+    expect(DEFAULT_ARGON2ID_PARAMS.iterations).toBe(3);
+
     const envelope = await encryptVaultPayload(SAMPLE_PAYLOAD, "918273", {
       preferWasm: true,
       kdfParams: DEFAULT_ARGON2ID_PARAMS,
     });
     const decrypted = await decryptVaultPayload(envelope, "918273");
     expect(decrypted.accounts[0]?.address).toBe(SAMPLE_PAYLOAD.accounts[0]?.address);
+  });
+
+  it("evaluates PIN/passphrase strength and rejects trivial secrets", () => {
+    expect(evaluateSecretStrength("12345").acceptable).toBe(false);
+    expect(evaluateSecretStrength("000000").acceptable).toBe(false);
+    expect(evaluateSecretStrength("123456").acceptable).toBe(false);
+    expect(evaluateSecretStrength("654321").acceptable).toBe(false);
+    expect(evaluateSecretStrength("112211").acceptable).toBe(false);
+
+    const fairPin = evaluateSecretStrength("482910");
+    expect(fairPin.acceptable).toBe(true);
+    expect(fairPin.level).toBe("fair");
+
+    const strongPass = evaluateSecretStrength("Solar!Orbital99");
+    expect(strongPass.acceptable).toBe(true);
+    expect(strongPass.level).toBe("strong");
+    expect(strongPass.score).toBe(4);
   });
 
   it("rejects wrong PIN and tampered ciphertext", async () => {

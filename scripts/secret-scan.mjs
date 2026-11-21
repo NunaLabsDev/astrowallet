@@ -2,8 +2,8 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const ROOT = process.cwd();
-const TARGET_ROOTS = ["packages", "apps"];
-const ALLOWED_EXTS = new Set([".ts", ".tsx", ".js", ".mjs", ".mts"]);
+const TARGET_ROOTS = ["packages", "apps", "contracts", "scripts"];
+const ALLOWED_EXTS = new Set([".ts", ".tsx", ".js", ".mjs", ".mts", ".rs"]);
 
 const RULES = [
   {
@@ -11,8 +11,8 @@ const RULES = [
     regex: /(Test SDF Network\s*;\s*September 2015|Public Global Stellar Network\s*;\s*September 2015)/g,
   },
   {
-    name: "Hardcoded Stellar / Relayer / Explorer / Aggregator endpoint URL",
-    regex: /https?:\/\/(?:horizon(?:-testnet)?\.stellar\.org|soroban-testnet\.stellar\.org|rpc(?:-testnet)?\.stellar\.org|friendbot\.stellar\.org|channels\.openzeppelin\.com|api\.stellar\.expert|api\.soroswap\.finance)/gi,
+    name: "Hardcoded Stellar / TON / Relayer / Explorer / Aggregator endpoint URL",
+    regex: /https?:\/\/(?:horizon(?:-testnet)?\.stellar\.org|soroban-testnet\.stellar\.org|rpc(?:-testnet)?\.stellar\.org|friendbot\.stellar\.org|channels\.openzeppelin\.com|api\.stellar\.expert|api\.soroswap\.finance|(?:testnet\.)?toncenter\.com|bridge\.tonapi\.io)/gi,
   },
   {
     name: "Exposed sk_ API key",
@@ -41,7 +41,14 @@ function walkSrcFiles(dir, out = []) {
   }
 
   for (const entry of entries) {
-    if (entry === "node_modules" || entry === "dist" || entry === ".wrangler" || entry === ".turbo") {
+    if (
+      entry === "node_modules" ||
+      entry === "dist" ||
+      entry === "target" ||
+      entry === "test_snapshots" ||
+      entry === ".wrangler" ||
+      entry === ".turbo"
+    ) {
       continue;
     }
     const fullPath = join(dir, entry);
@@ -52,9 +59,13 @@ function walkSrcFiles(dir, out = []) {
     }
     if (!st.isFile()) continue;
 
-    const rel = relative(ROOT, fullPath);
-    const inSrc = rel.includes("/src/") || rel.includes("\\src\\");
-    if (!inSrc) continue;
+    const rel = relative(ROOT, fullPath).replace(/\\/g, "/");
+    if (rel === "scripts/secret-scan.mjs") continue;
+    const isCodeRoot =
+      rel.includes("/src/") ||
+      rel.startsWith("apps/pwa/functions/") ||
+      rel.startsWith("scripts/");
+    if (!isCodeRoot) continue;
     if (rel.endsWith(".test.ts") || rel.endsWith(".test.tsx")) continue;
 
     const dot = entry.lastIndexOf(".");
@@ -70,8 +81,15 @@ const files = TARGET_ROOTS.flatMap((dir) => walkSrcFiles(join(ROOT, dir)));
 const violations = [];
 
 for (const file of files) {
-  const rel = relative(ROOT, file);
-  const lines = readFileSync(file, "utf8").split(/\r?\n/);
+  const rel = relative(ROOT, file).replace(/\\/g, "/");
+  let content = readFileSync(file, "utf8");
+  if (rel.endsWith(".rs")) {
+    const testIdx = content.indexOf("#[cfg(test)]");
+    if (testIdx >= 0) {
+      content = content.slice(0, testIdx);
+    }
+  }
+  const lines = content.split(/\r?\n/);
   for (let i = 0; i < lines.length; i += 1) {
     const line = lines[i] ?? "";
     for (const rule of RULES) {

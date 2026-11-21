@@ -6,18 +6,16 @@ import {
   type ServerConfig,
 } from "@astrowallet/domain";
 import {
-  buildIntentDeepLink,
+  buildTelegramMiniAppLink,
   deriveClaimId,
   formatClaimLinkCard,
   formatPaymentIntentCard,
   formatRequestCard,
   formatSplitCard,
   formatSwapQuoteCard,
-  verifyConnectSignature,
   verifyIntentToken,
-  verifySmartAccountGuardianSignature,
 } from "@astrowallet/tg-protocol";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
 import {
@@ -31,6 +29,19 @@ import {
   sendTelegramMessage,
   type TelegramApiDeps,
 } from "../telegram-api.js";
+import {
+  ConnectAccountSubmissionSchema,
+  verifyConnectAccountSubmissions,
+} from "./connect-verifier.js";
+import { authenticateMiniAppSession } from "./tg-auth.js";
+
+const CREATOR_ONLY_INTENTS = new Set([
+  "connect",
+  "pay",
+  "swap",
+  "reclaim_reserve",
+  "sign_xdr",
+]);
 
 export interface IntentRoutesDeps {
   fetchFn?: FetchLike | undefined;
@@ -44,30 +55,9 @@ export interface IntentRoutesDeps {
   telegramApiDeps?: TelegramApiDeps | undefined;
 }
 
-const ClassicAccountSubmissionSchema = z.object({
-  address: ClassicAddressSchema,
-  kind: z.literal("classic"),
-  label: z.string().trim().min(1).max(32),
-  isDefault: z.boolean().optional(),
-  signatureBase64: z.string().min(16),
-});
-
-const SmartAccountSubmissionSchema = z.object({
-  address: ContractAddressSchema,
-  kind: z.literal("smart"),
-  label: z.string().trim().min(1).max(32),
-  isDefault: z.boolean().optional(),
-  guardianAddress: ClassicAddressSchema,
-  signatureBase64: z.string().min(16),
-});
-
-const ConnectAccountSubmissionSchema = z.union([
-  ClassicAccountSubmissionSchema,
-  SmartAccountSubmissionSchema,
-]);
-
 const ConnectIntentBodySchema = z.object({
   sig: z.string().regex(/^[a-f0-9]{64}$/i),
+  confirmCode: z.string().trim().min(4).max(16).optional(),
   accounts: z.array(ConnectAccountSubmissionSchema).min(1).max(10),
 });
 
@@ -98,7 +88,18 @@ interface IntentPayload {
   priceImpactPct?: string | undefined;
   unsignedXdr?: string | undefined;
   escrowContractId?: string | undefined;
+  escrowExpiresAt?: number | undefined;
   claimId?: string | undefined;
+  confirmCode?: string | undefined;
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
 }
 
 function parsePayload(raw: string): IntentPayload {
@@ -110,12 +111,30 @@ function parsePayload(raw: string): IntentPayload {
   }
 }
 
-async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+async function authorizeOptionalCreatorSession(
+  c: Context<IntentRouteEnv>,
+  intent: { actionType: string; creatorTelegramUserId: string },
+): Promise<{ hasSession: boolean; denial?: Response }> {
+  if (!c.req.header("Authorization")?.trim()) {
+    return { hasSession: false };
+  }
+  const session = await authenticateMiniAppSession(c);
+  if (!session.ok) {
+    return {
+      hasSession: false,
+      denial: c.json({ error: session.error }, session.status),
+    };
+  }
+  if (
+    CREATOR_ONLY_INTENTS.has(intent.actionType) &&
+    session.claims.telegramUserId !== intent.creatorTelegramUserId
+  ) {
+    return {
+      hasSession: true,
+      denial: c.json({ error: "Intent belongs to another Telegram user" }, 403),
+    };
+  }
+  return { hasSession: true };
 }
 
 export type IntentRouteEnv = {
@@ -164,6 +183,9 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: "Cross-network intent rejected" }, 409);
     }
 
+    const authCheck = await authorizeOptionalCreatorSession(c, intent);
+    if (authCheck.denial) return authCheck.denial;
+
     const payload = parsePayload(intent.payloadJson);
     let claimDetails:
       | {
@@ -191,12 +213,14 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         ? await repo.countSplitPayments(intent.intentId)
         : undefined;
 
+    const { confirmCode: _omittedConfirmCode, ...publicPayload } = payload;
+
     return c.json({
       intentId: intent.intentId,
       network: intent.network,
       actionType: intent.actionType,
       status: intent.status,
-      payload,
+      payload: publicPayload,
       txHash: intent.txHash,
       expiresAt: intent.expiresAt,
       ...(claimDetails ?? {}),
@@ -246,47 +270,45 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
     if (intent.network !== config.network) {
       return c.json({ error: "Cross-network intent rejected" }, 409);
     }
+
+    const authCheck = await authorizeOptionalCreatorSession(c, intent);
+    if (authCheck.denial) return authCheck.denial;
     if (intent.status !== "pending") {
       return c.json({ error: `Intent already ${intent.status}` }, 409);
     }
 
     const storedPayload = JSON.parse(intent.payloadJson) as {
       message?: string;
+      confirmCode?: string;
       challenge?: { usernameLower?: string };
     };
     if (!storedPayload.message) {
       return c.json({ error: "Corrupted challenge state" }, 500);
     }
 
-    const verifiedInputs = [];
-    for (const acc of parsedBody.accounts) {
-      const ok =
-        acc.kind === "classic"
-          ? await verifyConnectSignature({
-              address: acc.address,
-              message: storedPayload.message,
-              signatureBase64: acc.signatureBase64,
-            })
-          : await verifySmartAccountGuardianSignature({
-              contractAddress: acc.address,
-              guardianAddress: acc.guardianAddress,
-              challengeMessage: storedPayload.message,
-              signatureBase64: acc.signatureBase64,
-            });
-      if (!ok) {
-        return c.json(
-          { error: `Cryptographic signature failed for ${acc.address}` },
-          401,
-        );
-      }
-      verifiedInputs.push({
-        address: acc.address,
-        kind: acc.kind,
-        label: acc.label,
-        isDefault: acc.isDefault,
-        verifiedSigHash: await sha256Hex(acc.signatureBase64),
-      });
+    if (
+      !authCheck.hasSession &&
+      (!parsedBody.confirmCode ||
+        !storedPayload.confirmCode ||
+        !constantTimeEqual(
+          parsedBody.confirmCode.trim().toUpperCase(),
+          storedPayload.confirmCode.trim().toUpperCase(),
+        ))
+    ) {
+      return c.json({ error: "Invalid Telegram confirmation code" }, 403);
     }
+
+    const verification = await verifyConnectAccountSubmissions({
+      config,
+      repo,
+      telegramUserId: intent.creatorTelegramUserId,
+      challengeMessage: storedPayload.message,
+      accounts: parsedBody.accounts,
+    });
+    if (!verification.ok) {
+      return c.json({ error: verification.error }, verification.status);
+    }
+    const verifiedInputs = verification.verifiedInputs;
 
     const linked = await repo.linkVerifiedAddresses({
       telegramUserId: intent.creatorTelegramUserId,
@@ -301,8 +323,11 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
           botToken: config.tgBotToken,
           chatId: intent.chatId,
           text: `✅ <b>Wallet Connected!</b> Linked ${verifiedInputs.length} account(s) on <code>${config.network.toUpperCase()}</code>. Run /balance or /accounts anytime.`,
+          replyMarkup: {
+            inline_keyboard: [[{ text: "Not me — Unlink", callback_data: "unlink_self" }]],
+          },
         },
-        deps.telegramApiDeps,
+        { apiOrigin: config.telegramApiOrigin, ...(deps.telegramApiDeps ?? {}) },
       );
     }
 
@@ -353,6 +378,9 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: "Cross-network intent rejected" }, 409);
     }
 
+    const authCheck = await authorizeOptionalCreatorSession(c, intent);
+    if (authCheck.denial) return authCheck.denial;
+
     const verifyFn =
       deps.verifyTxFn ??
       ((cfg, hash, expected) => verifyTransactionConfirmed(cfg, hash, deps.fetchFn, expected));
@@ -375,7 +403,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
           text,
           replyMarkup,
         },
-        deps.telegramApiDeps,
+        { apiOrigin: config.telegramApiOrigin, ...(deps.telegramApiDeps ?? {}) },
       );
     };
 
@@ -442,6 +470,13 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
           contractId: escrowParsed.data,
           functionName: stage === "funded" ? "create_claim" : "claim",
           firstArgHex: claimId,
+          ...(stage === "funded"
+            ? {
+                expectedAmount: payload.amount,
+                expectedAssetCode: payload.assetCode ?? "XLM",
+                expectedAssetIssuer: payload.assetIssuer,
+              }
+            : {}),
         },
       };
       const txCheck = await verifyFn(config, parsedBody.txHash, expected);
@@ -478,7 +513,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
           amount: payload.amount ?? "0",
           escrowContractId: escrowParsed.data,
           status: "open",
-          expiresAt: parsedBody.expiresAt ?? intent.expiresAt,
+          expiresAt: parsedBody.expiresAt ?? payload.escrowExpiresAt ?? intent.expiresAt,
         });
         await repo.recordSplitPayment({
           intentId: intent.intentId,
@@ -570,12 +605,18 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         return c.json({ error: txCheck.reason }, 409);
       }
 
-      const { paidCount } = await repo.recordSplitPayment({
-        intentId: intent.intentId,
-        payerAddress: parsedBody.payerAddress,
-        txHash: parsedBody.txHash,
-        amount: payload.amount ?? "0",
-      });
+      let paidCount: number;
+      try {
+        const recorded = await repo.recordSplitPayment({
+          intentId: intent.intentId,
+          payerAddress: parsedBody.payerAddress,
+          txHash: parsedBody.txHash,
+          amount: payload.amount ?? "0",
+        });
+        paidCount = recorded.paidCount;
+      } catch {
+        return c.json({ error: "Duplicate split participant or payment already recorded" }, 409);
+      }
       const allTxHashes = await repo.listSplitPaymentTxHashes(intent.intentId);
       const isComplete = paidCount >= participantCount;
       if (isComplete) {
@@ -591,7 +632,13 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
               [
                 {
                   text: `Pay Share (${shareAmount} ${assetCode})`,
-                  url: buildIntentDeepLink(config.pwaOrigin, intent.intentId, intent.hmacSig),
+                  url: buildTelegramMiniAppLink({
+                    botUsername: config.tgBotUsername,
+                    shortName: config.tgMiniAppShortName,
+                    pwaOrigin: config.pwaOrigin,
+                    intentId: intent.intentId,
+                    sig: intent.hmacSig,
+                  }),
                 },
               ],
             ],
@@ -678,7 +725,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         inputAmount: payload.amount ?? "0",
         expectedOutputAmount: payload.expectedOutputAmount ?? "0",
         provider: payload.provider ?? "soroswap",
-        priceImpactPct: payload.priceImpactPct ?? "0",
+        priceImpactPct: payload.priceImpactPct ?? "N/A",
         network: config.network,
         txHash: parsedBody.txHash,
       });

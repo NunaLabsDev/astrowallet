@@ -16,6 +16,7 @@ import {
   type PwaConfig,
   type ScanReport,
   type StellarAddress,
+  type TonAccountSummary,
 } from "@astrowallet/domain";
 import {
   fetchSep42VerifiedAssets,
@@ -24,11 +25,8 @@ import {
 } from "@astrowallet/security-shield";
 import { formatSmartAccountLinkMessage } from "@astrowallet/tg-protocol";
 import {
-  attachSep43WindowProvider,
-  createSep43Provider,
   createSorobanDevClient,
   createStellarClient,
-  createWalletConnectStellarResponder,
   decryptVaultPayload,
   deleteEncryptedVault,
   deriveCounterfactualSmartAccount,
@@ -62,9 +60,38 @@ import {
   type StellarAccountState,
   type TypedMemoInput,
   type VaultAccountMetadata,
-  type WalletConnectStellarRequest,
-  type WalletConnectStellarResponse,
 } from "@astrowallet/stellar-core";
+import {
+  TonConnectCryptoSession,
+  buildSignedTonTransfer,
+  buildTonConnectEventsUrl,
+  buildTonConnectSuccessEvent,
+  createTonClient,
+  deriveTonAccount,
+  parseTonConnectUri,
+  sendTonConnectBridgeMessage,
+  signTonProof,
+  validateTonConnectSendTxRequest,
+  type TonAccountChainState,
+} from "@astrowallet/ton-core";
+import {
+  authenticateTelegramBiometric,
+  getTelegramWebApp,
+  isTelegramBiometricAvailable,
+  tgSecureStorageGet,
+  tgSecureStorageRemove,
+  tgSecureStorageSet,
+  triggerTelegramHaptic,
+  updateTelegramBiometricToken,
+} from "../telegram/webapp.js";
+import { sessionVault } from "./session-vault.js";
+import {
+  clearAllTonConnectSessions,
+  loadTonConnectSessions,
+  removeTonConnectSession,
+  saveTonConnectSession,
+  type StoredTonConnectSession,
+} from "./ton-connect-store.js";
 
 export type VaultStatus = "loading" | "uninitialized" | "locked" | "unlocked";
 
@@ -74,13 +101,22 @@ export interface ToastMessage {
   message: string;
 }
 
-export interface PendingDappConsent {
-  id: number;
-  method: string;
-  origin?: string | undefined;
-  summary: string;
-  scanReport?: ScanReport | undefined;
+export interface PendingTonConnectTxRequest {
+  requestId: string;
+  walletClientId: string;
+  dappClientId: string;
+  dappName: string;
+  dappUrl: string;
+  validUntil: number;
+  messages: Array<{
+    address: string;
+    amountNano: bigint;
+    payload?: string | undefined;
+    stateInit?: string | undefined;
+  }>;
 }
+
+const TG_SECURE_PIN_KEY = "aw_tg_bio_pin";
 
 export interface SendPaymentParams {
   destination: StellarAddress;
@@ -152,10 +188,14 @@ export interface WalletContextValue {
   chainError: string | null;
   fingerprintSupported: boolean;
   fingerprintEnrolled: boolean;
+  telegramBioAvailable: boolean;
   verifiedAssets: readonly VerifiedAssetEntry[];
-  pendingDappConsent: PendingDappConsent | null;
-
-  resolveDappConsent(approved: boolean): void;
+  tonAccount: TonAccountSummary | null;
+  tonState: TonAccountChainState | null;
+  loadingTonChain: boolean;
+  tonChainError: string | null;
+  tonConnectSessions: readonly StoredTonConnectSession[];
+  pendingTonConnectTx: PendingTonConnectTxRequest | null;
 
   setActiveIndex(index: number): void;
   showToast(message: string, kind?: "success" | "info" | "error"): void;
@@ -179,9 +219,18 @@ export interface WalletContextValue {
   }): Promise<ContactEntry>;
   deleteContact(id: string): Promise<void>;
   refreshChainState(): Promise<void>;
+  refreshTonState(): Promise<void>;
   fundActiveTestnetAccount(): Promise<void>;
   fundAnyTestnetAddress(address: ClassicAddress): Promise<void>;
   sendPayment(params: SendPaymentParams): Promise<{ hash: string; ledger: number }>;
+  sendTonPayment(params: {
+    destination: string;
+    amountTon: string;
+    comment?: string | undefined;
+  }): Promise<{ hash: string; bocBase64: string }>;
+  pairTonConnectUri(uri: string): Promise<StoredTonConnectSession>;
+  disconnectTonConnectSession(walletClientId: string): Promise<void>;
+  resolvePendingTonConnectTx(approved: boolean): Promise<void>;
   executePathSwap(params: ExecutePathSwapParams): Promise<{ hash: string; ledger: number }>;
   submitAccountDataEntry(name: string, value: string | null): Promise<{ hash: string; ledger: number }>;
   addOrRemoveTrustline(
@@ -220,9 +269,6 @@ export interface WalletContextValue {
   buildDevTemplateXdr(template: DevTemplateKind): Promise<string>;
   derivePublicKeyPreview(count: number): DerivedPublicKeyPreview[];
   signActiveSep53Message(message: string): Promise<{ signature: string; signerAddress: ClassicAddress }>;
-  handleDappRpcRequest(
-    request: WalletConnectStellarRequest,
-  ): Promise<WalletConnectStellarResponse>;
   signConnectChallenge(
     message: string,
     selectedIndices: readonly number[],
@@ -282,19 +328,31 @@ export function WalletProvider({
   config: PwaConfig;
   children: ReactNode;
 }) {
-  const stellarClient = useMemo(() => createStellarClient(config), [config]);
+  const stellarClient = useMemo(
+    () =>
+      createStellarClient({
+        ...config,
+        sorobanMaxResourceFeeStroops: config.sorobanMaxResourceFeeStroops,
+      }),
+    [config],
+  );
   const sorobanDevClient = useMemo(
     () =>
       createSorobanDevClient({
         rpcUrls: config.rpcUrls,
         horizonUrls: config.horizonUrls,
         networkPassphrase: config.networkPassphrase,
+        maxResourceFeeStroops: config.sorobanMaxResourceFeeStroops,
       }),
-    [config.rpcUrls, config.horizonUrls, config.networkPassphrase],
+    [
+      config.rpcUrls,
+      config.horizonUrls,
+      config.networkPassphrase,
+      config.sorobanMaxResourceFeeStroops,
+    ],
   );
 
   const [vaultStatus, setVaultStatus] = useState<VaultStatus>("loading");
-  const [unlockedMnemonic, setUnlockedMnemonic] = useState<string | null>(null);
   const [accountMetaList, setAccountMetaList] = useState<VaultAccountMetadata[]>([]);
   const [activeIndex, setActiveIndex] = useState<number>(0);
 
@@ -310,18 +368,26 @@ export function WalletProvider({
 
   const [fingerprintSupported, setFingerprintSupported] = useState<boolean>(false);
   const [fingerprintEnrolled, setFingerprintEnrolled] = useState<boolean>(false);
+  const [telegramBioAvailable, setTelegramBioAvailable] = useState<boolean>(false);
   const [verifiedAssets, setVerifiedAssets] = useState<readonly VerifiedAssetEntry[]>([]);
-  const [pendingDappConsent, setPendingDappConsent] = useState<PendingDappConsent | null>(null);
-  const dappConsentResolverRef = useRef<((approved: boolean) => void) | null>(null);
 
-  const resolveDappConsent = useCallback((approved: boolean) => {
-    const resolver = dappConsentResolverRef.current;
-    dappConsentResolverRef.current = null;
-    setPendingDappConsent(null);
-    if (resolver) {
-      resolver(approved);
-    }
-  }, []);
+  const [tonState, setTonState] = useState<TonAccountChainState | null>(null);
+  const [loadingTonChain, setLoadingTonChain] = useState<boolean>(false);
+  const [tonChainError, setTonChainError] = useState<string | null>(null);
+  const [tonConnectSessions, setTonConnectSessions] = useState<StoredTonConnectSession[]>([]);
+  const [pendingTonConnectTx, setPendingTonConnectTx] =
+    useState<PendingTonConnectTxRequest | null>(null);
+  const tonConnectSessionsRef = useRef<StoredTonConnectSession[]>([]);
+  tonConnectSessionsRef.current = tonConnectSessions;
+
+  const tonClient = useMemo(
+    () =>
+      createTonClient({
+        network: config.tonNetwork,
+        rpcUrls: config.tonRpcUrls,
+      }),
+    [config.tonNetwork, config.tonRpcUrls],
+  );
 
   const showToast = useCallback(
     (message: string, kind: "success" | "info" | "error" = "success") => {
@@ -348,19 +414,49 @@ export function WalletProvider({
     [accounts, activeIndex],
   );
 
+  const tonAccount = useMemo<TonAccountSummary | null>(() => {
+    if (vaultStatus !== "unlocked" || !sessionVault.has()) {
+      return null;
+    }
+    try {
+      return sessionVault.withMnemonic((mnemonic) => {
+        const derived = deriveTonAccount(
+          mnemonic,
+          activeAccount?.derivationIndex ?? activeIndex ?? 0,
+          config.tonNetwork,
+          "v4r2",
+        );
+        try {
+          return derived.toSummary();
+        } finally {
+          derived.zeroize();
+        }
+      });
+    } catch {
+      return null;
+    }
+  }, [vaultStatus, activeAccount, activeIndex, config.tonNetwork]);
+
   useEffect(() => {
     let cancelled = false;
     async function init() {
-      const [exists, fpSupported, bioRecord, storedContacts] = await Promise.all([
-        hasEncryptedVault().catch(() => false),
-        isFingerprintSupported().catch(() => false),
-        loadBiometricRecord().catch(() => null),
-        loadContacts().catch(() => []),
-      ]);
+      const [exists, fpSupported, tgBio, bioRecord, tgPin, storedContacts, storedTcSessions] =
+        await Promise.all([
+          hasEncryptedVault().catch(() => false),
+          isFingerprintSupported().catch(() => false),
+          isTelegramBiometricAvailable().catch(() => false),
+          loadBiometricRecord().catch(() => null),
+          tgSecureStorageGet(TG_SECURE_PIN_KEY).catch(() => null),
+          loadContacts().catch(() => []),
+          loadTonConnectSessions().catch(() => []),
+        ]);
       if (cancelled) return;
-      setFingerprintSupported(fpSupported);
-      setFingerprintEnrolled(bioRecord !== null);
+      const bmSaved = Boolean(getTelegramWebApp()?.BiometricManager?.isBiometricTokenSaved);
+      setTelegramBioAvailable(tgBio);
+      setFingerprintSupported(fpSupported || tgBio);
+      setFingerprintEnrolled(bioRecord !== null || Boolean(tgPin) || bmSaved);
       setContacts(storedContacts);
+      setTonConnectSessions(storedTcSessions);
       setVaultStatus(exists ? "locked" : "uninitialized");
     }
     void init();
@@ -433,12 +529,11 @@ export function WalletProvider({
     async <T,>(
       fn: (keypair: ReturnType<ReturnType<typeof deriveStellarAccount>["toKeypair"]>) => Promise<T>,
     ): Promise<T> => {
-      if (!unlockedMnemonic || !activeAccount) {
+      if (!sessionVault.has() || !activeAccount) {
         throw new Error("Vault is locked");
       }
-      const derived = deriveStellarAccount(
-        unlockedMnemonic,
-        activeAccount.derivationIndex ?? 0,
+      const derived = sessionVault.withMnemonic((mnemonic) =>
+        deriveStellarAccount(mnemonic, activeAccount.derivationIndex ?? 0),
       );
       try {
         return await fn(derived.toKeypair());
@@ -446,79 +541,405 @@ export function WalletProvider({
         derived.zeroize();
       }
     },
-    [unlockedMnemonic, activeAccount],
+    [activeAccount],
   );
 
-  // Register SEP-43 / SEP-60 window.stellar provider while vault is unlocked
+  // Zeroize session mnemonic buffers deterministically on tab unload/hide
   useEffect(() => {
-    if (vaultStatus !== "unlocked" || !unlockedMnemonic || !activeAccount) {
+    if (typeof window === "undefined") return undefined;
+    const handleUnload = () => {
+      sessionVault.clear();
+    };
+    window.addEventListener("pagehide", handleUnload);
+    window.addEventListener("beforeunload", handleUnload);
+    return () => {
+      window.removeEventListener("pagehide", handleUnload);
+      window.removeEventListener("beforeunload", handleUnload);
+      sessionVault.clear();
+    };
+  }, []);
+
+  const refreshTonState = useCallback(async () => {
+    if (!tonAccount || config.tonRpcUrls.length === 0) {
+      setTonState(null);
+      return;
+    }
+    setLoadingTonChain(true);
+    setTonChainError(null);
+    try {
+      const state = await tonClient.getAccountState(tonAccount.friendlyAddress);
+      setTonState(state);
+    } catch (err) {
+      setTonChainError(err instanceof Error ? err.message : "Failed to fetch TON account state");
+    } finally {
+      setLoadingTonChain(false);
+    }
+  }, [tonAccount, tonClient, config.tonRpcUrls.length]);
+
+  useEffect(() => {
+    if (vaultStatus === "unlocked" && tonAccount && config.tonRpcUrls.length > 0) {
+      void refreshTonState();
+    } else {
+      setTonState(null);
+      setTonChainError(null);
+    }
+  }, [vaultStatus, tonAccount, config.tonRpcUrls.length, refreshTonState]);
+
+  const sendTonPayment = useCallback(
+    async (params: {
+      destination: string;
+      amountTon: string;
+      comment?: string | undefined;
+    }) => {
+      if (!sessionVault.has() || !activeAccount) {
+        throw new Error("Vault is locked");
+      }
+      if (config.tonRpcUrls.length === 0) {
+        throw new Error("VITE_TON_RPC_URLS is not configured");
+      }
+      const res = await sessionVault.withMnemonic(async (mnemonic) => {
+        const derived = deriveTonAccount(
+          mnemonic,
+          activeAccount.derivationIndex ?? activeIndex ?? 0,
+          config.tonNetwork,
+          "v4r2",
+        );
+        try {
+          return await tonClient.sendTonTransfer({
+            account: derived,
+            destination: params.destination,
+            amountTon: params.amountTon,
+            comment: params.comment,
+          });
+        } finally {
+          derived.zeroize();
+        }
+      });
+      await refreshTonState();
+      showToast(`Broadcasted ${params.amountTon} TON cleanly`);
+      return res;
+    },
+    [activeAccount, activeIndex, config.tonNetwork, config.tonRpcUrls.length, tonClient, refreshTonState, showToast],
+  );
+
+  const pairTonConnectUri = useCallback(
+    async (uri: string): Promise<StoredTonConnectSession> => {
+      if (vaultStatus !== "unlocked" || !sessionVault.has() || !tonAccount) {
+        throw new Error("Unlock your vault before connecting TON apps");
+      }
+      if (!config.tonBridgeUrl) {
+        throw new Error("VITE_TON_BRIDGE_URL is not configured");
+      }
+
+      const parsed = parseTonConnectUri(uri);
+      const manifestOrigin = new URL(parsed.manifestUrl);
+      let dappName = manifestOrigin.hostname;
+      let dappUrl = manifestOrigin.origin;
+
+      try {
+        const manifestRes = await fetch(parsed.manifestUrl, { signal: AbortSignal.timeout(4000) });
+        if (manifestRes.ok) {
+          const m = (await manifestRes.json()) as { name?: unknown; url?: unknown };
+          if (typeof m.name === "string" && m.name.trim()) {
+            dappName = m.name.trim().slice(0, 64);
+          }
+          if (typeof m.url === "string" && m.url.trim().startsWith("http")) {
+            dappUrl = m.url.trim();
+          }
+        }
+      } catch {
+        // Fallback cleanly to manifest hostname when manifest lacks CORS headers
+      }
+
+      const cryptoSess = new TonConnectCryptoSession();
+      const timestamp = Math.floor(Date.now() / 1000);
+      const proofItem = parsed.items.find((i) => i.name === "ton_proof" && i.payload);
+      let tonProof:
+        | { timestamp: number; domain: string; payload: string; signatureBase64: string }
+        | undefined;
+
+      if (proofItem?.payload) {
+        const domain = new URL(dappUrl).hostname;
+        const signatureBase64 = sessionVault.withMnemonic((mnemonic) => {
+          const derived = deriveTonAccount(
+            mnemonic,
+            activeAccount?.derivationIndex ?? activeIndex ?? 0,
+            config.tonNetwork,
+            "v4r2",
+          );
+          try {
+            return signTonProof({
+              rawAddress: derived.rawAddress,
+              domain,
+              timestamp,
+              payload: proofItem.payload!,
+              secretKey: derived.secretKey,
+            });
+          } finally {
+            derived.zeroize();
+          }
+        });
+        tonProof = { timestamp, domain, payload: proofItem.payload, signatureBase64 };
+      }
+
+      const connectEventJson = buildTonConnectSuccessEvent({
+        rawAddress: tonAccount.rawAddress,
+        network: config.tonNetwork,
+        walletStateInitBase64: tonAccount.walletStateInitBase64,
+        publicKeyHex: tonAccount.publicKeyHex,
+        ...(tonProof ? { tonProof } : {}),
+      });
+
+      const sealed = cryptoSess.encrypt(connectEventJson, parsed.clientId);
+      await sendTonConnectBridgeMessage({
+        bridgeUrl: config.tonBridgeUrl,
+        clientId: cryptoSess.clientId,
+        to: parsed.clientId,
+        payloadBase64: sealed,
+      });
+
+      const stored: StoredTonConnectSession = {
+        walletClientId: cryptoSess.clientId,
+        walletSecretHex: cryptoSess.secretKeyHex,
+        dappClientId: parsed.clientId,
+        dappName,
+        dappUrl,
+        manifestUrl: parsed.manifestUrl,
+        network: config.tonNetwork,
+        connectedAddress: tonAccount.rawAddress,
+        createdAt: timestamp,
+      };
+      await saveTonConnectSession(stored);
+      setTonConnectSessions((prev) => [
+        stored,
+        ...prev.filter((s) => s.dappClientId !== stored.dappClientId),
+      ]);
+      triggerTelegramHaptic("success");
+      showToast(`Connected to ${dappName} via TON Connect`);
+      return stored;
+    },
+    [
+      vaultStatus,
+      tonAccount,
+      activeAccount,
+      activeIndex,
+      config.tonBridgeUrl,
+      config.tonNetwork,
+      showToast,
+    ],
+  );
+
+  const disconnectTonConnectSession = useCallback(
+    async (walletClientId: string) => {
+      const target = tonConnectSessionsRef.current.find(
+        (s) => s.walletClientId === walletClientId,
+      );
+      if (target && config.tonBridgeUrl) {
+        try {
+          const sess = new TonConnectCryptoSession(target.walletSecretHex);
+          const msg = JSON.stringify({ event: "disconnect", id: Date.now(), payload: {} });
+          await sendTonConnectBridgeMessage({
+            bridgeUrl: config.tonBridgeUrl,
+            clientId: target.walletClientId,
+            to: target.dappClientId,
+            payloadBase64: sess.encrypt(msg, target.dappClientId),
+          });
+        } catch {
+          // Best-effort bridge notification
+        }
+      }
+      await removeTonConnectSession(walletClientId);
+      setTonConnectSessions((prev) => prev.filter((s) => s.walletClientId !== walletClientId));
+      setPendingTonConnectTx((prev) =>
+        prev?.walletClientId === walletClientId ? null : prev,
+      );
+      showToast("Disconnected TON Connect session", "info");
+    },
+    [config.tonBridgeUrl, showToast],
+  );
+
+  const resolvePendingTonConnectTx = useCallback(
+    async (approved: boolean) => {
+      const req = pendingTonConnectTx;
+      if (!req) return;
+      setPendingTonConnectTx(null);
+      const sessRecord = tonConnectSessionsRef.current.find(
+        (s) => s.walletClientId === req.walletClientId,
+      );
+      if (!sessRecord || !config.tonBridgeUrl) return;
+      const cryptoSess = new TonConnectCryptoSession(sessRecord.walletSecretHex);
+
+      if (!approved) {
+        const errPayload = JSON.stringify({
+          id: req.requestId,
+          error: { code: 300, message: "User rejected TON Connect transaction" },
+        });
+        await sendTonConnectBridgeMessage({
+          bridgeUrl: config.tonBridgeUrl,
+          clientId: sessRecord.walletClientId,
+          to: req.dappClientId,
+          payloadBase64: cryptoSess.encrypt(errPayload, req.dappClientId),
+        }).catch(() => undefined);
+        triggerTelegramHaptic("warning");
+        showToast("Rejected TON Connect request", "info");
+        return;
+      }
+
+      if (!sessionVault.has()) {
+        throw new Error("Unlock your vault to sign TON Connect transactions");
+      }
+
+      const bocBase64 = await sessionVault.withMnemonic(async (mnemonic) => {
+        const derived = deriveTonAccount(
+          mnemonic,
+          activeAccount?.derivationIndex ?? activeIndex ?? 0,
+          config.tonNetwork,
+          "v4r2",
+        );
+        try {
+          const chainState = await tonClient.getAccountState(derived.friendlyAddress);
+          const boc = buildSignedTonTransfer({
+            account: derived,
+            seqno: chainState.seqno,
+            validUntil: req.validUntil,
+            messages: req.messages.map((m) => ({
+              destination: m.address,
+              amountNano: m.amountNano,
+              payloadCellBase64: m.payload,
+              stateInitBase64: m.stateInit,
+            })),
+          });
+          await tonClient.broadcastBoc(boc);
+          return boc;
+        } finally {
+          derived.zeroize();
+        }
+      });
+
+      const okPayload = JSON.stringify({ id: req.requestId, result: bocBase64 });
+      await sendTonConnectBridgeMessage({
+        bridgeUrl: config.tonBridgeUrl,
+        clientId: sessRecord.walletClientId,
+        to: req.dappClientId,
+        payloadBase64: cryptoSess.encrypt(okPayload, req.dappClientId),
+      });
+      triggerTelegramHaptic("success");
+      await refreshTonState();
+      showToast(`Signed TON Connect transaction for ${req.dappName}`);
+    },
+    [
+      pendingTonConnectTx,
+      config.tonBridgeUrl,
+      config.tonNetwork,
+      activeAccount,
+      activeIndex,
+      tonClient,
+      refreshTonState,
+      showToast,
+    ],
+  );
+
+  // Live TON Connect v2 SSE listener while Mini App vault is unlocked
+  useEffect(() => {
+    if (
+      vaultStatus !== "unlocked" ||
+      !config.tonBridgeUrl ||
+      tonConnectSessions.length === 0 ||
+      typeof EventSource === "undefined"
+    ) {
       return undefined;
     }
 
-    const provider = createSep43Provider({
-      network: config.network,
-      networkPassphrase: config.networkPassphrase,
-      horizonUrls: config.horizonUrls,
-      getKeypair: () => {
-        const derived = deriveStellarAccount(
-          unlockedMnemonic,
-          activeAccount.derivationIndex ?? 0,
+    const clientIds = tonConnectSessions.map((s) => s.walletClientId);
+    const lastEventId = tonConnectSessions.find((s) => s.lastEventId)?.lastEventId;
+    const eventsUrl = buildTonConnectEventsUrl(config.tonBridgeUrl, clientIds, lastEventId);
+    const source = new EventSource(eventsUrl);
+
+    source.onmessage = (evt: MessageEvent<string>) => {
+      try {
+        const packet = JSON.parse(evt.data) as { from?: string; message?: string };
+        if (!packet.from || !packet.message) return;
+        const matched = tonConnectSessionsRef.current.find(
+          (s) => s.dappClientId === packet.from,
         );
-        const kp = derived.toKeypair();
-        derived.zeroize();
-        return kp;
-      },
-      authorizeRequest: async (ctx) => {
-        const rawXdr = typeof ctx.params.xdr === "string" ? ctx.params.xdr : undefined;
-        let scanReport: ScanReport | undefined;
-        if (rawXdr) {
-          const scan = scanTransactionEnvelopeXdr(rawXdr, {
-            networkPassphrase: config.networkPassphrase,
-            verifiedAssets,
-          });
-          scanReport = scan.report;
-          if (scan.report.verdict === "malicious") {
-            throw new Error(
-              `Scan & Shield blocked malicious dApp XDR: ${scan.report.findings[0]?.title ?? "drainer detected"}`,
-            );
+        if (!matched) return;
+
+        if (evt.lastEventId) {
+          const updated = { ...matched, lastEventId: evt.lastEventId };
+          void saveTonConnectSession(updated).catch(() => undefined);
+        }
+
+        const cryptoSess = new TonConnectCryptoSession(matched.walletSecretHex);
+        const decrypted = cryptoSess.decrypt(packet.message, matched.dappClientId);
+        const rpc = JSON.parse(decrypted) as {
+          id?: string;
+          method?: string;
+          params?: unknown[];
+        };
+
+        if (rpc.method === "disconnect") {
+          void removeTonConnectSession(matched.walletClientId);
+          setTonConnectSessions((prev) =>
+            prev.filter((s) => s.walletClientId !== matched.walletClientId),
+          );
+          showToast(`${matched.dappName} disconnected`, "info");
+          return;
+        }
+
+        if (rpc.method === "sendTransaction" && rpc.id) {
+          const rawFirst = rpc.params?.[0];
+          const txReq =
+            typeof rawFirst === "string"
+              ? (JSON.parse(rawFirst) as Record<string, unknown>)
+              : (rawFirst as Record<string, unknown> | undefined);
+          if (!txReq) return;
+
+          const validated = validateTonConnectSendTxRequest(
+            {
+              id: rpc.id,
+              validUntil:
+                typeof txReq.validUntil === "number" ? txReq.validUntil : undefined,
+              network: typeof txReq.network === "string" ? txReq.network : undefined,
+              from: typeof txReq.from === "string" ? txReq.from : undefined,
+              messages: Array.isArray(txReq.messages) ? txReq.messages : [],
+            },
+            config.tonNetwork,
+          );
+
+          if (!validated.ok) {
+            const errJson = JSON.stringify({
+              id: rpc.id,
+              error: { code: validated.code, message: validated.message },
+            });
+            void sendTonConnectBridgeMessage({
+              bridgeUrl: config.tonBridgeUrl!,
+              clientId: matched.walletClientId,
+              to: matched.dappClientId,
+              payloadBase64: cryptoSess.encrypt(errJson, matched.dappClientId),
+            }).catch(() => undefined);
+            return;
           }
-        }
 
-        if (dappConsentResolverRef.current) {
-          dappConsentResolverRef.current(false);
-          dappConsentResolverRef.current = null;
-        }
-
-        const msgPreview =
-          typeof ctx.params.message === "string"
-            ? ctx.params.message.slice(0, 140)
-            : rawXdr
-              ? `${scanReport?.operationsCount ?? 1} operation(s), verdict: ${scanReport?.verdict.toUpperCase() ?? "UNKNOWN"}`
-              : "Soroban authorization entry";
-
-        return new Promise<boolean>((resolve) => {
-          dappConsentResolverRef.current = resolve;
-          setPendingDappConsent({
-            id: Date.now(),
-            method: ctx.method,
-            origin: ctx.origin,
-            summary: msgPreview,
-            scanReport,
+          triggerTelegramHaptic("warning");
+          setPendingTonConnectTx({
+            requestId: rpc.id,
+            walletClientId: matched.walletClientId,
+            dappClientId: matched.dappClientId,
+            dappName: matched.dappName,
+            dappUrl: matched.dappUrl,
+            validUntil: validated.validUntil,
+            messages: validated.messages,
           });
-        });
-      },
-    });
-
-    const detach = attachSep43WindowProvider(provider);
-    return () => {
-      detach();
-      if (dappConsentResolverRef.current) {
-        dappConsentResolverRef.current(false);
-        dappConsentResolverRef.current = null;
+        }
+      } catch {
+        // Ignore malformed bridge events
       }
-      setPendingDappConsent(null);
     };
-  }, [vaultStatus, unlockedMnemonic, activeAccount, config, verifiedAssets]);
+
+    return () => {
+      source.close();
+    };
+  }, [vaultStatus, config.tonBridgeUrl, config.tonNetwork, tonConnectSessions, showToast]);
 
   const createOrImportVault = useCallback(
     async (mnemonic: string, pinOrPassphrase: string, initialLabel = "Primary") => {
@@ -546,7 +967,7 @@ export function WalletProvider({
       });
       await saveEncryptedVault(envelope);
 
-      setUnlockedMnemonic(payload.mnemonic);
+      sessionVault.set(payload.mnemonic);
       setAccountMetaList(initialAccounts);
       setActiveIndex(0);
       setVaultStatus("unlocked");
@@ -563,16 +984,27 @@ export function WalletProvider({
     const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
       deriveKeyFn: deriveKeyInWorker,
     });
-    setUnlockedMnemonic(decrypted.mnemonic);
+    sessionVault.set(decrypted.mnemonic);
     setAccountMetaList(decrypted.accounts);
     setActiveIndex(decrypted.accounts[0]?.index ?? 0);
     setVaultStatus("unlocked");
   }, []);
 
   const unlockWithBiometric = useCallback(async () => {
+    if (telegramBioAvailable) {
+      const bio = await authenticateTelegramBiometric("Unlock your AstroWallet vault");
+      if (bio.authenticated) {
+        const pinFromBio =
+          bio.token || (await tgSecureStorageGet(TG_SECURE_PIN_KEY));
+        if (pinFromBio) {
+          await unlockWithPin(pinFromBio);
+          return;
+        }
+      }
+    }
     const pin = await unlockWithFingerprint(resolveWebAuthnRpId(config.pwaOrigin));
     await unlockWithPin(pin);
-  }, [unlockWithPin, config.pwaOrigin]);
+  }, [telegramBioAvailable, unlockWithPin, config.pwaOrigin]);
 
   const enableFingerprint = useCallback(
     async (pinOrPassphrase: string) => {
@@ -583,6 +1015,25 @@ export function WalletProvider({
       await decryptVaultPayload(envelope, pinOrPassphrase, {
         deriveKeyFn: deriveKeyInWorker,
       });
+
+      if (telegramBioAvailable) {
+        const bio = await authenticateTelegramBiometric(
+          "Enable Telegram biometric unlock for AstroWallet",
+        );
+        if (!bio.authenticated) {
+          return { enrolled: false, message: "Telegram biometric permission was not granted." };
+        }
+        const savedBm = await updateTelegramBiometricToken(pinOrPassphrase);
+        const savedStore = await tgSecureStorageSet(TG_SECURE_PIN_KEY, pinOrPassphrase);
+        if (savedBm || savedStore) {
+          setFingerprintEnrolled(true);
+          return {
+            enrolled: true,
+            message: "Telegram Biometrics + device SecureStorage quick-unlock enabled.",
+          };
+        }
+      }
+
       const res = await enrollFingerprintUnlock(
         pinOrPassphrase,
         "AstroWallet",
@@ -594,10 +1045,12 @@ export function WalletProvider({
       }
       return { enrolled: false, message: res.reason };
     },
-    [config.pwaOrigin],
+    [telegramBioAvailable, config.pwaOrigin],
   );
 
   const disableFingerprint = useCallback(async () => {
+    await updateTelegramBiometricToken("").catch(() => false);
+    await tgSecureStorageRemove(TG_SECURE_PIN_KEY).catch(() => false);
     await disableFingerprintUnlock();
     setFingerprintEnrolled(false);
   }, []);
@@ -609,7 +1062,7 @@ export function WalletProvider({
         deriveKeyFn: deriveKeyInWorker,
       });
       await saveEncryptedVault(envelope);
-      setUnlockedMnemonic(decrypted.mnemonic);
+      sessionVault.set(decrypted.mnemonic);
       setAccountMetaList(decrypted.accounts);
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setVaultStatus("unlocked");
@@ -639,7 +1092,7 @@ export function WalletProvider({
 
   const addDerivedAccount = useCallback(
     async (label: string, pinOrPassphrase: string): Promise<LinkedAccount> => {
-      if (!unlockedMnemonic) {
+      if (!sessionVault.has()) {
         throw new Error("Unlock your vault before deriving a new account");
       }
       const envelope = await loadEncryptedVault();
@@ -683,7 +1136,7 @@ export function WalletProvider({
       showToast(`Derived ${cleanLabel} (m/44'/148'/${nextIndex}')`);
       return linked;
     },
-    [unlockedMnemonic, showToast],
+    [showToast],
   );
 
   const renameDerivedAccount = useCallback(
@@ -757,13 +1210,10 @@ export function WalletProvider({
   );
 
   const lockVault = useCallback(() => {
-    if (dappConsentResolverRef.current) {
-      dappConsentResolverRef.current(false);
-      dappConsentResolverRef.current = null;
-    }
-    setPendingDappConsent(null);
-    setUnlockedMnemonic(null);
+    setPendingTonConnectTx(null);
+    sessionVault.clear();
     setAccountState(null);
+    setTonState(null);
     setRecentPayments([]);
     setClaimableBalances([]);
     setOpenOffers([]);
@@ -822,15 +1272,16 @@ export function WalletProvider({
   }, [vaultStatus, lockVault, showToast]);
 
   const wipeLocalVault = useCallback(async () => {
-    if (dappConsentResolverRef.current) {
-      dappConsentResolverRef.current(false);
-      dappConsentResolverRef.current = null;
-    }
-    setPendingDappConsent(null);
+    setPendingTonConnectTx(null);
+    await updateTelegramBiometricToken("").catch(() => false);
+    await tgSecureStorageRemove(TG_SECURE_PIN_KEY).catch(() => false);
+    await clearAllTonConnectSessions().catch(() => undefined);
     await deleteEncryptedVault();
-    setUnlockedMnemonic(null);
+    sessionVault.clear();
     setAccountMetaList([]);
     setAccountState(null);
+    setTonState(null);
+    setTonConnectSessions([]);
     setRecentPayments([]);
     setClaimableBalances([]);
     setOpenOffers([]);
@@ -1116,40 +1567,42 @@ export function WalletProvider({
 
   const derivePublicKeyPreview = useCallback(
     (count: number): DerivedPublicKeyPreview[] => {
-      if (!unlockedMnemonic) {
+      if (!sessionVault.has()) {
         throw new Error("Unlock vault to inspect SEP-0005 derivation table");
       }
       const clamped = Math.max(1, Math.min(10, Math.trunc(count)));
-      const rows: DerivedPublicKeyPreview[] = [];
-      for (let i = 0; i < clamped; i += 1) {
-        const derived = deriveStellarAccount(unlockedMnemonic, i);
-        try {
-          let smartAddr: string | undefined;
-          if (config.smartAccountWasmHash) {
-            try {
-              smartAddr = deriveCounterfactualSmartAccount({
-                guardianAddress: derived.publicKey,
-                wasmHashHex: config.smartAccountWasmHash,
-                networkPassphrase: config.networkPassphrase,
-              }).contractAddress;
-            } catch {
-              smartAddr = undefined;
+      return sessionVault.withMnemonic((mnemonic) => {
+        const rows: DerivedPublicKeyPreview[] = [];
+        for (let i = 0; i < clamped; i += 1) {
+          const derived = deriveStellarAccount(mnemonic, i);
+          try {
+            let smartAddr: string | undefined;
+            if (config.smartAccountWasmHash) {
+              try {
+                smartAddr = deriveCounterfactualSmartAccount({
+                  guardianAddress: derived.publicKey,
+                  wasmHashHex: config.smartAccountWasmHash,
+                  networkPassphrase: config.networkPassphrase,
+                }).contractAddress;
+              } catch {
+                smartAddr = undefined;
+              }
             }
+            rows.push({
+              index: derived.index,
+              derivationPath: derived.derivationPath,
+              publicKey: derived.publicKey,
+              rawHex: publicKeyToRawHex(derived.publicKey),
+              counterfactualSmartAddress: smartAddr,
+            });
+          } finally {
+            derived.zeroize();
           }
-          rows.push({
-            index: derived.index,
-            derivationPath: derived.derivationPath,
-            publicKey: derived.publicKey,
-            rawHex: publicKeyToRawHex(derived.publicKey),
-            counterfactualSmartAddress: smartAddr,
-          });
-        } finally {
-          derived.zeroize();
         }
-      }
-      return rows;
+        return rows;
+      });
     },
-    [unlockedMnemonic, config.smartAccountWasmHash, config.networkPassphrase],
+    [config.smartAccountWasmHash, config.networkPassphrase],
   );
 
   const signActiveSep53Message = useCallback(
@@ -1162,92 +1615,60 @@ export function WalletProvider({
     [withActiveKeypair],
   );
 
-  const handleDappRpcRequest = useCallback(
-    async (request: WalletConnectStellarRequest): Promise<WalletConnectStellarResponse> => {
-      return withActiveKeypair(async (keypair) => {
-        const responder = createWalletConnectStellarResponder({
-          network: config.network,
-          networkPassphrase: config.networkPassphrase,
-          horizonUrls: config.horizonUrls,
-          getKeypair: () => keypair,
-          authorizeRequest: async (ctx) => {
-            const rawXdr = typeof ctx.params.xdr === "string" ? ctx.params.xdr : undefined;
-            if (rawXdr) {
-              const scan = scanTransactionEnvelopeXdr(rawXdr, {
-                networkPassphrase: config.networkPassphrase,
-                verifiedAssets,
-              });
-              if (scan.report.verdict === "malicious") {
-                throw new Error(
-                  `Scan & Shield blocked malicious dApp transaction: ${scan.report.findings[0]?.title ?? "threat detected"}`,
-                );
-              }
-            }
-            return true;
-          },
-        });
-        const response = await responder.handleRequest(request);
-        if (request.method === "stellar_signAndSubmitXDR") {
-          await refreshChainState();
-        }
-        return response;
-      });
-    },
-    [withActiveKeypair, config, verifiedAssets, refreshChainState],
-  );
-
   const signConnectChallenge = useCallback(
     async (
       message: string,
       selectedIndices: readonly number[],
       includePairedSmartAccount = false,
     ): Promise<SignedConnectAccountProof[]> => {
-      if (!unlockedMnemonic) {
-        throw new Error("Unlock your wallet first to sign the Telegram link challenge");
+      if (!sessionVault.has()) {
+        throw new Error("Unlock your vault first to sign the Telegram link challenge");
       }
       const chosen = accountMetaList.filter((m) => selectedIndices.includes(m.index));
       if (chosen.length === 0) {
         throw new Error("Select at least one account to link");
       }
 
-      const proofs: SignedConnectAccountProof[] = [];
-      for (let i = 0; i < chosen.length; i += 1) {
-        const meta = chosen[i];
-        if (!meta) continue;
-        const derived = deriveStellarAccount(unlockedMnemonic, meta.index);
-        try {
-          const kp = derived.toKeypair();
-          const signatureBase64 = signChallengeMessage(kp, message);
-          proofs.push({
-            address: derived.publicKey,
-            kind: "classic",
-            label: meta.label,
-            isDefault: i === 0,
-            signatureBase64,
-          });
-          if (i === 0 && includePairedSmartAccount && config.smartAccountWasmHash) {
-            const smart = deriveCounterfactualSmartAccount({
-              guardianAddress: derived.publicKey,
-              wasmHashHex: config.smartAccountWasmHash,
-              networkPassphrase: config.networkPassphrase,
-            });
-            const boundMsg = formatSmartAccountLinkMessage(message, smart.contractAddress);
+      return sessionVault.withMnemonic((mnemonic) => {
+        const proofs: SignedConnectAccountProof[] = [];
+        for (let i = 0; i < chosen.length; i += 1) {
+          const meta = chosen[i];
+          if (!meta) continue;
+          const derived = deriveStellarAccount(mnemonic, meta.index);
+          try {
+            const kp = derived.toKeypair();
+            const signatureBase64 = signChallengeMessage(kp, message);
             proofs.push({
-              address: smart.contractAddress,
-              kind: "smart",
-              label: `${meta.label} Smart`,
-              isDefault: false,
-              guardianAddress: derived.publicKey,
-              signatureBase64: signChallengeMessage(kp, boundMsg),
+              address: derived.publicKey,
+              kind: "classic",
+              label: meta.label,
+              isDefault: i === 0,
+              signatureBase64,
             });
+            if (i === 0 && includePairedSmartAccount && config.smartAccountWasmHash) {
+              const smart = deriveCounterfactualSmartAccount({
+                guardianAddress: derived.publicKey,
+                wasmHashHex: config.smartAccountWasmHash,
+                networkPassphrase: config.networkPassphrase,
+              });
+              const boundMsg = formatSmartAccountLinkMessage(message, smart.contractAddress);
+              proofs.push({
+                address: smart.contractAddress,
+                kind: "smart",
+                label: `${meta.label} Smart`,
+                isDefault: false,
+                guardianAddress: derived.publicKey,
+                signatureBase64: signChallengeMessage(kp, boundMsg),
+              });
+            }
+          } finally {
+            derived.zeroize();
           }
-        } finally {
-          derived.zeroize();
         }
-      }
-      return proofs;
+        return proofs;
+      });
     },
-    [unlockedMnemonic, accountMetaList, config.smartAccountWasmHash, config.networkPassphrase],
+    [accountMetaList, config.smartAccountWasmHash, config.networkPassphrase],
   );
 
   const fundClaimEscrow = useCallback(
@@ -1307,9 +1728,14 @@ export function WalletProvider({
     chainError,
     fingerprintSupported,
     fingerprintEnrolled,
+    telegramBioAvailable,
     verifiedAssets,
-    pendingDappConsent,
-    resolveDappConsent,
+    tonAccount,
+    tonState,
+    loadingTonChain,
+    tonChainError,
+    tonConnectSessions,
+    pendingTonConnectTx,
     setActiveIndex,
     showToast,
     dismissToast,
@@ -1328,9 +1754,14 @@ export function WalletProvider({
     saveContact,
     deleteContact,
     refreshChainState,
+    refreshTonState,
     fundActiveTestnetAccount,
     fundAnyTestnetAddress,
     sendPayment,
+    sendTonPayment,
+    pairTonConnectUri,
+    disconnectTonConnectSession,
+    resolvePendingTonConnectTx,
     executePathSwap,
     submitAccountDataEntry,
     addOrRemoveTrustline,
@@ -1346,7 +1777,6 @@ export function WalletProvider({
     buildDevTemplateXdr,
     derivePublicKeyPreview,
     signActiveSep53Message,
-    handleDappRpcRequest,
     signConnectChallenge,
     fundClaimEscrow,
     claimFromEscrow,

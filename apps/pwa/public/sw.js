@@ -1,5 +1,5 @@
 /* global self, caches, fetch, URL, Response */
-const CACHE_NAME = "astrowallet-shell-v1";
+const CACHE_NAME = "astrowallet-tma-v2";
 const STATIC_ASSETS = [
   "/manifest.webmanifest",
   "/favicon.svg",
@@ -34,6 +34,7 @@ self.addEventListener("fetch", (event) => {
 
   if (
     url.pathname.startsWith("/v1/") ||
+    url.pathname.startsWith("/intent/") ||
     url.pathname.startsWith("/tg/") ||
     url.pathname.startsWith("/webhooks/") ||
     url.pathname === "/health"

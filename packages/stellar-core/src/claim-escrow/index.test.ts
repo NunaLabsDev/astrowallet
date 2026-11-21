@@ -6,7 +6,9 @@ import {
   buildClaimEscrowSignPayload,
   buildClaimOperation,
   buildCreateClaimOperation,
+  buildExtendClaimTtlOperation,
   buildRefundExpiredOperation,
+  buildRefundExpiredToOperation,
   generateEphemeralClaimKey,
   signClaimEscrowPayload,
 } from "./index.js";
@@ -92,6 +94,7 @@ describe("Claim Escrow V2 Ephemeral Ed25519 Contract Helpers", () => {
       amountStroops: 100_000_000n,
       claimPubkeyHex: ephemeral.publicKeyHex,
       expiresAtUnix: 1_900_000_000,
+      cancellable: false,
     });
     const claimOp = buildClaimOperation({
       escrowContractId: ESCROW_ZERO,
@@ -107,10 +110,26 @@ describe("Claim Escrow V2 Ephemeral Ed25519 Contract Helpers", () => {
       escrowContractId: ESCROW_ZERO,
       claimIdHex,
     });
+    const refundToOp = buildRefundExpiredToOperation({
+      escrowContractId: ESCROW_ZERO,
+      claimIdHex,
+      recipientAddress: RECIPIENT_ZERO,
+    });
+    const extendTtlOp = buildExtendClaimTtlOperation({
+      escrowContractId: ESCROW_ZERO,
+      claimIdHex,
+    });
 
     expect(createOp.body.type).toBe("invokeHostFunction");
+    const invokeFn = createOp.body.invokeHostFunctionOp.hostFunction;
+    if (invokeFn.type === "hostFunctionTypeInvokeContract") {
+      expect(invokeFn.invokeContract.args).toHaveLength(7);
+      expect(invokeFn.invokeContract.args[6]?.type).toBe("scvBool");
+    }
     expect(claimOp.body.type).toBe("invokeHostFunction");
     expect(cancelOp.body.type).toBe("invokeHostFunction");
     expect(refundOp.body.type).toBe("invokeHostFunction");
+    expect(refundToOp.body.type).toBe("invokeHostFunction");
+    expect(extendTtlOp.body.type).toBe("invokeHostFunction");
   });
 });

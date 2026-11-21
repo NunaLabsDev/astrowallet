@@ -107,14 +107,21 @@ export function deriveCounterfactualSmartAccount(
 /**
  * Builds the Soroban `createCustomContract` CAP-46 operation deploying a counterfactual
  * Smart Account C... deterministically from the user's G... guardian address and salt.
+ * Requires non-empty `constructorArgs` so uninitialized smart accounts cannot be deployed.
  */
 export function buildDeploySmartAccountOperation(input: {
   guardianAddress: ClassicAddress;
   wasmHashHex: string;
   saltHex: string;
+  constructorArgs: readonly xdr.ScVal[];
 }): xdr.Operation {
   if (!StrKey.isValidEd25519PublicKey(input.guardianAddress)) {
     throw new Error("guardianAddress must be a valid Classic G... address");
+  }
+  if (!Array.isArray(input.constructorArgs) || input.constructorArgs.length === 0) {
+    throw new Error(
+      "constructorArgs must be non-empty when deploying a Soroban Smart Account",
+    );
   }
   const wasmHash = hexToBytes(input.wasmHashHex, 32);
   const salt = hexToBytes(input.saltHex, 32);
@@ -123,6 +130,7 @@ export function buildDeploySmartAccountOperation(input: {
     address: new Address(input.guardianAddress),
     wasmHash: wasmHash,
     salt: salt,
+    constructorArgs: [...input.constructorArgs],
   });
 }
 
@@ -176,40 +184,53 @@ export type RelaySubmissionPayload =
       signedTxXdrBase64: string;
     };
 
-export interface GuardianRecoveryRotationInput {
+export interface UpdateContextRuleInput {
   contractAddress: ContractAddress;
-  currentGuardianAddress: ClassicAddress;
-  newGuardianAddress: ClassicAddress;
-  newPasskeyPubKeyHex?: string | undefined;
+  contextRuleId: number;
+  name: string;
+  validUntil?: number | undefined;
+  signers: readonly xdr.ScVal[];
+  policies?: readonly xdr.ScVal[] | undefined;
 }
 
 /**
- * Builds a Soroban `rotate_guardian` invocation to rotate a Smart Account's G... Recovery Guardian
- * (and optional secp256r1 passkey signer) cleanly on-chain.
+ * Builds an OpenZeppelin Stellar Smart Account `update_context_rule` invocation
+ * updating signers, policies, and optional expiration for an authorization context rule.
  */
-export function buildGuardianRecoveryRotationOperation(
-  input: GuardianRecoveryRotationInput,
+export function buildUpdateContextRuleOperation(
+  input: UpdateContextRuleInput,
 ): xdr.Operation {
   if (!StrKey.isValidContract(input.contractAddress)) {
     throw new Error("Invalid Soroban Smart Account C... contract address");
   }
-  if (!StrKey.isValidEd25519PublicKey(input.currentGuardianAddress)) {
-    throw new Error("Invalid current Classic G... Recovery Guardian address");
+  if (!Number.isInteger(input.contextRuleId) || input.contextRuleId < 0) {
+    throw new Error("contextRuleId must be a non-negative integer");
   }
-  if (!StrKey.isValidEd25519PublicKey(input.newGuardianAddress)) {
-    throw new Error("Invalid new Classic G... Recovery Guardian address");
+  const cleanName = input.name.trim();
+  if (!cleanName) {
+    throw new Error("Context rule name must be non-empty");
   }
-  if (input.currentGuardianAddress === input.newGuardianAddress) {
-    throw new Error("New Recovery Guardian address must differ from current Guardian");
+  if (!Array.isArray(input.signers) || input.signers.length === 0) {
+    throw new Error("At least one signer ScVal is required in update_context_rule");
+  }
+  if (
+    input.validUntil !== undefined &&
+    (!Number.isInteger(input.validUntil) || input.validUntil < 1)
+  ) {
+    throw new Error("validUntil must be a positive ledger sequence integer when provided");
   }
 
   return Operation.invokeContractFunction({
     contract: input.contractAddress,
-    function: "rotate_guardian",
+    function: "update_context_rule",
     args: [
-      new Address(input.currentGuardianAddress).toScVal(),
-      new Address(input.newGuardianAddress).toScVal(),
-      nativeToScVal(input.newPasskeyPubKeyHex ?? "", { type: "string" }),
+      nativeToScVal(input.contextRuleId, { type: "u32" }),
+      nativeToScVal(cleanName, { type: "string" }),
+      input.validUntil !== undefined
+        ? nativeToScVal(input.validUntil, { type: "u32" })
+        : xdr.ScVal.scvVoid(),
+      xdr.ScVal.scvVec([...input.signers]),
+      xdr.ScVal.scvVec([...(input.policies ?? [])]),
     ],
   });
 }

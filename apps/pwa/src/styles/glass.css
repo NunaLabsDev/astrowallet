@@ -56,7 +56,7 @@ select:focus-visible {
   background:
     var(--aw-grad-orb-glow),
     linear-gradient(180deg, var(--aw-deep-space-navy) 0%, var(--aw-navy-mid) 36%, var(--aw-space-void) 100%);
-  padding: calc(16px + env(safe-area-inset-top)) 16px calc(112px + env(safe-area-inset-bottom));
+  padding: calc(16px + max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top, 0px))) 16px calc(112px + max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -942,7 +942,7 @@ select:focus-visible {
 }
 
 /* ============================================================
-   FINTECH WALLET APP SHELL (/app & /intent/*)
+   TELEGRAM MINI APP SHELL (/app & /intent/*)
    ============================================================ */
 .aw-app-canvas {
   min-height: 100dvh;
@@ -952,20 +952,16 @@ select:focus-visible {
 }
 
 .aw-app-frame {
-  max-width: 1180px;
+  max-width: 820px;
   margin: 0 auto;
   min-height: 100dvh;
   display: flex;
   flex-direction: column;
 }
 
-.aw-sidebar {
-  display: none;
-}
-
 .aw-app-main {
   flex: 1;
-  padding: calc(14px + env(safe-area-inset-top)) 14px calc(114px + env(safe-area-inset-bottom));
+  padding: calc(14px + max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top, 0px))) 14px calc(114px + max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
 }
 
 .aw-main-inner {
@@ -1212,7 +1208,7 @@ select:focus-visible {
 /* Mobile Floating Apple Liquid Glass Dock */
 .glass-dock {
   position: fixed;
-  bottom: calc(14px + env(safe-area-inset-bottom));
+  bottom: calc(14px + max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
   left: 50%;
   transform: translateX(-50%);
   width: min(calc(100% - 24px), 440px);
@@ -1473,7 +1469,7 @@ select:focus-visible {
 }
 
 .aw-drawer-body {
-  padding: 18px 20px calc(22px + env(safe-area-inset-bottom));
+  padding: 18px 20px calc(22px + max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
   overflow-y: auto;
 }
 
@@ -1533,112 +1529,8 @@ select:focus-visible {
 }
 
 @media (min-width: 960px) {
-  .aw-nav-links {
-    display: flex;
-  }
-
-  .aw-hero {
-    grid-template-columns: 1.15fr 0.85fr;
-    gap: 36px;
-  }
-
-  .aw-tg-showcase {
-    grid-template-columns: 1.05fr 0.95fr;
-    align-items: center;
-    padding: 32px;
-  }
-
   .aw-archetypes-grid {
     grid-template-columns: repeat(4, 1fr);
-  }
-
-  .aw-app-frame {
-    flex-direction: row;
-    gap: 24px;
-    padding: 20px 24px;
-  }
-
-  .aw-sidebar {
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-    width: 248px;
-    flex-shrink: 0;
-    position: sticky;
-    top: 20px;
-    height: calc(100dvh - 40px);
-    padding: 18px;
-    border-radius: 24px;
-    background: rgba(10, 20, 54, 0.72);
-    backdrop-filter: blur(20px) saturate(165%);
-    -webkit-backdrop-filter: blur(20px) saturate(165%);
-    border: 1px solid rgba(165, 139, 224, 0.28);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.18),
-      0 18px 42px rgba(4, 9, 26, 0.56);
-  }
-
-  .aw-sidebar-nav {
-    display: grid;
-    gap: 6px;
-  }
-
-  .aw-sidebar-btn {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 44px;
-    padding: 10px 14px;
-    border-radius: 14px;
-    border: 1px solid transparent;
-    background: transparent;
-    color: var(--aw-ink-secondary);
-    font-size: 14px;
-    font-weight: 600;
-    font-family: inherit;
-    cursor: pointer;
-    transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
-  }
-
-  .aw-sidebar-btn:hover {
-    background: rgba(23, 44, 105, 0.55);
-    color: var(--aw-ink-primary);
-  }
-
-  .aw-sidebar-btn[aria-current="page"] {
-    background: linear-gradient(135deg, var(--aw-cosmic-purple), var(--aw-solar-blaze));
-    color: var(--aw-ink-on-orange);
-    border-color: rgba(255, 255, 255, 0.24);
-    box-shadow: 0 6px 18px rgba(241, 90, 36, 0.26);
-  }
-
-  .aw-sidebar-foot {
-    margin-top: auto;
-    display: grid;
-    gap: 10px;
-    padding-top: 12px;
-    border-top: 1px solid rgba(165, 139, 224, 0.2);
-  }
-
-  .aw-sidebar-posture {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 11px;
-    color: var(--aw-ink-secondary);
-  }
-
-  .aw-app-main {
-    padding: 0 0 36px;
-  }
-
-  .aw-main-inner {
-    max-width: none;
-  }
-
-  .aw-mobile-header,
-  .glass-dock {
-    display: none;
   }
 
   .aw-wallet-grid {
@@ -1777,7 +1669,7 @@ select:focus-visible {
 
 .aw-toast {
   position: fixed;
-  top: calc(14px + env(safe-area-inset-top));
+  top: calc(14px + max(env(safe-area-inset-top, 0px), var(--tg-safe-area-inset-top, 0px)));
   left: 50%;
   transform: translateX(-50%);
   z-index: 80;
@@ -1826,7 +1718,7 @@ select:focus-visible {
 
   .aw-toast {
     top: auto;
-    bottom: 24px;
+    bottom: calc(92px + max(env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
     left: auto;
     right: 24px;
     transform: none;
@@ -1982,9 +1874,7 @@ select:focus-visible {
   .glass-card,
   .glass-sheet,
   .glass-pill,
-  .glass-dock,
-  .aw-sidebar,
-  .aw-navbar-wrap {
+  .glass-dock {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     background: rgba(12, 24, 62, 0.96);

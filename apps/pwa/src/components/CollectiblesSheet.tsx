@@ -276,22 +276,24 @@ export function CollectiblesSheet() {
               </div>
             )}
 
-            <a
-              href="https://astrogate.pages.dev/sorobits"
-              target="_blank"
-              rel="noreferrer"
-              className="aw-btn-secondary"
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-                gap: 8,
-                textDecoration: "none",
-              }}
-            >
-              <span>Explore &amp; Mint Sorobits on AstroGate</span>
-              <IconExternalLink size={15} />
-            </a>
+            {config.sorobitsExplorerUrl && (
+              <a
+                href={config.sorobitsExplorerUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="aw-btn-secondary"
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: 8,
+                  textDecoration: "none",
+                }}
+              >
+                <span>Explore &amp; Mint Sorobits on AstroGate</span>
+                <IconExternalLink size={15} />
+              </a>
+            )}
           </div>
         )}
       </section>

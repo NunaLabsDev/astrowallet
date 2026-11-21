@@ -23,15 +23,22 @@ export function shortenAddress(address: string): string {
 export function formatConnectPrompt(
   network: StellarNetwork,
   expiresMinutes: number,
+  confirmCode?: string,
 ): string {
   const badge = escapeTelegramHtml(network.toUpperCase());
-  return [
+  const lines = [
     `<b>Link AstroWallet [${badge}]</b>`,
     "",
     "Tap below to prove ownership of one or more SEP-0005 accounts using your device PIN or Fingerprint.",
     `• Non-custodial: your seed phrase never leaves your phone.`,
     `• Link expires in ${expiresMinutes} minutes.`,
-  ].join("\n");
+  ];
+  if (confirmCode) {
+    lines.push(
+      `• Verification code: <code>${escapeTelegramHtml(confirmCode)}</code> (enter in AstroWallet PWA to prove this DM belongs to you).`,
+    );
+  }
+  return lines.join("\n");
 }
 
 export interface PaymentIntentCardInput {
@@ -212,6 +219,8 @@ export interface IncomingAlertCardInput {
   address: string;
   amount: string;
   assetCode: string;
+  assetIssuer?: string | undefined;
+  isVerifiedAsset?: boolean | undefined;
   fromAddress: string;
   txHash: string;
   network: StellarNetwork;
@@ -219,11 +228,17 @@ export interface IncomingAlertCardInput {
 
 export function formatIncomingAlertCard(input: IncomingAlertCardInput): string {
   const net = escapeTelegramHtml(input.network.toUpperCase());
+  const assetDisplay = input.assetIssuer
+    ? input.isVerifiedAsset === true
+      ? `${escapeTelegramHtml(input.assetCode)} (Verified)`
+      : `${escapeTelegramHtml(input.assetCode)} ⚠️ Unverified (<code>${escapeTelegramHtml(shortenAddress(input.assetIssuer))}</code>)`
+    : escapeTelegramHtml(input.assetCode);
+
   return [
     `📥 <b>Payment Received</b> · <code>${net}</code>`,
     "",
     `<b>Account:</b> ${escapeTelegramHtml(input.addressLabel)} (<code>${escapeTelegramHtml(shortenAddress(input.address))}</code>)`,
-    `<b>Amount:</b> +${escapeTelegramHtml(input.amount)} ${escapeTelegramHtml(input.assetCode)}`,
+    `<b>Amount:</b> +${escapeTelegramHtml(input.amount)} ${assetDisplay}`,
     `<b>From:</b> <code>${escapeTelegramHtml(shortenAddress(input.fromAddress))}</code>`,
     `<b>Tx:</b> <code>${escapeTelegramHtml(shortenAddress(input.txHash))}</code>`,
   ].join("\n");
@@ -287,12 +302,16 @@ export function formatSwapQuoteCard(input: SwapQuoteCardInput): string {
   const net = escapeTelegramHtml(input.network.toUpperCase());
   const header =
     input.status === "confirmed" ? "✅ <b>Swap Confirmed</b>" : "🔄 <b>Swap Quote</b>";
+  const impactText =
+    !input.priceImpactPct || input.priceImpactPct.trim().toUpperCase() === "N/A"
+      ? "market rate"
+      : `impact ~${escapeTelegramHtml(input.priceImpactPct)}%`;
   const lines = [
     `${header} · <code>${net}</code>`,
     "",
     `<b>Sell:</b> ${escapeTelegramHtml(input.inputAmount)} ${escapeTelegramHtml(input.fromAsset)}`,
     `<b>Receive (est.):</b> ${escapeTelegramHtml(input.expectedOutputAmount)} ${escapeTelegramHtml(input.toAsset)}`,
-    `<b>Route:</b> ${escapeTelegramHtml(input.provider)} (impact ~${escapeTelegramHtml(input.priceImpactPct)}%)`,
+    `<b>Route:</b> ${escapeTelegramHtml(input.provider)} (${impactText})`,
   ];
 
   if (input.txHash) {

@@ -133,4 +133,107 @@ describe("parseServerConfig", () => {
       }),
     ).toThrow(/32 characters/);
   });
+
+  it("blocks plaintext http:// URLs and testnet passphrase when network=mainnet", () => {
+    expect(() =>
+      parsePwaConfig({
+        ...VALID_TESTNET_PWA_ENV,
+        VITE_STELLAR_NETWORK: "mainnet",
+        VITE_STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+        VITE_FRIENDBOT_URL: undefined,
+        VITE_API_BASE_URL: "http://localhost:8787",
+      }),
+    ).toThrow(/Plaintext http:\/\//i);
+
+    expect(() =>
+      parsePwaConfig({
+        ...VALID_TESTNET_PWA_ENV,
+        VITE_STELLAR_NETWORK: "mainnet",
+        VITE_FRIENDBOT_URL: undefined,
+      }),
+    ).toThrow(/test network/i);
+
+    expect(() =>
+      parseServerConfig({
+        ...VALID_TESTNET_SERVER_ENV,
+        STELLAR_NETWORK: "mainnet",
+        STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+        FRIENDBOT_URL: undefined,
+      }),
+    ).toThrow(/Plaintext http:\/\//i);
+
+    expect(() =>
+      parseServerConfig({
+        ...VALID_TESTNET_SERVER_ENV,
+        STELLAR_NETWORK: "testnet",
+        STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+      }),
+    ).toThrow(/public mainnet/i);
+  });
+
+  it("parses dynamic relayer limits and Soroban max resource fee with safe defaults", () => {
+    const serverCfg = parseServerConfig({
+      ...VALID_TESTNET_SERVER_ENV,
+      RELAY_MAX_OPERATIONS: "8",
+      RELAY_MAX_FEE_STROOPS: "3500000",
+      RELAY_DAILY_BUDGET_STROOPS: "900000000",
+    });
+    expect(serverCfg.relayMaxOperations).toBe(8);
+    expect(serverCfg.relayMaxFeeStroops).toBe("3500000");
+    expect(serverCfg.relayDailyBudgetStroops).toBe("900000000");
+
+    const pwaCfg = parsePwaConfig({
+      ...VALID_TESTNET_PWA_ENV,
+      VITE_SOROBITS_EXPLORER_URL: "https://explorer.example.org/sorobits",
+      VITE_SOROBAN_MAX_RESOURCE_FEE_STROOPS: "2500000",
+    });
+    expect(pwaCfg.sorobitsExplorerUrl).toBe("https://explorer.example.org/sorobits");
+    expect(pwaCfg.sorobanMaxResourceFeeStroops).toBe("2500000");
+    expect(pwaCfg.tonNetwork).toBe("testnet");
+    expect(pwaCfg.allowDevOutsideTelegram).toBe(false);
+  });
+
+  it("parses TON & Mini App config and rejects dev bypass or http TON URLs on mainnet", () => {
+    const pwaCfg = parsePwaConfig({
+      ...VALID_TESTNET_PWA_ENV,
+      VITE_TG_MINI_APP_SHORT_NAME: "astro",
+      VITE_TON_RPC_URLS: "https://ton-rpc.example.org/jsonRPC",
+      VITE_TON_BRIDGE_URL: "https://bridge.example.org/bridge",
+      VITE_TON_EXPLORER_BASE_URL: "https://tonscan.example.org",
+      VITE_ALLOW_DEV_OUTSIDE_TELEGRAM: "true",
+    });
+    expect(pwaCfg.tgMiniAppShortName).toBe("astro");
+    expect(pwaCfg.tonRpcUrls).toEqual(["https://ton-rpc.example.org/jsonRPC"]);
+    expect(pwaCfg.tonBridgeUrl).toBe("https://bridge.example.org/bridge");
+    expect(pwaCfg.tonExplorerBaseUrl).toBe("https://tonscan.example.org");
+    expect(pwaCfg.allowDevOutsideTelegram).toBe(true);
+
+    expect(() =>
+      parsePwaConfig({
+        ...VALID_TESTNET_PWA_ENV,
+        VITE_STELLAR_NETWORK: "mainnet",
+        VITE_STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+        VITE_FRIENDBOT_URL: undefined,
+        VITE_ALLOW_DEV_OUTSIDE_TELEGRAM: "true",
+      }),
+    ).toThrow(/VITE_ALLOW_DEV_OUTSIDE_TELEGRAM/);
+
+    expect(() =>
+      parsePwaConfig({
+        ...VALID_TESTNET_PWA_ENV,
+        VITE_STELLAR_NETWORK: "mainnet",
+        VITE_STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+        VITE_FRIENDBOT_URL: undefined,
+        VITE_TON_RPC_URLS: "http://localhost:8080",
+      }),
+    ).toThrow(/Plaintext http:\/\//i);
+
+    const serverCfg = parseServerConfig({
+      ...VALID_TESTNET_SERVER_ENV,
+      TG_BOT_USERNAME: "@AstroWalletTestBot",
+      TG_MINI_APP_SHORT_NAME: "wallet",
+    });
+    expect(serverCfg.tgBotUsername).toBe("AstroWalletTestBot");
+    expect(serverCfg.tgMiniAppShortName).toBe("wallet");
+  });
 });

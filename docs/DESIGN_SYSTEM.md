@@ -78,7 +78,7 @@ Every container in `apps/pwa` maps to one of five standardized glass tokens so d
 | **`glass-card`** | Portfolio cards, account switchers, activity rows | `blur(16px) saturate(160%)` | `rgba(23, 44, 105, 0.48)` | `1px solid rgba(165, 139, 224, 0.24)` + top inner highlight `inset 0 1px 0 rgba(255,255,255,0.22)` |
 | **`glass-sheet`** | **Scan & Shield** bottom sheet, Send/Swap drawers, PIN/Fingerprint modal | `blur(24px) saturate(180%)` | `rgba(14, 26, 68, 0.76)` | `1px solid rgba(165, 139, 224, 0.34)` + `0 20px 48px rgba(7, 13, 36, 0.65)` |
 | **`glass-pill`** | Network badge (`TESTNET` / `MAINNET`), account chips (`G...` / `C...`), Telegram `@handle` tags | `blur(10px) saturate(140%)` | `rgba(128, 80, 200, 0.22)` | `1px solid rgba(165, 139, 224, 0.32)` |
-| **`glass-dock`** | Floating bottom navigation bar (`Wallet`, `Swap`, `Scan`, `Telegram`) | `blur(20px) saturate(175%)` | `rgba(18, 34, 86, 0.72)` | `1px solid rgba(255, 255, 255, 0.18)` + pill active indicator tinted `#F15A24` / `#8050C8` |
+| **`glass-dock`** | Floating bottom navigation bar (`Stellar`, `TON`, `Activity`, `NFTs`, `Vault`) | `blur(20px) saturate(175%)` | `rgba(18, 34, 86, 0.72)` | `1px solid rgba(255, 255, 255, 0.18)` + pill active indicator tinted `#F15A24` / `#8050C8` |
 
 ### Mobile GPU & Accessibility Guardrails (Mandatory)
 1. **Strict Blur Budget:** Never render more than **2–3 overlapping `backdrop-filter` layers** simultaneously in the viewport. Scrollable lists must place `glass-card` on the parent section or keep row blurs lightweight (`<= 12px`) to maintain 60fps scrolling on mid-range Android devices.
@@ -105,11 +105,11 @@ Every container in `apps/pwa` maps to one of five standardized glass tokens so d
 ## 4. Universal Authentication & Signing UX Rules
 
 - **No FaceID-Only Assumptions:** Hardware availability varies wildly across Android devices, older phones, and desktop browsers. Never gate onboarding or signing behind FaceID, and never label buttons exclusively as "Sign with FaceID".
-- **Standard Copy & Icons:** Use **"Unlock with PIN or Fingerprint"** / **"Confirm with Fingerprint"** paired with a universal fingerprint/passkey glyph (`fingerprint` / `shield-check`).
-- **Signing Hierarchy in UI:**
-  1. **Universal Mandatory Baseline:** 6-digit numeric PIN or custom passphrase (Argon2id Web Worker KDF). Works offline on 100% of phones.
-  2. **One-Tap Biometric Convenience:** Standard WebAuthn (`userVerification: "preferred"`) triggers **Fingerprint (`Touch ID` / Android BiometricPrompt)** or device screen lock when supported.
-  3. **iOS In-App Browser Guard:** If the user lands on a `/intent/...` link inside Telegram's embedded browser where WebAuthn is blocked, render a clean `glass-sheet` banner offering **"Confirm with PIN now"** (works immediately for `G...` accounts via local vault if installed, or prompts setup) alongside **"Open in Safari / Chrome for Fingerprint"**.
+- **Standard Copy & Icons:** Use **"Unlock with PIN"** / **"Use Biometrics"** paired with universal lock/fingerprint glyphs (`fingerprint` / `lock`).
+- **Signing Hierarchy inside Telegram Mini App:**
+  1. **Universal Mandatory Baseline:** 6+ character PIN or custom passphrase (Argon2id Web Worker KDF + AES-GCM-256 IndexedDB vault). Works offline across 100% of Telegram WebViews.
+  2. **Telegram Native Biometrics + SecureStorage:** `Telegram.WebApp.BiometricManager` + Bot API 9.0 device-local `SecureStorage` (iOS Keychain / Android Keystore — never `CloudStorage`), falling back cleanly to standard WebAuthn (`userVerification: "preferred"`) when outside native Telegram biometric bridges.
+  3. **Mini App Cache-Eviction Backup Reminder:** `IosBrowserGuard` reminds uninitialized users and intent signers that clearing Telegram's app cache erases local WebView storage, prompting offline 12-word backup or `.agvault.json` encrypted export.
 
 ---
 
@@ -134,20 +134,18 @@ All traits are composed as **pure client-side `32×32` crisp-pixel (`shape-rende
 
 ### C. Live On-Chain Sorobits (SEP-50) Integration
 - Configured purely via `VITE_SOROBITS_CONTRACT_ID` (zero hardcoded contract IDs in source):
-  - `CollectiblesSheet` (`/app?tab=nfts`) queries `tokens_of`, `get_sorobit`, `token_uri`, and `animated_svg` from the NunaLabs Sorobits contract via Soroban RPC failover (`fetchOwnerSorobits`), and automatically loads the multi-token live showcase (`fetchSorobitShowcase`) when an account currently holds `0` Sorobits.
-  - `LandingPage` (`/`) also calls `fetchSorobitShowcase` + `/health` telemetry directly on mount to display live minted on-chain Sorobits alongside interactive Astro Navigator archetypes.
+  - `CollectiblesSheet` (`NFTs` tab) queries `tokens_of`, `get_sorobit`, `token_uri`, and `animated_svg` from the NunaLabs Sorobits contract via Soroban RPC failover (`fetchOwnerSorobits`), and automatically loads the multi-token live showcase (`fetchSorobitShowcase`) when an account currently holds `0` Sorobits.
 - Renders verified on-chain `32×32` animated pixel SVG collectibles safely inside `<img src="data:image/svg+xml;utf8,..." />` (`image-rendering: pixelated`).
 
 ---
 
-## 6. Two-Surface Product Architecture (`/` Website + `/app` Fintech Vault)
+## 6. Telegram-Exclusive Single-Surface Mini App Architecture (`/app` & `/intent/*`)
 
-- **Official Website (`/` — `LandingPage.tsx`):** Responsive Liquid Glass landing experience featuring sticky glass navbar, hero split with interactive 6-state Navigator telemetry phone frame and live `/health` status, institutional SEP-0005 / Scan & Shield / Universal PIN + Fingerprint security cards, honest `G...` vs `C...` protocol capability matrix, `@AstroWalletAppBot` Telegram command showcase, and live on-chain Sorobits SEP-50 gallery.
-- **Desktop + Mobile Wallet App (`/app` & `/intent/<id>` — `App.tsx`, `ModalDrawer.tsx`, `OnboardingSheet.tsx`):**
-  - Desktop (`>= 960px`): Persistent Left Glass Sidebar (`AstroWalletLogo`, 5 icon+label tabs: `Wallet`, `NFTs`, `Activity`, `Vault`, `Telegram`, live network badge, `Lock Vault`, `Back to Website`) + two-column balanced dashboard grid.
-  - Mobile (`< 960px`): Compact top header + 5-tab floating Liquid Glass Bottom Dock with crisp SVG icons (`Icons.tsx`).
-  - Guided 2-step vault creation (`3×4` numbered seed grid + backup confirmation → PIN setup) and uncluttered `Wallet` hero balance card with 4 quick actions (`Send`, `Receive`, `Swap`, `Scan & Shield`) and 2×2 Stellar Suite launcher cards opening cleanly inside accessible `ModalDrawer` bottom sheets / desktop modals.
-  - Installed PWA launches directly into `/app` via `manifest.webmanifest` (`start_url: "/app"`).
+- **Zero Public Website (`TelegramOnlyGate`):** Standalone landing pages are removed; opening outside Telegram displays a clean Liquid Glass prompt to launch `@AstroWalletAppBot` inside Telegram (bypassable only via `VITE_ALLOW_DEV_OUTSIDE_TELEGRAM=true` on Testnet dev).
+- **Unified Mini App Shell (`App.tsx`, `ModalDrawer.tsx`, `OnboardingSheet.tsx`, `TonWalletSheet.tsx`, `TonConnectSheet.tsx`):**
+  - Single-column responsive Liquid Glass stage (`max-width: 820px`) with **always-visible** compact header (Telegram `@username` + TON Connect status + network badge + Lock) and 5-tab floating Liquid Glass Bottom Dock (`Stellar`, `TON`, `Activity`, `NFTs`, `Vault`).
+  - Full Telegram SDK integration: `--tg-safe-area-inset-top` / `--tg-safe-area-inset-bottom` CSS padding, native `BackButton` stack handling (`pendingTonConnectTx` → `activeDrawer` → `intentRoute` → `wallet` tab), `HapticFeedback` on tab changes/approvals/errors, and `ClosingConfirmation` during active transfers, swaps, onboarding, or seed reveal.
+  - Guided 2-step vault creation (`3×4` numbered seed grid + 3-word backup quiz → PIN setup) and uncluttered `Stellar` hero balance card with 4 quick actions (`Send`, `Receive`, `Swap`, `Scan & Shield`) and 2×2 suite launcher cards (`Swap & Path Router`, `Scan & Shield`, `Classic & Reserves`, `CCTP Precision`) plus **Dev Lab** & **TON Connect v2** drawers.
 
 ### B. Animated + Static State Variants
 

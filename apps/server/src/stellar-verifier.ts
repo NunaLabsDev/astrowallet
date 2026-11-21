@@ -1,3 +1,4 @@
+import { resolveSwapAssetSacId } from "@astrowallet/defi";
 import {
   calculateAccountReserveSummary,
   type AccountReserveSummary,
@@ -33,6 +34,7 @@ export interface IncomingPaymentEvent {
   to: string;
   amount: string;
   assetCode: string;
+  assetIssuer?: string | undefined;
 }
 
 export type TxVerificationResult =
@@ -48,12 +50,17 @@ export interface ExpectedTxMatch {
   memo?: string | undefined;
   minCreatedAtUnix?: number | undefined;
   allowSorobanRpcFallback?: boolean | undefined;
-  /** Requires a Soroban `invokeHostFunction` on `contractId.functionName` (optionally with first arg hex). */
+  /** Requires a Soroban `invokeHostFunction` on `contractId.functionName` (optionally with first arg hex & escrow params). */
   sorobanInvoke?:
     | {
         contractId: string;
         functionName: string;
         firstArgHex?: string | undefined;
+        expectedTokenContractId?: string | undefined;
+        expectedAmount?: string | undefined;
+        expectedAssetCode?: string | undefined;
+        expectedAssetIssuer?: string | undefined;
+        networkPassphrase?: string | undefined;
       }
     | undefined;
 }
@@ -112,6 +119,7 @@ interface HorizonPaymentRecordJson {
   starting_balance?: string;
   asset_type?: string;
   asset_code?: string;
+  asset_issuer?: string;
 }
 
 async function fetchFromHorizonFailover(
@@ -369,16 +377,49 @@ export async function verifyTransactionConfirmed(
     if (!tx.envelopeXdr || !config.networkPassphrase) {
       return { confirmed: false, reason: "Unable to inspect Soroban invocation for this transaction" };
     }
+    const invokeSpec = expected.sorobanInvoke;
+    const expectedTokenId =
+      invokeSpec.expectedTokenContractId ??
+      (invokeSpec.expectedAssetCode
+        ? resolveSwapAssetSacId(
+            invokeSpec.expectedAssetIssuer
+              ? `${invokeSpec.expectedAssetCode}:${invokeSpec.expectedAssetIssuer}`
+              : invokeSpec.expectedAssetCode,
+            config.networkPassphrase,
+          )
+        : undefined);
+    const expectedStroops = invokeSpec.expectedAmount
+      ? decimalToStroops(invokeSpec.expectedAmount)
+      : null;
+
     let matched = false;
     try {
       const decoded = decodeTransactionEnvelope(tx.envelopeXdr, config.networkPassphrase);
-      matched = decoded.operations.some(
-        (op) =>
-          op.soroban?.contractId === expected.sorobanInvoke?.contractId &&
-          op.soroban?.functionName === expected.sorobanInvoke?.functionName &&
-          (expected.sorobanInvoke?.firstArgHex === undefined ||
-            op.soroban?.args[0]?.toLowerCase() === expected.sorobanInvoke.firstArgHex.toLowerCase()),
-      );
+      matched = decoded.operations.some((op) => {
+        const s = op.soroban;
+        if (!s) return false;
+        if (s.contractId !== invokeSpec.contractId || s.functionName !== invokeSpec.functionName) {
+          return false;
+        }
+        if (
+          invokeSpec.firstArgHex !== undefined &&
+          s.args[0]?.toLowerCase() !== invokeSpec.firstArgHex.toLowerCase()
+        ) {
+          return false;
+        }
+        if (invokeSpec.functionName === "create_claim") {
+          if (expectedTokenId && s.args[2] !== expectedTokenId) {
+            return false;
+          }
+          if (expectedStroops !== null) {
+            const rawAmt = s.args[3] ?? "";
+            if (!/^\d+$/.test(rawAmt) || BigInt(rawAmt) < expectedStroops) {
+              return false;
+            }
+          }
+        }
+        return true;
+      });
     } catch {
       matched = false;
     }
@@ -386,6 +427,49 @@ export async function verifyTransactionConfirmed(
       return {
         confirmed: false,
         reason: "Transaction does not invoke the expected escrow contract call for this intent",
+      };
+    }
+  }
+
+  if (expected?.destination?.startsWith("C") && expected.amount !== undefined) {
+    if (!tx.envelopeXdr || !config.networkPassphrase) {
+      return {
+        confirmed: false,
+        reason: "Unable to verify Soroban SAC transfer destination and amount",
+      };
+    }
+    const wantedStroops = decimalToStroops(expected.amount);
+    if (wantedStroops === null) {
+      return { confirmed: false, reason: "Invalid expected transfer amount" };
+    }
+    const expectedAsset = expected.assetIssuer
+      ? `${expected.assetCode ?? "XLM"}:${expected.assetIssuer}`
+      : (expected.assetCode ?? "XLM");
+    const expectedSacId = resolveSwapAssetSacId(expectedAsset, config.networkPassphrase);
+
+    let sacMatched = false;
+    try {
+      const decoded = decodeTransactionEnvelope(tx.envelopeXdr, config.networkPassphrase);
+      sacMatched = decoded.operations.some((op) => {
+        const s = op.soroban;
+        if (!s || s.functionName !== "transfer" || s.contractId !== expectedSacId) {
+          return false;
+        }
+        const toArg = s.args[1];
+        const amtArg = s.args[2] ?? "";
+        return (
+          toArg === expected.destination &&
+          /^\d+$/.test(amtArg) &&
+          BigInt(amtArg) >= wantedStroops
+        );
+      });
+    } catch {
+      sacMatched = false;
+    }
+    if (!sacMatched) {
+      return {
+        confirmed: false,
+        reason: "Transaction does not transfer the required SAC asset and amount to destination C...",
       };
     }
   }
@@ -466,6 +550,9 @@ export async function fetchIncomingPaymentsSince(
         to: rec.to,
         amount: rec.amount,
         assetCode: rec.asset_type === "native" ? "XLM" : (rec.asset_code ?? "ASSET"),
+        ...(rec.asset_type !== "native" && rec.asset_issuer
+          ? { assetIssuer: rec.asset_issuer }
+          : {}),
       });
     } else if (
       rec.type === "create_account" &&

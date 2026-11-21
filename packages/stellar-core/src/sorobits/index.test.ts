@@ -33,10 +33,22 @@ describe("Sorobits SEP-50 on-chain collectible reader", () => {
 
     expect(() =>
       sanitizeOnChainSvg("<svg><script>alert(1)</script></svg>"),
-    ).toThrow(/Unsafe script/i);
+    ).toThrow(/Disallowed SVG tag/i);
     expect(() =>
       sanitizeOnChainSvg("<svg onload='alert(1)'></svg>"),
-    ).toThrow(/Unsafe script/i);
+    ).toThrow(/Unsafe/i);
+    expect(() =>
+      sanitizeOnChainSvg("<svg><foreignObject><body>xss</body></foreignObject></svg>"),
+    ).toThrow(/Disallowed SVG tag/i);
+    expect(() =>
+      sanitizeOnChainSvg("<svg><use href='#x'/></svg>"),
+    ).toThrow(/Disallowed SVG tag/i);
+    expect(() =>
+      sanitizeOnChainSvg("<svg><animate attributeName='d'/></svg>"),
+    ).toThrow(/Disallowed SVG tag/i);
+    expect(() =>
+      sanitizeOnChainSvg("<svg fill='&#x6a;avascript:alert(1)'></svg>"),
+    ).toThrow(/numeric character entities/i);
   });
 
   it("queries owned Sorobits via Soroban RPC with primary->secondary failover", async () => {
@@ -215,5 +227,16 @@ describe("Sorobits SEP-50 on-chain collectible reader", () => {
     expect(showcase.tokens[0]?.realmName).toBe("Horizon Signal");
     expect(showcase.tokens[0]?.bornLedger).toBe(5787216);
     expect(showcase.tokens[0]?.animatedDataUrl.startsWith("data:image/svg+xml;utf8,")).toBe(true);
+  });
+
+  it("propagates Soroban RPC failure in fetchSorobitShowcase instead of returning fake supply", async () => {
+    await expect(
+      fetchSorobitShowcase({
+        rpcUrls: ["https://rpc-down.example.org"],
+        networkPassphrase: Networks.TESTNET,
+        contractId: SAMPLE_CONTRACT,
+        fetchFn: async () => new Response("Down", { status: 503 }),
+      }),
+    ).rejects.toThrow();
   });
 });

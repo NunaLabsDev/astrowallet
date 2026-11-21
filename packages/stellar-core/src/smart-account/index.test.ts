@@ -4,8 +4,8 @@ import { Address, Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import {
   buildDeploySmartAccountOperation,
-  buildGuardianRecoveryRotationOperation,
   buildSacTransferOperation,
+  buildUpdateContextRuleOperation,
   deriveCounterfactualSmartAccount,
   resolveSacContractId,
 } from "./index.js";
@@ -59,8 +59,18 @@ describe("Counterfactual Smart Account (C...) & 1-Tap SAC Bridge", () => {
       guardianAddress: GUARDIAN_G,
       wasmHashHex: SAMPLE_WASM_HASH,
       saltHex: sa1.saltHex,
+      constructorArgs: [new Address(GUARDIAN_G).toScVal()],
     });
     expect(deployOp.body.type).toBe("invokeHostFunction");
+
+    expect(() =>
+      buildDeploySmartAccountOperation({
+        guardianAddress: GUARDIAN_G,
+        wasmHashHex: SAMPLE_WASM_HASH,
+        saltHex: sa1.saltHex,
+        constructorArgs: [],
+      }),
+    ).toThrow(/constructorArgs must be non-empty/i);
   });
 
   it("resolves canonical SAC contract IDs and builds 1-tap G... <-> C... SAC transfers", () => {
@@ -85,7 +95,7 @@ describe("Counterfactual Smart Account (C...) & 1-Tap SAC Bridge", () => {
     expect(op).toBeDefined();
   });
 
-  it("builds rotate_guardian invocation and rejects identical guardian rotation", () => {
+  it("builds update_context_rule invocation and rejects invalid rule inputs", () => {
     const newGuardian = Keypair.random().publicKey() as ClassicAddress;
     const sa = deriveCounterfactualSmartAccount({
       guardianAddress: GUARDIAN_G,
@@ -93,20 +103,32 @@ describe("Counterfactual Smart Account (C...) & 1-Tap SAC Bridge", () => {
       networkPassphrase: TESTNET_PASSPHRASE,
     });
 
-    const rotateOp = buildGuardianRecoveryRotationOperation({
+    const updateOp = buildUpdateContextRuleOperation({
       contractAddress: sa.contractAddress,
-      currentGuardianAddress: GUARDIAN_G,
-      newGuardianAddress: newGuardian,
-      newPasskeyPubKeyHex: "04ab12",
+      contextRuleId: 0,
+      name: "recovery",
+      validUntil: 1_500_000,
+      signers: [new Address(newGuardian).toScVal()],
+      policies: [],
     });
-    expect(rotateOp.body.type).toBe("invokeHostFunction");
+    expect(updateOp.body.type).toBe("invokeHostFunction");
 
     expect(() =>
-      buildGuardianRecoveryRotationOperation({
+      buildUpdateContextRuleOperation({
         contractAddress: sa.contractAddress,
-        currentGuardianAddress: GUARDIAN_G,
-        newGuardianAddress: GUARDIAN_G,
+        contextRuleId: -1,
+        name: "recovery",
+        signers: [new Address(newGuardian).toScVal()],
       }),
-    ).toThrow(/must differ/i);
+    ).toThrow(/non-negative integer/i);
+
+    expect(() =>
+      buildUpdateContextRuleOperation({
+        contractAddress: sa.contractAddress,
+        contextRuleId: 0,
+        name: "recovery",
+        signers: [],
+      }),
+    ).toThrow(/At least one signer/i);
   });
 });

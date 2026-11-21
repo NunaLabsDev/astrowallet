@@ -78,6 +78,9 @@
                 },
                 {
                   "u64": 2000
+                },
+                {
+                  "bool": true
                 }
               ]
             }
@@ -299,6 +302,14 @@
                     },
                     {
                       "key": {
+                        "symbol": "cancellable"
+                      },
+                      "val": {
+                        "bool": true
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "claim_pubkey"
                       },
                       "val": {
@@ -343,7 +354,55 @@
             },
             "ext": "v0"
           },
-          241920
+          403533
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "EscrowedBalance"
+                },
+                {
+                  "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "EscrowedBalance"
+                    },
+                    {
+                      "address": "CDLDVFKHEZ2RVB3NG4UQA4VPD3TSHV6XMHXMHP2BSGCJ2IIWVTOHGDSG"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "i128": {
+                    "hi": 0,
+                    "lo": 200
+                  }
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          1728000
         ]
       ],
       [
@@ -375,7 +434,7 @@
             },
             "ext": "v0"
           },
-          518400
+          864000
         ]
       ],
       [
@@ -654,7 +713,7 @@
             },
             "ext": "v0"
           },
-          518400
+          864000
         ]
       ]
     ]

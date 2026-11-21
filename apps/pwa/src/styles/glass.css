@@ -312,6 +312,16 @@ select:focus-visible {
   box-shadow: 0 0 0 2px rgba(245, 201, 40, 0.24);
 }
 
+@media (max-width: 767px) {
+  .aw-input,
+  .aw-textarea,
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1rem);
+  }
+}
+
 .aw-label {
   display: block;
   font-size: 12px;

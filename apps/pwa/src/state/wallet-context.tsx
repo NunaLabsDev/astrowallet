@@ -303,6 +303,15 @@ export interface WalletContextValue {
     claimIdHex: string;
     claimSecretSeedHex: string;
   }): Promise<{ hash: string; ledger: number }>;
+  cancelClaimEscrow(params: {
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+  }): Promise<{ hash: string; ledger: number }>;
+  refundExpiredClaimEscrow(params: {
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    recipientAddress?: StellarAddress | undefined;
+  }): Promise<{ hash: string; ledger: number }>;
 }
 
 const WalletContext = createContext<WalletContextValue | null>(null);
@@ -348,6 +357,51 @@ export function WalletProvider({
       createStellarClient({
         ...config,
         sorobanMaxResourceFeeStroops: config.sorobanMaxResourceFeeStroops,
+        relaySubmitter: config.apiBaseUrl
+          ? async ({ signedTxXdrBase64, sourceKeypair }) => {
+              const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
+              const rawPayload = signedTxXdrBase64;
+              const digest = await crypto.subtle.digest(
+                "SHA-256",
+                new TextEncoder().encode(rawPayload),
+              );
+              const payloadHash = Array.from(new Uint8Array(digest), (b) =>
+                b.toString(16).padStart(2, "0"),
+              ).join("");
+              const timestamp = Math.floor(Date.now() / 1000);
+              const nonceBytes = new Uint8Array(12);
+              crypto.getRandomValues(nonceBytes);
+              const nonce = Array.from(nonceBytes, (b) =>
+                b.toString(16).padStart(2, "0"),
+              ).join("");
+              const challenge = `astrowallet-relay:v1:${config.network}:feebump:${payloadHash}:${timestamp}:${nonce}`;
+              const signatureBase64 = signChallengeMessage(sourceKeypair, challenge);
+              const res = await fetch(`${apiBase}/v1/relay/submit`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  mode: "feebump",
+                  signedTxXdrBase64: rawPayload,
+                  walletAuth: {
+                    address: sourceKeypair.publicKey() as ClassicAddress,
+                    timestamp,
+                    nonce,
+                    payloadHash,
+                    signatureBase64,
+                  },
+                }),
+              });
+              if (!res.ok) {
+                return null;
+              }
+              const body = (await res.json()) as {
+                hash?: string;
+                txHash?: string;
+              };
+              const txHash = (body.hash ?? body.txHash ?? "").trim();
+              return txHash ? { hash: txHash } : null;
+            }
+          : undefined,
       }),
     [config],
   );
@@ -1797,6 +1851,43 @@ export function WalletProvider({
     [withActiveKeypair, stellarClient, refreshChainState, showToast],
   );
 
+  const cancelClaimEscrow = useCallback(
+    async (params: {
+      escrowContractId: ContractAddress;
+      claimIdHex: string;
+    }) => {
+      return withActiveKeypair(async (keypair) => {
+        const res = await stellarClient.cancelClaimEscrow({
+          sourceKeypair: keypair,
+          ...params,
+        });
+        await refreshChainState();
+        showToast("Escrow cancelled & funds reclaimed");
+        return res;
+      });
+    },
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+  );
+
+  const refundExpiredClaimEscrow = useCallback(
+    async (params: {
+      escrowContractId: ContractAddress;
+      claimIdHex: string;
+      recipientAddress?: StellarAddress | undefined;
+    }) => {
+      return withActiveKeypair(async (keypair) => {
+        const res = await stellarClient.refundExpiredClaimEscrow({
+          sourceKeypair: keypair,
+          ...params,
+        });
+        await refreshChainState();
+        showToast("Expired escrow refunded");
+        return res;
+      });
+    },
+    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+  );
+
   const value: WalletContextValue = {
     config,
     vaultStatus,
@@ -1868,6 +1959,8 @@ export function WalletProvider({
     signConnectChallenge,
     fundClaimEscrow,
     claimFromEscrow,
+    cancelClaimEscrow,
+    refundExpiredClaimEscrow,
   };
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

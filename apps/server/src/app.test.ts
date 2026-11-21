@@ -1622,6 +1622,147 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(seenInvokes[1]).toEqual({ fn: "claim", arg0: expectedClaimId });
     expect((await repo.getClaimLink(expectedClaimId))?.status).toBe("claimed");
     expect(editedCards[1]).toContain("Claim Link Claimed");
+
+    // Cancelling an open Claim Link intent updates claim -> refunded, intent -> cancelled, and edits card
+    const cancelIntentId = "it_claim_cancel_01";
+    const cancelClaimId = await deriveClaimId(cancelIntentId);
+    const cancelSig = await signIntentToken(
+      { intentId: cancelIntentId, network: "testnet", telegramUserId: "444555", expiresAt },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId: cancelIntentId,
+      network: "testnet",
+      creatorTelegramUserId: "444555",
+      actionType: "claim",
+      payloadJson: JSON.stringify({
+        amount: "10",
+        assetCode: "XLM",
+        recipientUsername: "bob",
+        senderLabel: "@alice",
+        claimId: cancelClaimId,
+        escrowContractId: SOROBAN_HOST_FN_CONTRACT,
+      }),
+      hmacSig: cancelSig,
+      chatId: "-100333",
+      messageId: "89",
+      status: "pending",
+      expiresAt,
+      createdAt: now,
+    });
+    const fundCancelRes = await app.request(
+      `/v1/intents/${cancelIntentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: cancelSig,
+          txHash: "e5".repeat(32),
+          stage: "funded",
+          senderAddress: sender.address,
+        }),
+      },
+      envWithEscrow,
+    );
+    expect(fundCancelRes.status).toBe(200);
+
+    const cancelTxHash = "f6".repeat(32);
+    const cancelRes = await app.request(
+      `/v1/intents/${cancelIntentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: cancelSig,
+          txHash: cancelTxHash,
+          stage: "cancelled",
+          payerAddress: sender.address,
+        }),
+      },
+      envWithEscrow,
+    );
+    expect(cancelRes.status).toBe(200);
+    const cancelJson = (await cancelRes.json()) as { status: string; stage: string };
+    expect(cancelJson.status).toBe("cancelled");
+    expect(cancelJson.stage).toBe("cancelled");
+    expect(seenInvokes[3]).toEqual({ fn: "cancel_claim", arg0: cancelClaimId });
+    expect((await repo.getClaimLink(cancelClaimId))?.status).toBe("refunded");
+    expect((await repo.getSignedIntent(cancelIntentId))?.status).toBe("cancelled");
+    expect(editedCards[3]).toContain("Claim Link Refunded");
+
+    // Claiming after cancellation is blocked
+    const claimAfterCancel = await app.request(
+      `/v1/intents/${cancelIntentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: cancelSig,
+          txHash: "a7".repeat(32),
+          stage: "claimed",
+        }),
+      },
+      envWithEscrow,
+    );
+    expect(claimAfterCancel.status).toBe(409);
+
+    // Verifies expectedActionType and expectedSourceAccount against decoded envelope XDR
+    const paymentTxFetch: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          successful: true,
+          ledger: 999,
+          created_at: new Date().toISOString(),
+          envelope_xdr: BENIGN_PAYMENT_TX_XDR,
+        }),
+        { status: 200 },
+      );
+
+    const badReclaim = await verifyTransactionConfirmed(
+      {
+        horizonUrls: [TEST_ENV.HORIZON_URLS],
+        networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+      },
+      "b8".repeat(32),
+      paymentTxFetch,
+      { expectedActionType: "reclaim_reserve" },
+    );
+    expect(badReclaim.confirmed).toBe(false);
+
+    const badSwap = await verifyTransactionConfirmed(
+      {
+        horizonUrls: [TEST_ENV.HORIZON_URLS],
+        networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+      },
+      "b8".repeat(32),
+      paymentTxFetch,
+      { expectedActionType: "swap" },
+    );
+    expect(badSwap.confirmed).toBe(false);
+
+    const badSource = await verifyTransactionConfirmed(
+      {
+        horizonUrls: [TEST_ENV.HORIZON_URLS],
+        networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+      },
+      "b8".repeat(32),
+      paymentTxFetch,
+      { expectedSourceAccount: sender.address },
+    );
+    expect(badSource.confirmed).toBe(false);
+
+    const goodSource = await verifyTransactionConfirmed(
+      {
+        horizonUrls: [TEST_ENV.HORIZON_URLS],
+        networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+      },
+      "b8".repeat(32),
+      paymentTxFetch,
+      {
+        expectedSourceAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+      },
+    );
+    expect(goodSource).toEqual({ confirmed: true, ledger: 999 });
   });
 
   it("enforces daily relay budget, streaming 128KB stellar.toml cap, update_id dedup, and dust/SEP-42 indexer filtering", async () => {

@@ -64,7 +64,7 @@ const ConnectIntentBodySchema = z.object({
 const ConfirmIntentBodySchema = z.object({
   sig: z.string().regex(/^[a-f0-9]{64}$/i),
   txHash: z.string().regex(/^[a-fA-F0-9]{64}$/),
-  stage: z.enum(["funded", "claimed"]).optional(),
+  stage: z.enum(["funded", "claimed", "cancelled", "refunded"]).optional(),
   payerAddress: z.string().min(8).max(100).optional(),
   senderAddress: ClassicAddressSchema.optional(),
   expiresAt: z.number().int().positive().optional(),
@@ -441,14 +441,34 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         });
       }
 
+      if (
+        (stage === "cancelled" || stage === "refunded") &&
+        intent.status === "cancelled" &&
+        existingClaim?.status === "refunded"
+      ) {
+        const recorded = await repo.listSplitPaymentTxHashes(intent.intentId);
+        if (recorded.includes(txHashLower)) {
+          return c.json({
+            ok: true,
+            status: "cancelled",
+            stage,
+            claimId,
+            txHash: parsedBody.txHash,
+          });
+        }
+      }
+
       if (stage === "funded" && (intent.status !== "pending" || existingClaim !== null)) {
         return c.json({ error: `Claim link already funded or ${intent.status}` }, 409);
       }
       if (
-        stage === "claimed" &&
+        (stage === "claimed" || stage === "cancelled" || stage === "refunded") &&
         intent.status !== "signed" &&
         existingClaim?.status !== "open"
       ) {
+        if (existingClaim?.status === "claimed" || intent.status === "confirmed") {
+          return c.json({ error: "Claim link has already been claimed" }, 409);
+        }
         return c.json({ error: `Claim link is not open (${intent.status})` }, 409);
       }
 
@@ -463,12 +483,21 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         return c.json({ error: "CLAIM_ESCROW_CONTRACT_ID is not configured" }, 503);
       }
 
+      const sorobanFn =
+        stage === "funded"
+          ? "create_claim"
+          : stage === "claimed"
+            ? "claim"
+            : stage === "cancelled"
+              ? "cancel_claim"
+              : "refund_expired";
+
       const expected: ExpectedTxMatch = {
         minCreatedAtUnix: intent.createdAt,
         allowSorobanRpcFallback: true,
         sorobanInvoke: {
           contractId: escrowParsed.data,
-          functionName: stage === "funded" ? "create_claim" : "claim",
+          functionName: sorobanFn,
           firstArgHex: claimId,
           ...(stage === "funded"
             ? {
@@ -539,6 +568,38 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
           ok: true,
           status: "signed",
           stage: "funded",
+          claimId,
+          txHash: parsedBody.txHash,
+          ledger: txCheck.ledger,
+          telegramCardUpdated: cardUpdated,
+        });
+      }
+
+      if (stage === "cancelled" || stage === "refunded") {
+        await repo.recordSplitPayment({
+          intentId: intent.intentId,
+          txHash: parsedBody.txHash,
+          amount: "0",
+        });
+        await repo.markClaimLinkStatus(claimId, "refunded");
+        await repo.markIntentStatus(intent.intentId, "cancelled");
+
+        const cardUpdated = await maybeEditCard(
+          formatClaimLinkCard({
+            status: "refunded",
+            amount: payload.amount ?? "?",
+            assetCode: payload.assetCode ?? "XLM",
+            senderLabel: payload.senderLabel ?? "Sender",
+            recipientUsername: payload.recipientUsername ?? "recipient",
+            network: config.network,
+            txHash: parsedBody.txHash,
+          }),
+        );
+
+        return c.json({
+          ok: true,
+          status: "cancelled",
+          stage,
           claimId,
           txHash: parsedBody.txHash,
           ledger: txCheck.ledger,
@@ -684,6 +745,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
 
     const expected: ExpectedTxMatch = {
       minCreatedAtUnix: intent.createdAt,
+      ...(parsedBody.payerAddress ? { expectedSourceAccount: parsedBody.payerAddress } : {}),
       ...(intent.actionType === "pay" || intent.actionType === "request"
         ? {
             destination: payload.destination,
@@ -694,8 +756,10 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
             allowSorobanRpcFallback: Boolean(payload.destination?.startsWith("C")),
           }
         : intent.actionType === "swap"
-          ? { allowSorobanRpcFallback: true }
-          : {}),
+          ? { allowSorobanRpcFallback: true, expectedActionType: "swap" }
+          : intent.actionType === "reclaim_reserve"
+            ? { expectedActionType: "reclaim_reserve" }
+            : {}),
     };
 
     const txCheck = await verifyFn(config, parsedBody.txHash, expected);

@@ -1153,4 +1153,62 @@ mod test {
         assert_eq!(token.balance(&recipient), 400);
         assert_eq!(client.get_escrowed_balance(&token_id), 0);
     }
+
+    #[test]
+    fn test_claim_and_cancel_require_real_auth_without_mocking() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+
+        let admin = Address::generate(&env);
+        let guardian = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let token_contract = env.register_stellar_asset_contract_v2(admin);
+        let token_id = token_contract.address();
+        let escrow_id = env.register(ClaimEscrowContract, ());
+        let client = ClaimEscrowContractClient::new(&env, &escrow_id);
+
+        assert!(client.try_init(&guardian).is_err());
+
+        let signing_key = SigningKey::from_bytes(&[55u8; 32]);
+        let claim_pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+        let claim_id = BytesN::from_array(&env, &[14u8; 32]);
+
+        env.as_contract(&escrow_id, || {
+            env.storage().instance().set(&DataKey::Guardian, &guardian);
+            env.storage()
+                .instance()
+                .set(&DataKey::DepositsPaused, &false);
+            env.storage().persistent().set(
+                &DataKey::Claim(claim_id.clone()),
+                &ClaimDeposit {
+                    sender: sender.clone(),
+                    token: token_id.clone(),
+                    amount: 250,
+                    claim_pubkey: claim_pubkey.clone(),
+                    expires_at: 2_000,
+                    cancellable: true,
+                    status: ClaimStatus::Open,
+                },
+            );
+            env.storage()
+                .persistent()
+                .set(&DataKey::EscrowedBalance(token_id.clone()), &250_i128);
+        });
+
+        let sig = sign_claim_for_recipient(&env, &escrow_id, &claim_id, &recipient, &signing_key);
+        assert!(client.try_claim(&claim_id, &recipient, &sig).is_err());
+        assert!(client.try_cancel_claim(&claim_id).is_err());
+        assert!(client.try_set_deposits_paused(&true).is_err());
+        assert!(client.try_rescue_excess(&token_id, &treasury, &10).is_err());
+
+        env.ledger().with_mut(|li| {
+            li.timestamp = 2_001;
+        });
+        assert!(client.try_refund_expired_to(&claim_id, &treasury).is_err());
+    }
 }

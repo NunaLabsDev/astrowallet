@@ -50,6 +50,8 @@ export interface ExpectedTxMatch {
   memo?: string | undefined;
   minCreatedAtUnix?: number | undefined;
   allowSorobanRpcFallback?: boolean | undefined;
+  expectedSourceAccount?: string | undefined;
+  expectedActionType?: "swap" | "reclaim_reserve" | undefined;
   /** Requires a Soroban `invokeHostFunction` on `contractId.functionName` (optionally with first arg hex & escrow params). */
   sorobanInvoke?:
     | {
@@ -373,6 +375,21 @@ export async function verifyTransactionConfirmed(
     }
   }
 
+  let cachedDecoded: ReturnType<typeof decodeTransactionEnvelope> | null | undefined;
+  const getDecodedEnvelope = (): ReturnType<typeof decodeTransactionEnvelope> | null => {
+    if (cachedDecoded !== undefined) return cachedDecoded;
+    if (!tx.envelopeXdr || !config.networkPassphrase) {
+      cachedDecoded = null;
+      return null;
+    }
+    try {
+      cachedDecoded = decodeTransactionEnvelope(tx.envelopeXdr, config.networkPassphrase);
+    } catch {
+      cachedDecoded = null;
+    }
+    return cachedDecoded;
+  };
+
   if (expected?.sorobanInvoke) {
     if (!tx.envelopeXdr || !config.networkPassphrase) {
       return { confirmed: false, reason: "Unable to inspect Soroban invocation for this transaction" };
@@ -393,12 +410,16 @@ export async function verifyTransactionConfirmed(
       : null;
 
     let matched = false;
-    try {
-      const decoded = decodeTransactionEnvelope(tx.envelopeXdr, config.networkPassphrase);
+    const decoded = getDecodedEnvelope();
+    if (decoded) {
       matched = decoded.operations.some((op) => {
         const s = op.soroban;
         if (!s) return false;
-        if (s.contractId !== invokeSpec.contractId || s.functionName !== invokeSpec.functionName) {
+        const fnMatched =
+          invokeSpec.functionName === "refund_expired"
+            ? s.functionName === "refund_expired" || s.functionName === "refund_expired_to"
+            : s.functionName === invokeSpec.functionName;
+        if (s.contractId !== invokeSpec.contractId || !fnMatched) {
           return false;
         }
         if (
@@ -420,14 +441,72 @@ export async function verifyTransactionConfirmed(
         }
         return true;
       });
-    } catch {
-      matched = false;
     }
     if (!matched) {
       return {
         confirmed: false,
         reason: "Transaction does not invoke the expected escrow contract call for this intent",
       };
+    }
+  }
+
+  if (expected?.expectedSourceAccount && tx.envelopeXdr && config.networkPassphrase) {
+    const decoded = getDecodedEnvelope();
+    if (!decoded) {
+      return {
+        confirmed: false,
+        reason: "Failed to decode transaction envelope for source account verification",
+      };
+    }
+    if (
+      expected.expectedSourceAccount.startsWith("G") ||
+      expected.expectedSourceAccount.startsWith("M")
+    ) {
+      const expectedBase = extractBaseDestination(expected.expectedSourceAccount);
+      const matchesSource =
+        decoded.sourceAccount === expectedBase ||
+        decoded.operations.some((op) => op.source === expectedBase);
+      if (!matchesSource) {
+        return {
+          confirmed: false,
+          reason: `Transaction source account mismatch (expected ${expectedBase}, got ${decoded.sourceAccount})`,
+        };
+      }
+    }
+  }
+
+  if (expected?.expectedActionType && tx.envelopeXdr && config.networkPassphrase) {
+    const decoded = getDecodedEnvelope();
+    if (!decoded) {
+      return {
+        confirmed: false,
+        reason: `Failed to decode transaction envelope for ${expected.expectedActionType} verification`,
+      };
+    }
+    if (expected.expectedActionType === "reclaim_reserve") {
+      if (!decoded.operations.some((op) => op.type === "changeTrust")) {
+        return {
+          confirmed: false,
+          reason: "Reserve reclaim transaction does not contain a changeTrust operation",
+        };
+      }
+    } else if (expected.expectedActionType === "swap") {
+      const hasSwapOp = decoded.operations.some(
+        (op) =>
+          op.type === "pathPaymentStrictSend" ||
+          op.type === "pathPaymentStrictReceive" ||
+          op.type === "manageSellOffer" ||
+          op.type === "manageBuyOffer" ||
+          op.type === "createPassiveSellOffer" ||
+          op.type === "invokeHostFunction",
+      );
+      if (!hasSwapOp) {
+        return {
+          confirmed: false,
+          reason:
+            "Swap transaction does not contain a swap, DEX offer, or Soroban contract operation",
+        };
+      }
     }
   }
 

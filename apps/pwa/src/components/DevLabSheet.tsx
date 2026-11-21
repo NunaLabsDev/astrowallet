@@ -576,7 +576,7 @@ export function DevLabSheet() {
                 onClick={() => {
                   setContractId(config.claimEscrowContractId ?? "");
                   setFnName("get_claim");
-                  setArgsJson('[{"type":"symbol","value":"sample"}]');
+                  setArgsJson('[{"type":"bytes","value":"' + "01".repeat(32) + '"}]');
                 }}
               >
                 Preset: Claim Escrow

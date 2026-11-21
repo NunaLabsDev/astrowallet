@@ -114,6 +114,8 @@ export function IntentSheet({
     signAndSubmitRawXdrWithShield,
     fundClaimEscrow,
     claimFromEscrow,
+    cancelClaimEscrow,
+    refundExpiredClaimEscrow,
   } = useWallet();
 
   const [intent, setIntent] = useState<RemoteIntentResponse | null>(null);
@@ -418,7 +420,10 @@ export function IntentSheet({
         txHash = res.hash;
       }
 
-      await confirmOnServer({ txHash });
+      await confirmOnServer({
+        txHash,
+        ...(activeAccount ? { payerAddress: activeAccount.address } : {}),
+      });
       setCompletedMsg(
         `Swap settled (${txHash.slice(0, 8)}…${txHash.slice(-8)}). Telegram chat card updated live!`,
       );
@@ -505,12 +510,51 @@ export function IntentSheet({
     }
   };
 
+  const handleReclaimClaimLink = async () => {
+    if (!intent || !activeAccount || !intent.claimId || !resolvedEscrowContract) {
+      setError("Claim escrow configuration or claimId is missing");
+      return;
+    }
+    const isExpired = Math.floor(Date.now() / 1000) >= intent.expiresAt;
+    setBusy(true);
+    setError(null);
+    try {
+      const res = isExpired
+        ? await refundExpiredClaimEscrow({
+            escrowContractId: resolvedEscrowContract,
+            claimIdHex: intent.claimId,
+          })
+        : await cancelClaimEscrow({
+            escrowContractId: resolvedEscrowContract,
+            claimIdHex: intent.claimId,
+          });
+
+      await confirmOnServer({
+        txHash: res.hash,
+        stage: isExpired ? "refunded" : "cancelled",
+        payerAddress: activeAccount.address,
+      });
+
+      cachedClaimSecret = null;
+      setCompletedMsg(
+        `${isExpired ? "Refunded expired escrow" : "Cancelled escrow"} (${res.hash.slice(0, 8)}…${res.hash.slice(-8)}). Telegram chat card updated live!`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Escrow reclaim failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleConfirmReclaimReserve = async () => {
     setBusy(true);
     setError(null);
     try {
       const tx = await reclaimZeroBalanceReserves();
-      await confirmOnServer({ txHash: tx.hash });
+      await confirmOnServer({
+        txHash: tx.hash,
+        ...(activeAccount ? { payerAddress: activeAccount.address } : {}),
+      });
       setCompletedMsg(
         `Reclaimed +${tx.reclaimedXlm} XLM via LumenWipe (${tx.hash.slice(0, 8)}…${tx.hash.slice(-8)}).`,
       );
@@ -742,6 +786,10 @@ export function IntentSheet({
                 <div className="aw-banner">
                   This Claim Link has already been claimed on-chain.
                 </div>
+              ) : intent.claimStatus === "refunded" ? (
+                <div className="aw-banner">
+                  This Claim Link was cancelled or refunded on-chain.
+                </div>
               ) : isClaimFundingView ? (
                 <button
                   type="button"
@@ -780,6 +828,20 @@ export function IntentSheet({
                       ? "Claiming from Escrow..."
                       : `Claim ${intent.payload.amount} ${intent.payload.assetCode ?? "XLM"} to ${activeAccount?.label ?? "Account"}`}
                   </button>
+                  {intent.claimId && activeAccount && intent.claimStatus === "open" && (
+                    <button
+                      type="button"
+                      className="aw-btn-secondary"
+                      disabled={busy || !resolvedEscrowContract}
+                      onClick={() => void handleReclaimClaimLink()}
+                    >
+                      {busy
+                        ? "Processing Escrow Reclaim..."
+                        : Math.floor(Date.now() / 1000) >= intent.expiresAt
+                          ? "Reclaim Expired Escrow"
+                          : "Cancel & Reclaim Escrow"}
+                    </button>
+                  )}
                 </>
               )}
             </>

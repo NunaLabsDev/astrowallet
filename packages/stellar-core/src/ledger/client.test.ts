@@ -275,4 +275,84 @@ describe("StellarLedgerClient hardening (sequence mutex, restore guard, fee cap,
       }),
     ).rejects.toThrow(/failed on ledger/i);
   });
+
+  it("supports cancelClaimEscrow, refundExpiredClaimEscrow, extendClaimEscrowTtl, and relaySubmitter fallback", async () => {
+    const kp = Keypair.random();
+    const recipient = Keypair.random().publicKey() as `${"G"}${string}`;
+    const relaySeen: string[] = [];
+    let rpcSendCount = 0;
+    let relayShouldFail = false;
+
+    const client = createStellarClient({
+      network: "testnet",
+      networkPassphrase: Networks.TESTNET,
+      horizonUrls: ["https://horizon-1.example"],
+      rpcUrls: ["https://rpc-1.example"],
+      friendbotUrl: "https://friendbot.example",
+      sorobanPollIntervalMs: 0,
+      relaySubmitter: async ({ signedTxXdrBase64 }) => {
+        relaySeen.push(signedTxXdrBase64);
+        if (relayShouldFail) {
+          throw new Error("Relayer 503");
+        }
+        return { hash: "a".repeat(64) };
+      },
+      rpcServerFactory: () =>
+        ({
+          async getAccount() {
+            return new Account(kp.publicKey(), "10");
+          },
+          async getFeeStats() {
+            return { sorobanInclusionFee: { p90: "300" } };
+          },
+          async simulateTransaction() {
+            return buildSuccessSim("100000");
+          },
+          async sendTransaction() {
+            rpcSendCount += 1;
+            return { status: "PENDING", hash: "b".repeat(64), latestLedger: 810 };
+          },
+          async getTransaction(hash: string) {
+            return {
+              status: rpc.Api.GetTransactionStatus.SUCCESS,
+              ledger: hash === "a".repeat(64) ? 801 : 811,
+            };
+          },
+        }) as unknown as rpc.Server,
+    });
+
+    const cancelled = await client.cancelClaimEscrow({
+      sourceKeypair: kp,
+      escrowContractId: ESCROW_CONTRACT,
+      claimIdHex: "11".repeat(32),
+    });
+    expect(cancelled).toEqual({ hash: "a".repeat(64), ledger: 801 });
+    expect(rpcSendCount).toBe(0);
+    expect(relaySeen).toHaveLength(1);
+
+    const refundedDirect = await client.refundExpiredClaimEscrow({
+      sourceKeypair: kp,
+      escrowContractId: ESCROW_CONTRACT,
+      claimIdHex: "22".repeat(32),
+    });
+    expect(refundedDirect.hash).toBe("a".repeat(64));
+
+    relayShouldFail = true;
+    const refundedToFallback = await client.refundExpiredClaimEscrow({
+      sourceKeypair: kp,
+      escrowContractId: ESCROW_CONTRACT,
+      claimIdHex: "33".repeat(32),
+      recipientAddress: recipient,
+    });
+    expect(refundedToFallback).toEqual({ hash: "b".repeat(64), ledger: 811 });
+    expect(rpcSendCount).toBe(1);
+
+    const extended = await client.extendClaimEscrowTtl({
+      sourceKeypair: kp,
+      escrowContractId: ESCROW_CONTRACT,
+      claimIdHex: "44".repeat(32),
+    });
+    expect(extended.hash).toBe("b".repeat(64));
+    expect(rpcSendCount).toBe(2);
+  });
 });

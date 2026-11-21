@@ -31,8 +31,12 @@ import {
   type TypedMemoInput,
 } from "../classic/index.js";
 import {
+  buildCancelClaimOperation,
   buildClaimOperation,
   buildCreateClaimOperation,
+  buildExtendClaimTtlOperation,
+  buildRefundExpiredOperation,
+  buildRefundExpiredToOperation,
   generateEphemeralClaimKey,
   signClaimEscrowPayload,
 } from "../claim-escrow/index.js";
@@ -162,6 +166,22 @@ export interface StellarClient {
     claimIdHex: string;
     claimSecretSeedHex: string;
   }): Promise<{ hash: string; ledger: number }>;
+  cancelClaimEscrow(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+  }): Promise<{ hash: string; ledger: number }>;
+  refundExpiredClaimEscrow(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    recipientAddress?: StellarAddress | undefined;
+  }): Promise<{ hash: string; ledger: number }>;
+  extendClaimEscrowTtl(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+  }): Promise<{ hash: string; ledger: number }>;
 }
 
 function isHorizonNotFound(err: unknown): boolean {
@@ -285,6 +305,12 @@ export function createStellarClient(
     sorobanPollIntervalMs?: number | undefined;
     rpcServerFactory?: ((url: string) => rpc.Server) | undefined;
     horizonServerFactory?: ((url: string) => Horizon.Server) | undefined;
+    relaySubmitter?:
+      | ((input: {
+          signedTxXdrBase64: string;
+          sourceKeypair: Keypair;
+        }) => Promise<{ hash: string; ledger?: number | undefined } | null>)
+      | undefined;
   },
 ): StellarClient {
   const endpoints = createFailoverEndpoints(config.horizonUrls);
@@ -434,6 +460,56 @@ export function createStellarClient(
 
       // Assemble and sign exactly once before broadcasting across failover RPC nodes
       preparedTx.sign(sourceKeypair);
+
+      if (config.relaySubmitter) {
+        try {
+          const relayed = await config.relaySubmitter({
+            signedTxXdrBase64: preparedTx.toXDR(),
+            sourceKeypair,
+          });
+          if (relayed && typeof relayed.hash === "string" && relayed.hash.trim().length > 0) {
+            const relayedHash = relayed.hash.trim();
+            if (typeof relayed.ledger === "number" && relayed.ledger > 0) {
+              return { hash: relayedHash, ledger: relayed.ledger };
+            }
+            try {
+              return await withRpcFailover(async (server) => {
+                let polled = await server.getTransaction(relayedHash);
+                for (
+                  let i = 0;
+                  i < 15 && polled.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
+                  i += 1
+                ) {
+                  if (pollIntervalMs > 0) {
+                    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+                  }
+                  polled = await server.getTransaction(relayedHash);
+                }
+                if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
+                  throw new NonRetryableSorobanError(
+                    `Soroban relayed transaction failed on ledger (${relayedHash})`,
+                  );
+                }
+                return {
+                  hash: relayedHash,
+                  ledger:
+                    polled.status === rpc.Api.GetTransactionStatus.SUCCESS ? polled.ledger : 0,
+                };
+              });
+            } catch (pollErr) {
+              if (pollErr instanceof NonRetryableSorobanError) {
+                throw pollErr;
+              }
+              return { hash: relayedHash, ledger: 0 };
+            }
+          }
+        } catch (relayErr) {
+          if (relayErr instanceof NonRetryableSorobanError) {
+            throw relayErr;
+          }
+          // Fall back to direct Soroban RPC submission when relayer is unavailable
+        }
+      }
 
       return withRpcFailover(async (server) => {
         const sent = await server.sendTransaction(preparedTx);
@@ -901,6 +977,49 @@ export function createStellarClient(
     return submitSorobanOperation(input.sourceKeypair, op);
   }
 
+  async function cancelClaimEscrow(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+  }): Promise<{ hash: string; ledger: number }> {
+    const op = buildCancelClaimOperation({
+      escrowContractId: input.escrowContractId,
+      claimIdHex: input.claimIdHex,
+    });
+    return submitSorobanOperation(input.sourceKeypair, op);
+  }
+
+  async function refundExpiredClaimEscrow(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+    recipientAddress?: StellarAddress | undefined;
+  }): Promise<{ hash: string; ledger: number }> {
+    const op = input.recipientAddress
+      ? buildRefundExpiredToOperation({
+          escrowContractId: input.escrowContractId,
+          claimIdHex: input.claimIdHex,
+          recipientAddress: input.recipientAddress,
+        })
+      : buildRefundExpiredOperation({
+          escrowContractId: input.escrowContractId,
+          claimIdHex: input.claimIdHex,
+        });
+    return submitSorobanOperation(input.sourceKeypair, op);
+  }
+
+  async function extendClaimEscrowTtl(input: {
+    sourceKeypair: Keypair;
+    escrowContractId: ContractAddress;
+    claimIdHex: string;
+  }): Promise<{ hash: string; ledger: number }> {
+    const op = buildExtendClaimTtlOperation({
+      escrowContractId: input.escrowContractId,
+      claimIdHex: input.claimIdHex,
+    });
+    return submitSorobanOperation(input.sourceKeypair, op);
+  }
+
   return {
     fetchAccountState,
     fetchRecentPayments,
@@ -916,5 +1035,8 @@ export function createStellarClient(
     submitManageData,
     fundClaimEscrow,
     claimFromEscrow,
+    cancelClaimEscrow,
+    refundExpiredClaimEscrow,
+    extendClaimEscrowTtl,
   };
 }

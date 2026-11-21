@@ -53,6 +53,12 @@ export function ScanShieldSheet() {
         return;
       }
 
+      if (isAddress) {
+        throw new Error(
+          "Directory & SEP-29 address lookup requires server connection (/v1/proxy/scan unreachable).",
+        );
+      }
+
       // 2. Offline / local zero-WASM fallback for XDR envelopes
       const local = scanTransactionEnvelopeXdr(cleaned, {
         networkPassphrase: config.networkPassphrase,

@@ -687,7 +687,7 @@ export function WalletProvider({
         network: config.tonNetwork,
         walletStateInitBase64: tonAccount.walletStateInitBase64,
         publicKeyHex: tonAccount.publicKeyHex,
-        tonProof,
+        ...(tonProof ? { tonProof } : {}),
       });
 
       const sealed = cryptoSess.encrypt(connectEventJson, parsed.clientId);

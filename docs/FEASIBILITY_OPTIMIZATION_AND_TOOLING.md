@@ -11,7 +11,7 @@ This document captures the engineering verification of AstroWallet's four core p
 | **1. Multi-Account `G...` + Optional `C...` & Relayer** | **Yes** | `Launchtube` was retired/archived (Mar 2026). WebAuthn `prf` fails on external roaming keys & embedded `WKWebView`s, and FaceID is absent on many phones. `hash-wasm` Argon2id needs `'wasm-unsafe-eval'` CSP. | Use **SEP-0005** multi-account seed (`m/44'/148'/i'`) + mandatory **PIN/Passphrase (Argon2id Worker, `@noble/hashes` fallback)** + optional **Fingerprint** (`userVerification: "preferred"`). Pair optional `C...` via **`smart-account-kit`** (`v0.10.x`) + **`channels.openzeppelin.com`** (sponsors tx fees only, NOT Classic `CAP-33` reserves) with lazy deploy & `G...` Guardian. |
 | **2. Classic + Soroban DeFi + SEP-24 Ramps** | **Yes (Phased Ramps)** | **MoneyGram Access** is strictly KYB/whitelist-only. **Kado** was acquired/wound down. **Soroswap Aggregator** free tier caps at `1 req/s` (`sk_` key). | Ship **Horizon Path Payments** + edge-proxied **Soroswap** in Phase 2, then **0-KYB Circle CCTP** (`CctpForwarder`) + **MoonPay/Transak** in v1 Phase 4; defer **Blend/DeFindex**, **BlindPay prod**, and **MoneyGram Access** to v2. |
 | **3. Native "Scan & Shield" Pre-Sign** | **Yes** | `@stellar/stellar-xdr-json` WASM is **~3 MB** uncompressed. **Blockaid** is enterprise-gated (no free self-serve tier). `stellarscout.app` has no public API. Many SEP-1 `stellar.toml` domains lack CORS. | Decode natively with **`@stellar/stellar-sdk`** (`contract.Spec` SEP-46/47/48 + `SorobanAuthorizationEntry`) + Stellar RPC `xdrFormat: "json"`. Edge-proxy **StellarExpert Directory/Blocked Domains** + **SEP-1/29/42** + local drainer AST rules + **`@lumenwipe/sdk`** in v1; plug **Blockaid** in v2. |
-| **4. Mobile PWA + Telegram Super-Bot Handoff** | **Yes (with iOS Storage Guard)** | **iOS isolates `IndexedDB` between Safari/`SFSafariViewController` and the installed Home Screen PWA.** Telegram `WKWebView` blocks WebAuthn Passkeys/Fingerprint without AASA entitlements (`openLink()` only exists in TMAs). Web NFC does not exist on iOS. | Keep Telegram as **pure Bot + Inline Mode (`grammY` in `apps/server`)** using `InlineKeyboardButton({ url })` + HMAC-signed Intent links (zero TMA, zero TON dependency). On iOS, guide **"Add to Home Screen" before local seed creation**, always allow **PIN fallback** in-browser, offer "Open in Safari/Chrome for Fingerprint", and defer **Tangem NFC** to v2 **Capacitor**. |
+| **4. Telegram-Exclusive Multichain Mini App (Stellar + TON)** | **Yes (ToS §7.3 Compliant)** | **Telegram ToS §7.3–7.4 requires TON Connect exclusivity** for external dApp links inside Mini Apps; clearing Telegram cache erases local WebView IndexedDB; raw `initDataUnsafe` is forgeable. | Verify `Telegram.WebApp.initData` server-side (`POST /v1/tg/auth`, HMAC-SHA256 + `auth_date <= 300s`), block open-browser access via `TelegramOnlyGate`, pair **Stellar (`G...`/`C...`) + TON (`WalletContractV4`/`V5R1`)** with **TON Connect v2** exclusively, use `BiometricManager` + device `SecureStorage` alongside Argon2id IndexedDB + `.agvault.json` backup reminders (zero `CloudStorage` secrets), and defer **Tangem NFC** to v2 **Capacitor**. |
 
 ---
 
@@ -85,24 +85,22 @@ Because **Horizon is in maintenance/EOL mode** (1-year public cap) and **Stellar
 
 ---
 
-## Pillar 4: Mobile PWA, iOS Partitioning & Telegram Super-Bot Handoff
+## Pillar 4: Telegram-Exclusive Multichain Mini App & Storage Safety
 
-### Critical iOS vs Android Browser Storage Reality
-| Surface Pair | iOS Behavior (iOS 17–26) | Android Behavior |
+### Real-World Telegram WebView & Storage Matrix
+| Surface / Storage Layer | Real Behavior Inside Telegram Mini App | AstroWallet Safeguard |
 | :--- | :--- | :--- |
-| **Telegram `WKWebView` ↔ Safari / PWA** | **Completely Isolated** (sandboxed inside Telegram app) | Shared *only* if Telegram opens Chrome Custom Tabs (isolated in internal WebView) |
-| **Safari / `SFSafariViewController` ↔ Installed Home Screen PWA** | **COMPLETELY PARTITIONED (`IndexedDB` & `localStorage` do NOT share!)** | **Shared** (Android WebAPK PWA uses Chrome's profile storage) |
-| **Safari ↔ Home Screen PWA for iCloud Passkeys (`secp256r1`)** | **SHARED seamlessly via iCloud Keychain** (bound to RP ID / domain) | **Shared via Google Password Manager / Credential Manager** |
-| **Telegram `WKWebView` WebAuthn (Fingerprint / Passkeys)** | **FAILS (`NotAllowedError`)** (Telegram lacks your domain's AASA `webcredentials` entitlement) | Unreliable / often blocked in embedded WebViews |
+| **Telegram Mini App WebView (`IndexedDB`)** | Consistent single origin inside Telegram per client, but **erased if user clears Telegram app cache** or reinstalls | Mandatory offline 12-word recovery quiz + encrypted `.agvault.json` export reminder (`IosBrowserGuard`) |
+| **`Telegram.WebApp.CloudStorage`** | Synced to Telegram servers — **unsuitable for non-custodial key material** | **Strictly forbidden** for mnemonics, PINs, or private keys (`AGENTS.md` Rule 4 & Rule 7) |
+| **Telegram `BiometricManager` & Bot API 9.0 `SecureStorage`** | Hardware-backed iOS Keychain / Android Keystore unlock inside Telegram without WebAuthn AASA constraints | Used strictly as convenience unlock for local vault PIN with standard WebAuthn + universal Argon2id PIN fallback |
+| **External dApp Connections (ToS §7.3–7.4)** | Multichain Mini Apps may manage Stellar + TON internally, while external dApp connections must use **TON Connect** | Isolated `@astrowallet/ton-core` + **TON Connect v2** NaCl SSE bridge; zero `window.stellar` or non-TON external dApp connectors |
 
-### Resulting Mobile-First UX Design Rules
-1. **iOS Onboarding Flow ("Install First + Universal PIN Fallback"):**
-   - Never let an iOS user generate an unbacked `IndexedDB` SEP-0005 seed in a regular Safari tab and then tell them to "Add to Home Screen" — the Home Screen PWA will show an empty `IndexedDB`.
-   - **Solution:** On iOS Safari, prompt **"Add to Home Screen" first** (Home Screen PWAs are exempt from WebKit's 7-day ITP eviction cap and preserve `navigator.storage.persist()`), offer **encrypted `AGVAULT` transfer files** for device migration, and optionally pair a `C...` Smart Account whose **Fingerprint (`secp256r1`)** signer works across Safari and Home Screen PWA while **PIN/Passphrase** remains a universal fallback everywhere.
-2. **Telegram Super-Bot as Zero-Install Push & Social Layer:**
-   - Build **`apps/server`** (`/tg/webhook`) using **`grammY` (`webhookCallback(bot, "cloudflare-mod")`)** + Hono + D1/KV on Cloudflare Workers for instant push alerts, `@username` cryptographic binding (`/connect` keyed by immutable `telegram_user_id`), inline P2P & swaps, viral **Claim Links**, and live card editing.
-   - Use standard **`InlineKeyboardButton({ url })`** pointing to server-issued HMAC-signed 5-min Intent URLs (never Mini App SDK APIs or TMA WebViews, keeping zero keys in Telegram `CloudStorage` and 100% exemption from Telegram's Jan 2025 TON-exclusivity rules).
-   - **iOS In-App Browser Handoff:** Because standard Telegram URL buttons may open inside Telegram's embedded browser on iOS, the PWA Intent landing sheet immediately detects embedded WebViews and provides: (a) **"Confirm with PIN now"** (universal fallback), plus (b) **"Open in Safari / Chrome for Fingerprint"** with 1-tap URL copy/external launch guidance.
-3. **Ecosystem dApp & Hardware Roadmap:**
-   - **v1 PWA Connectivity (Phase 3):** Expose **`@creit-tech/stellar-wallets-kit` v2** (JSR `@creit-tech/stellar-wallets-kit`) module + **Reown AppKit (`@reown/appkit-adapter-stellar`)** WalletConnect v2 responder + **SEP-43/SEP-60** interface.
-   - **v2 Native Shell (Capacitor):** Wrap `apps/pwa` with **Capacitor** only when adding native **iOS Keychain / Android Keystore** and **Tangem NFC** (`tangem-sdk-ios` ISO 7816 APDU, impossible in WebKit Web NFC).
+### Resulting Mini App Design Rules
+1. **100% Telegram-Exclusive Entry & Cryptographic Auth:**
+   - Remove standalone public landing pages; `TelegramOnlyGate` permits entry only after `POST /v1/tg/auth` verifies `Telegram.WebApp.initData` (HMAC-SHA256, `auth_date <= 300s`) and mints a 15-minute session Bearer token (with `VITE_ALLOW_DEV_OUTSIDE_TELEGRAM=true` restricted solely to local Testnet dev).
+   - Private chats launch `web_app` buttons directly; group/inline cards use `https://t.me/<bot>[/<short_name>]?startapp=i-<intentId>-<sig>` and `startapp=t-<tab>`.
+2. **Telegram Super-Bot as Social & Real-Time Push Layer (`apps/server`):**
+   - `grammY` (`webhookCallback(bot, "cloudflare-mod")`) + Hono + D1/KV on Cloudflare Workers powers `/connect`, `/pay`, `/request`, `/split`, `/scan`, `/swap`, `/alerts`, `/reserve`, Claim Links V2, and live chat card updates.
+   - `POST /v1/tg/link-challenge` and `/v1/tg/link-confirm` also allow 1-tap wallet linking inside the Mini App bound directly to the authenticated `telegram_user_id`.
+3. **Ecosystem Hardware Roadmap (v2):**
+   - **v2 Native Shell (Capacitor):** Only if shipping a standalone native app for **Tangem NFC** (`tangem-sdk-ios` ISO 7816 APDU, unavailable in WebKit Web NFC).

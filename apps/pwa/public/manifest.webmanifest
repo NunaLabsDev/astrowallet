@@ -1,7 +1,7 @@
 {
   "name": "AstroWallet",
   "short_name": "AstroWallet",
-  "description": "Phone-first non-custodial Stellar & Soroban vault with Scan & Shield, Sorobits SEP-50, and Telegram Super-Bot.",
+  "description": "Telegram-exclusive non-custodial Stellar & TON multichain Mini App with Scan & Shield and Sorobits SEP-50.",
   "start_url": "/app",
   "display": "standalone",
   "orientation": "portrait",

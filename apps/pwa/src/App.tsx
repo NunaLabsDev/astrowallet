@@ -330,15 +330,18 @@ function RevealSeedModalContent({ onDone }: { onDone: () => void }) {
 
 function WalletShell({
   initialTab,
+  initialDrawer,
+  onClearInitialDrawer,
   intentRoute,
   onClearIntent,
-  onNavigateLanding,
 }: {
   initialTab: AppDockTab;
+  initialDrawer?: ActiveDrawer;
+  onClearInitialDrawer?: () => void;
   intentRoute: ActiveIntentRoute | null;
   onClearIntent: () => void;
-  onNavigateLanding: () => void;
 }) {
+  const { tgUser, sessionToken, linkedAccounts, refreshLinkedAccounts } = useTelegram();
   const {
     config,
     vaultStatus,
@@ -354,8 +357,11 @@ function WalletShell({
     chainError,
     fingerprintSupported,
     fingerprintEnrolled,
-    pendingDappConsent,
-    resolveDappConsent,
+    tonAccount,
+    tonConnectSessions,
+    pendingTonConnectTx,
+    resolvePendingTonConnectTx,
+    signConnectChallenge,
     enableFingerprint,
     disableFingerprint,
     exportAgVaultJson,
@@ -372,7 +378,7 @@ function WalletShell({
   } = useWallet();
 
   const [activeTab, setActiveTab] = useState<AppDockTab>(initialTab);
-  const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(null);
+  const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(initialDrawer ?? null);
   const [sendPrefill, setSendPrefill] = useState<SendPrefill>({});
   const [swapFromPrefill, setSwapFromPrefill] = useState<string | undefined>(undefined);
 
@@ -380,6 +386,11 @@ function WalletShell({
   const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
   const [activityFilter, setActivityFilter] = useState<ActivityFilter>("all");
   const [actionBusy, setActionBusy] = useState(false);
+
+  // Telegram Mini App link sync & TON Connect tx approval state
+  const [tgSyncBusy, setTgSyncBusy] = useState(false);
+  const [tgSyncError, setTgSyncError] = useState<string | null>(null);
+  const [tcApproveBusy, setTcApproveBusy] = useState(false);
 
   // Vault controls state
   const [fpPin, setFpPin] = useState("");
@@ -399,22 +410,77 @@ function WalletShell({
 
   const [wipeConfirmArmed, setWipeConfirmArmed] = useState(false);
 
-  const [webPushStatus, setWebPushStatus] = useState<string>(() => {
-    if (typeof Notification === "undefined") return "unsupported";
-    return Notification.permission;
-  });
-
   useEffect(() => {
     setActiveTab(initialTab);
   }, [initialTab]);
 
+  useEffect(() => {
+    if (initialDrawer) {
+      setActiveDrawer(initialDrawer);
+      onClearInitialDrawer?.();
+    }
+  }, [initialDrawer, onClearInitialDrawer]);
+
   const selectTab = useCallback((tab: AppDockTab) => {
+    triggerTelegramHaptic("selection");
     setActiveTab(tab);
-    if (typeof window !== "undefined" && window.location.pathname.startsWith("/app")) {
+    if (
+      typeof window !== "undefined" &&
+      (window.location.pathname === "/" || window.location.pathname.startsWith("/app"))
+    ) {
       const targetUrl = tab === "wallet" ? "/app" : `/app?tab=${tab}`;
       window.history.replaceState({}, "", targetUrl);
     }
   }, []);
+
+  const handleBack = useCallback(() => {
+    if (pendingTonConnectTx) {
+      if (!tcApproveBusy) {
+        void resolvePendingTonConnectTx(false);
+      }
+      return;
+    }
+    if (activeDrawer !== null) {
+      setActiveDrawer(null);
+      return;
+    }
+    if (intentRoute !== null) {
+      onClearIntent();
+      return;
+    }
+    if (activeTab !== "wallet") {
+      selectTab("wallet");
+    }
+  }, [
+    pendingTonConnectTx,
+    tcApproveBusy,
+    resolvePendingTonConnectTx,
+    activeDrawer,
+    intentRoute,
+    onClearIntent,
+    activeTab,
+    selectTab,
+  ]);
+
+  useTelegramBackButton(
+    pendingTonConnectTx !== null ||
+      activeDrawer !== null ||
+      intentRoute !== null ||
+      activeTab !== "wallet",
+    handleBack,
+  );
+
+  useEffect(() => {
+    const shouldConfirm =
+      vaultStatus === "uninitialized" ||
+      activeDrawer === "send" ||
+      activeDrawer === "swap" ||
+      activeDrawer === "revealSeed" ||
+      pendingTonConnectTx !== null ||
+      intentRoute !== null;
+    setTelegramClosingConfirmation(shouldConfirm);
+    return () => setTelegramClosingConfirmation(false);
+  }, [vaultStatus, activeDrawer, pendingTonConnectTx, intentRoute]);
 
   const primaryXlmBalance =
     accountState?.balances.find((b) => b.assetCode === "XLM")?.balance ?? "0.0000000";
@@ -567,16 +633,79 @@ function WalletShell({
     }
   };
 
-  const handleToggleDeclarativePush = async () => {
-    if (typeof Notification === "undefined") {
-      setWebPushStatus("unsupported");
-      return;
-    }
+  const handleSyncWalletWithTelegram = async () => {
+    if (!sessionToken || accounts.length === 0) return;
+    setTgSyncBusy(true);
+    setTgSyncError(null);
     try {
-      const perm = await Notification.requestPermission();
-      setWebPushStatus(perm);
-    } catch {
-      setWebPushStatus("denied");
+      const base = config.apiBaseUrl.replace(/\/+$/, "");
+      const chRes = await fetch(`${base}/v1/tg/link-challenge`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${sessionToken}` },
+      });
+      const chData = (await chRes.json()) as {
+        intentId?: string;
+        sig?: string;
+        message?: string;
+        error?: string;
+      };
+      if (!chRes.ok || !chData.intentId || !chData.sig || !chData.message) {
+        throw new Error(
+          chData.error ?? `Failed to start Telegram link challenge (${chRes.status})`,
+        );
+      }
+      const proofs = await signConnectChallenge(
+        chData.message,
+        accounts.map((a) => a.derivationIndex ?? 0),
+        Boolean(config.smartAccountWasmHash),
+      );
+      const cfRes = await fetch(`${base}/v1/tg/link-confirm`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          intentId: chData.intentId,
+          sig: chData.sig,
+          accounts: proofs,
+        }),
+      });
+      const cfData = (await cfRes.json()) as {
+        ok?: boolean;
+        linkedCount?: number;
+        error?: string;
+      };
+      if (!cfRes.ok) {
+        throw new Error(cfData.error ?? `Failed to verify Telegram link (${cfRes.status})`);
+      }
+      await refreshLinkedAccounts();
+      triggerTelegramHaptic("success");
+      showToast(
+        `Synced ${cfData.linkedCount ?? proofs.length} address(es) with @${config.tgBotUsername}`,
+      );
+    } catch (err) {
+      triggerTelegramHaptic("error");
+      setTgSyncError(
+        err instanceof Error ? err.message : "Failed to sync wallet with Telegram",
+      );
+    } finally {
+      setTgSyncBusy(false);
+    }
+  };
+
+  const handleApproveTonConnectTx = async () => {
+    setTcApproveBusy(true);
+    try {
+      await resolvePendingTonConnectTx(true);
+    } catch (err) {
+      triggerTelegramHaptic("error");
+      showToast(
+        err instanceof Error ? err.message : "TON Connect transaction signing failed",
+        "error",
+      );
+    } finally {
+      setTcApproveBusy(false);
     }
   };
 
@@ -587,95 +716,16 @@ function WalletShell({
   return (
     <div className="aw-app-canvas">
       <div className="aw-app-frame">
-        {/* Desktop Persistent Left Glass Sidebar */}
-        <aside className="aw-sidebar" aria-label="Desktop workspace navigation">
-          <div className="aw-sidebar-top">
-            <button
-              type="button"
-              className="aw-sidebar-brand"
-              onClick={onNavigateLanding}
-              title="Back to AstroWallet Website"
-            >
-              <AstroWalletLogo size={36} />
-              <div style={{ textAlign: "left" }}>
-                <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em" }}>
-                  AstroWallet
-                </div>
-                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                  Stellar &amp; Soroban Vault
-                </div>
-              </div>
-            </button>
-
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 12 }}>
-              <span
-                className={
-                  config.network === "testnet"
-                    ? "glass-pill glass-pill--gold"
-                    : "glass-pill glass-pill--trust"
-                }
-              >
-                {config.network.toUpperCase()}
-              </span>
-              <span className="glass-pill glass-pill--trust">0 Server Keys</span>
-            </div>
-          </div>
-
-          <nav className="aw-sidebar-nav" aria-label="App sections">
-            {SIDEBAR_ITEMS.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className="aw-sidebar-btn"
-                aria-current={activeTab === item.id ? "page" : undefined}
-                onClick={() => selectTab(item.id)}
-              >
-                {renderDockIcon(item.id)}
-                <span>{item.label}</span>
-              </button>
-            ))}
-          </nav>
-
-          <div className="aw-sidebar-foot">
-            <div className="aw-sidebar-posture">
-              <span className="aw-trust-dot" />
-              <span>SEP-0005 · Argon2id Local</span>
-            </div>
-
-            {vaultStatus === "unlocked" && (
-              <button
-                type="button"
-                className="aw-btn-secondary"
-                style={{ width: "100%", justifyContent: "center" }}
-                onClick={lockVault}
-              >
-                <IconLock size={15} />
-                <span>Lock Vault</span>
-              </button>
-            )}
-
-            <button
-              type="button"
-              className="aw-chip-btn"
-              style={{ width: "100%", justifyContent: "center" }}
-              onClick={onNavigateLanding}
-            >
-              <IconGlobe size={14} />
-              <span>Back to Website</span>
-            </button>
-          </div>
-        </aside>
-
-        {/* Main Workspace Stage */}
+        {/* Main Mini App Workspace Stage */}
         <main className="aw-app-main">
           <div className="aw-main-inner">
-            {/* Mobile Compact Header */}
+            {/* Compact Mini App Header */}
             <header className="aw-mobile-header">
               <button
                 type="button"
                 className="aw-sidebar-brand"
-                onClick={onNavigateLanding}
-                title="Back to AstroWallet Website"
+                onClick={() => selectTab("wallet")}
+                title="AstroWallet Home"
               >
                 <AstroWalletLogo size={34} />
                 <div style={{ textAlign: "left" }}>
@@ -683,20 +733,25 @@ function WalletShell({
                     AstroWallet
                   </div>
                   <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                    Non-Custodial Stellar Vault
+                    {tgUser?.username ? `@${tgUser.username} · Stellar & TON` : "Stellar & TON Mini App"}
                   </div>
                 </div>
               </button>
 
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <button
-                  type="button"
-                  className="aw-chip-btn"
-                  aria-label="Open Telegram Bot Tab"
-                  onClick={() => selectTab("telegram")}
-                >
-                  <IconTelegram size={14} />
-                </button>
+                {vaultStatus === "unlocked" && (
+                  <button
+                    type="button"
+                    className="aw-chip-btn"
+                    aria-label="Open TON Connect"
+                    onClick={() => setActiveDrawer("tonConnect")}
+                  >
+                    <IconPlug size={14} />
+                    {tonConnectSessions.length > 0 && (
+                      <span className="tabular-nums">{tonConnectSessions.length}</span>
+                    )}
+                  </button>
+                )}
                 <span
                   className={
                     config.network === "testnet"
@@ -720,8 +775,8 @@ function WalletShell({
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span className="aw-trust-dot" />
                 <span>
-                  <strong>Self-Custodial SEP-0005</strong> · Argon2id IndexedDB · Scan &amp; Shield
-                  Active
+                  <strong>Self-Custodial Stellar &amp; TON</strong> · Argon2id IndexedDB · Scan &amp;
+                  Shield Active
                 </span>
               </div>
               <span className="glass-pill glass-pill--trust">0 Server Keys</span>
@@ -750,7 +805,7 @@ function WalletShell({
 
             {vaultStatus === "locked" && (
               <div className="aw-center-stage">
-                <UnlockSheet onExploreSite={onNavigateLanding} />
+                <UnlockSheet />
               </div>
             )}
 
@@ -1112,8 +1167,8 @@ function WalletShell({
                               </span>
                               <IconChevronRight size={16} />
                             </div>
-                            <div className="aw-tool-title">Bridge &amp; Ramps</div>
-                            <div className="aw-tool-sub">Circle CCTP &amp; Fiat</div>
+                            <div className="aw-tool-title">CCTP Precision</div>
+                            <div className="aw-tool-sub">Circle CCTP 6&harr;7 Guard</div>
                           </button>
                         </div>
 
@@ -1122,7 +1177,7 @@ function WalletShell({
                             type="button"
                             className="aw-chip-btn"
                             style={{ flex: 1 }}
-                            onClick={() => selectTab("dev")}
+                            onClick={() => setActiveDrawer("dev")}
                           >
                             <IconCode size={13} />
                             <span>Open Dev Lab</span>
@@ -1131,15 +1186,27 @@ function WalletShell({
                             type="button"
                             className="aw-chip-btn"
                             style={{ flex: 1 }}
-                            onClick={() => selectTab("telegram")}
+                            onClick={() => setActiveDrawer("tonConnect")}
                           >
-                            <IconTelegram size={13} />
-                            <span>Telegram Bot</span>
+                            <IconPlug size={13} />
+                            <span>TON Connect</span>
                           </button>
                         </div>
                       </section>
                     </div>
                   </div>
+                )}
+
+                {activeTab === "ton" && (
+                  <Suspense
+                    fallback={
+                      <section className="glass-card" style={{ padding: 24, textAlign: "center" }}>
+                        Loading TON Wallet...
+                      </section>
+                    }
+                  >
+                    <TonWalletSheet />
+                  </Suspense>
                 )}
 
                 {activeTab === "nfts" && (
@@ -1318,20 +1385,58 @@ function WalletShell({
                   </section>
                 )}
 
-                {activeTab === "dev" && (
-                  <Suspense
-                    fallback={
-                      <section className="glass-card" style={{ padding: 24, textAlign: "center" }}>
-                        Loading Developer Workbench...
-                      </section>
-                    }
-                  >
-                    <DevLabSheet />
-                  </Suspense>
-                )}
-
                 {activeTab === "accounts" && (
                   <div style={{ display: "grid", gap: 14 }}>
+                    {/* Telegram Mini App Identity & Wallet Sync */}
+                    <section className="glass-card" style={{ display: "grid", gap: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <AstroNavigatorAvatar
+                            seedKey={activeAccount.address}
+                            kind="classic"
+                            state="comms"
+                            size={44}
+                          />
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 15, display: "flex", alignItems: "center", gap: 6 }}>
+                              <IconTelegram size={16} />
+                              <span>Telegram Mini App Sync</span>
+                            </div>
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                              {tgUser?.username
+                                ? `@${tgUser.username}`
+                                : tgUser
+                                  ? `Telegram ID ${tgUser.id}`
+                                  : "Outside Telegram (Dev Mode)"}{" "}
+                              · {linkedAccounts.length} linked address(es) on @{config.tgBotUsername}
+                            </div>
+                          </div>
+                        </div>
+
+                        <button
+                          type="button"
+                          className="aw-btn-primary"
+                          disabled={tgSyncBusy || !sessionToken || accounts.length === 0}
+                          onClick={() => void handleSyncWalletWithTelegram()}
+                        >
+                          <IconTelegram size={15} />
+                          <span>{tgSyncBusy ? "Signing & Syncing..." : "Sync Wallet with Telegram"}</span>
+                        </button>
+                      </div>
+
+                      {!sessionToken && (
+                        <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+                          Open inside Telegram (<code>@{config.tgBotUsername}</code>) to sign and
+                          sync accounts automatically via verified <code>initData</code>.
+                        </div>
+                      )}
+                      {tgSyncError && (
+                        <div className="aw-banner aw-banner--danger" style={{ fontSize: 12 }}>
+                          {tgSyncError}
+                        </div>
+                      )}
+                    </section>
+
                     {/* Derived Accounts + Rename */}
                     <section className="glass-card" style={{ display: "grid", gap: 14 }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
@@ -1646,23 +1751,46 @@ function WalletShell({
                       )}
                     </section>
 
-                    {/* dApp Connection Launcher Card */}
+                    {/* TON Connect v2 Launcher Card */}
                     <section className="glass-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
                       <div>
                         <div style={{ fontWeight: 700, fontSize: 15, display: "flex", alignItems: "center", gap: 8 }}>
                           <IconPlug size={17} />
-                          <span>Connect dApp (WalletConnect v2 / SEP-43)</span>
+                          <span>TON Connect v2 ({tonConnectSessions.length} Active)</span>
                         </div>
                         <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
-                          Sign Reown requests or test injected window.stellar SEP-43 methods
+                          {tonAccount
+                            ? `TON Wallet ${tonAccount.friendlyAddress.slice(0, 6)}…${tonAccount.friendlyAddress.slice(-6)} · Encrypted NaCl bridge (§7.3)`
+                            : "Connect Telegram Mini Apps & TON dApps cleanly via encrypted bridge"}
                         </div>
                       </div>
                       <button
                         type="button"
                         className="aw-btn-primary"
-                        onClick={() => setActiveDrawer("dapp")}
+                        onClick={() => setActiveDrawer("tonConnect")}
                       >
-                        <span>Open dApp Signer</span>
+                        <span>Open TON Connect</span>
+                        <IconChevronRight size={16} />
+                      </button>
+                    </section>
+
+                    {/* Developer Workbench Launcher Card */}
+                    <section className="glass-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                      <div>
+                        <div style={{ fontWeight: 700, fontSize: 15, display: "flex", alignItems: "center", gap: 8 }}>
+                          <IconCode size={17} />
+                          <span>Developer Workbench (Dev Lab)</span>
+                        </div>
+                        <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
+                          Soroban RPC Telemetry, Contracts, Raw XDR Signer &amp; SEP-53 Tools
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        className="aw-btn-secondary"
+                        onClick={() => setActiveDrawer("dev")}
+                      >
+                        <span>Open Dev Lab</span>
                         <IconChevronRight size={16} />
                       </button>
                     </section>
@@ -1711,86 +1839,14 @@ function WalletShell({
                   </div>
                 )}
 
-                {activeTab === "telegram" && (
-                  <section className="glass-card" style={{ display: "grid", gap: 14 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                      <div className="aw-pixel-frame">
-                        <AstroNavigatorAvatar
-                          seedKey={activeAccount.address}
-                          kind="classic"
-                          state="comms"
-                          size={58}
-                        />
-                      </div>
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: 16 }}>
-                          Telegram Super-Bot (@{config.tgBotUsername})
-                        </div>
-                        <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                          Non-custodial social payments, live card edits &amp; real-time alerts
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="aw-tg-steps">
-                      <div className="aw-seal-row">
-                        <span>1. Link 1 or all {accounts.length} SEP-0005 accounts</span>
-                        <code>/connect</code>
-                      </div>
-                      <div className="aw-seal-row">
-                        <span>2. Sign short-lived Intent URLs (HMAC ≤ 5 min)</span>
-                        <code>/pay 10 XLM @friend</code>
-                      </div>
-                      <div className="aw-seal-row">
-                        <span>3. Inline mode inside any Telegram chat</span>
-                        <code>@{config.tgBotUsername} pay 10 XLM @friend</code>
-                      </div>
-                    </div>
-
-                    <a
-                      href={`https://t.me/${config.tgBotUsername}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="aw-btn-primary"
-                    >
-                      <IconTelegram size={17} />
-                      <span>Open @{config.tgBotUsername} in Telegram</span>
-                      <IconExternalLink size={14} />
-                    </a>
-
-                    <div className="aw-list-row">
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: 13 }}>
-                          iOS 18.4+ Declarative Web Push
-                        </div>
-                        <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                          Optional browser alerts alongside Goldsky / Mercury Telegram push (status:{" "}
-                          <code>{webPushStatus}</code>)
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        className="aw-chip-btn"
-                        disabled={webPushStatus === "granted" || webPushStatus === "unsupported"}
-                        onClick={() => void handleToggleDeclarativePush()}
-                      >
-                        {webPushStatus === "granted"
-                          ? "Enabled"
-                          : webPushStatus === "unsupported"
-                            ? "Unavailable"
-                            : "Enable Push"}
-                      </button>
-                    </div>
-                  </section>
-                )}
               </>
             )}
           </div>
         </main>
       </div>
 
-      {/* Bottom Floating Apple Liquid Glass Dock (Mobile) */}
-      <nav className="glass-dock" aria-label="Primary mobile navigation">
+      {/* Bottom Floating Apple Liquid Glass Dock */}
+      <nav className="glass-dock" aria-label="Primary Mini App navigation">
         {MOBILE_DOCK_ITEMS.map((item) => (
           <button
             key={item.id}
@@ -1854,80 +1910,72 @@ function WalletShell({
           {activeDrawer === "scan" && <ScanShieldSheet />}
           {activeDrawer === "tools" && <ClassicToolsSheet />}
           {activeDrawer === "ramp" && <RampSheet />}
-          {activeDrawer === "dapp" && <DappConnectSheet />}
+          {activeDrawer === "tonConnect" && <TonConnectSheet />}
+          {activeDrawer === "dev" && <DevLabSheet />}
           {activeDrawer === "revealSeed" && (
             <RevealSeedModalContent onDone={() => setActiveDrawer(null)} />
           )}
         </Suspense>
       </ModalDrawer>
 
-      {/* Explicit SEP-43 window.stellar Consent Modal */}
+      {/* TON Connect v2 Transaction Approval Modal */}
       <ModalDrawer
-        open={pendingDappConsent !== null}
-        title="dApp Signature Request (SEP-43)"
+        open={pendingTonConnectTx !== null}
+        title="TON Connect Transaction Request"
         subtitle={
-          pendingDappConsent?.origin
-            ? `Origin: ${pendingDappConsent.origin}`
-            : "External dApp via window.stellar"
+          pendingTonConnectTx
+            ? `${pendingTonConnectTx.dappName} · ${pendingTonConnectTx.dappUrl}`
+            : undefined
         }
-        onClose={() => resolveDappConsent(false)}
+        onClose={() => {
+          if (!tcApproveBusy) {
+            void resolvePendingTonConnectTx(false);
+          }
+        }}
       >
-        {pendingDappConsent && (
+        {pendingTonConnectTx && (
           <div style={{ display: "grid", gap: 12 }}>
             <div className="aw-list-row">
-              <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Method</span>
-              <code>{pendingDappConsent.method}</code>
-            </div>
-            <div className="aw-list-row">
-              <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Payload</span>
-              <span style={{ fontSize: 12, wordBreak: "break-word" }}>
-                {pendingDappConsent.summary}
+              <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>TON Network</span>
+              <span className="glass-pill glass-pill--trust">
+                {config.tonNetwork.toUpperCase()}
               </span>
             </div>
-            {pendingDappConsent.scanReport && (
-              <div
-                className={
-                  pendingDappConsent.scanReport.verdict === "malicious"
-                    ? "aw-banner aw-banner--danger"
-                    : pendingDappConsent.scanReport.verdict === "warning"
-                      ? "aw-banner aw-banner--warn"
-                      : "aw-banner"
-                }
-                style={{ fontSize: 12, display: "grid", gap: 6 }}
-              >
-                <div>
-                  <strong>
-                    Scan &amp; Shield: {pendingDappConsent.scanReport.verdict.toUpperCase()}
-                  </strong>
-                  {pendingDappConsent.scanReport.estimatedFeeStroops !== "0" && (
-                    <span style={{ marginLeft: 8, color: "var(--aw-ink-secondary)" }}>
-                      · Max Fee: {pendingDappConsent.scanReport.estimatedFeeStroops} stroops
+            <div className="aw-list-row">
+              <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Valid Until</span>
+              <code className="tabular-nums">
+                {new Date(pendingTonConnectTx.validUntil * 1000).toLocaleTimeString()}
+              </code>
+            </div>
+            <div style={{ display: "grid", gap: 8 }}>
+              <span className="aw-label" style={{ marginBottom: 0 }}>
+                Transfer Messages ({pendingTonConnectTx.messages.length})
+              </span>
+              {pendingTonConnectTx.messages.map((m, idx) => (
+                <div key={`${m.address}-${idx}`} className="aw-list-row" style={{ flexWrap: "wrap" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontWeight: 700, fontSize: 13 }} className="tabular-nums">
+                      {formatNanoTon(m.amountNano)} TON
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)", wordBreak: "break-all" }}>
+                      To: <code>{m.address}</code>
+                    </div>
+                  </div>
+                  {(m.payload || m.stateInit) && (
+                    <span className="glass-pill glass-pill--gold">
+                      {m.stateInit ? "StateInit + Payload" : "Payload Cell"}
                     </span>
                   )}
                 </div>
-                {pendingDappConsent.scanReport.findings.map((finding, idx) => (
-                  <div key={`${finding.code}-${idx}`}>
-                    <strong>{finding.title}:</strong> {finding.description}
-                  </div>
-                ))}
-                {pendingDappConsent.scanReport.balanceDiffs.length > 0 && (
-                  <div style={{ display: "grid", gap: 3 }}>
-                    <span style={{ fontWeight: 600 }}>Projected Balance Changes:</span>
-                    {pendingDappConsent.scanReport.balanceDiffs.map((d, idx) => (
-                      <code key={`${d.assetCode}-${idx}`} style={{ fontSize: 11 }}>
-                        {d.delta} {d.assetCode} ({d.address.slice(0, 6)}…{d.address.slice(-4)})
-                      </code>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+              ))}
+            </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button
                 type="button"
                 className="aw-btn-secondary"
                 style={{ flex: 1 }}
-                onClick={() => resolveDappConsent(false)}
+                disabled={tcApproveBusy}
+                onClick={() => void resolvePendingTonConnectTx(false)}
               >
                 Reject
               </button>
@@ -1935,13 +1983,11 @@ function WalletShell({
                 type="button"
                 className="aw-btn-primary"
                 style={{ flex: 1 }}
-                disabled={
-                  pendingDappConsent.scanReport?.verdict === "malicious" ||
-                  Boolean(pendingDappConsent.scanReport?.findings.some((f) => f.blocksSigning))
-                }
-                onClick={() => resolveDappConsent(true)}
+                disabled={tcApproveBusy}
+                onClick={() => void handleApproveTonConnectTx()}
               >
-                Approve &amp; Sign
+                <IconCheck size={14} />
+                <span>{tcApproveBusy ? "Signing & Broadcasting..." : "Approve & Sign BOC"}</span>
               </button>
             </div>
           </div>
@@ -1952,10 +1998,13 @@ function WalletShell({
 }
 
 function RoutedExperience() {
+  const { startParamRoute } = useTelegram();
   const [route, setRoute] = useState(() => readLocationRoute());
   const [requestedTab, setRequestedTab] = useState<AppDockTab>(
     () => readLocationRoute().tab ?? "wallet",
   );
+  const [requestedDrawer, setRequestedDrawer] = useState<ActiveDrawer>(null);
+  const [dismissedStartParamKey, setDismissedStartParamKey] = useState<string | null>(null);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -1969,54 +2018,74 @@ function RoutedExperience() {
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
-  const navigateToApp = useCallback((tab: AppDockTab = "wallet") => {
-    setRequestedTab(tab);
-    const targetUrl = tab === "wallet" ? "/app" : `/app?tab=${tab}`;
-    if (typeof window !== "undefined") {
-      window.history.pushState({}, "", targetUrl);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+  useEffect(() => {
+    if (startParamRoute?.kind !== "tab") return;
+    const rawTab = startParamRoute.tab;
+    if ((VALID_TABS as readonly string[]).includes(rawTab)) {
+      setRequestedTab(rawTab as AppDockTab);
+    } else if (rawTab === "dev") {
+      setRequestedTab("accounts");
+      setRequestedDrawer("dev");
+    } else if (rawTab === "tonconnect") {
+      setRequestedTab("ton");
+      setRequestedDrawer("tonConnect");
     }
-    setRoute({ view: "app", tab, intent: null });
-  }, []);
+  }, [startParamRoute]);
 
-  const navigateToLanding = useCallback(() => {
-    if (typeof window !== "undefined") {
-      window.history.pushState({}, "", "/");
-      window.scrollTo({ top: 0, behavior: "smooth" });
-    }
-    setRoute({ view: "landing", tab: null, intent: null });
-  }, []);
+  const startParamIntentKey =
+    startParamRoute?.kind === "intent"
+      ? `${startParamRoute.intentId}:${startParamRoute.sig}`
+      : null;
+
+  const effectiveIntent: ActiveIntentRoute | null =
+    route.intent ??
+    (startParamRoute?.kind === "intent" && startParamIntentKey !== dismissedStartParamKey
+      ? { intentId: startParamRoute.intentId, sig: startParamRoute.sig }
+      : null);
 
   const handleDismissIntent = useCallback(() => {
     if (typeof window !== "undefined" && window.location.pathname.startsWith("/intent/")) {
       window.history.replaceState({}, "", "/app");
     }
-    setRoute((prev) => ({ ...prev, view: "app", intent: null }));
-  }, []);
+    if (startParamIntentKey) {
+      setDismissedStartParamKey(startParamIntentKey);
+    }
+    setRoute((prev) => ({ ...prev, intent: null }));
+  }, [startParamIntentKey]);
 
-  if (route.view === "landing" && !route.intent) {
-    return (
-      <Suspense
-        fallback={
-          <main className="glass-canvas">
-            <div className="aw-shell" style={{ paddingTop: 48, textAlign: "center" }}>
-              Loading AstroWallet...
-            </div>
-          </main>
-        }
-      >
-        <LandingPage onLaunchApp={navigateToApp} />
-      </Suspense>
-    );
-  }
+  const clearRequestedDrawer = useCallback(() => {
+    setRequestedDrawer(null);
+  }, []);
 
   return (
     <WalletShell
       initialTab={requestedTab}
-      intentRoute={route.intent}
+      initialDrawer={requestedDrawer}
+      onClearInitialDrawer={clearRequestedDrawer}
+      intentRoute={effectiveIntent}
       onClearIntent={handleDismissIntent}
-      onNavigateLanding={navigateToLanding}
     />
+  );
+}
+
+function MiniAppGate({ config }: { config: PwaConfig }) {
+  const { allowed, authStatus, authError, refreshTelegramAuth } = useTelegram();
+
+  if (!allowed) {
+    return (
+      <TelegramOnlyGate
+        config={config}
+        authStatus={authStatus}
+        authError={authError}
+        onRetry={() => void refreshTelegramAuth()}
+      />
+    );
+  }
+
+  return (
+    <WalletProvider config={config}>
+      <RoutedExperience />
+    </WalletProvider>
   );
 }
 
@@ -2056,8 +2125,8 @@ export function App() {
   }
 
   return (
-    <WalletProvider config={env.config}>
-      <RoutedExperience />
-    </WalletProvider>
+    <TelegramProvider config={env.config}>
+      <MiniAppGate config={env.config} />
+    </TelegramProvider>
   );
 }

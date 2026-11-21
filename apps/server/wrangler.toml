@@ -45,6 +45,8 @@ RELAY_MAX_OPERATIONS = "5"
 RELAY_MAX_FEE_STROOPS = "2000000"
 RELAY_DAILY_BUDGET_STROOPS = "500000000"
 TELEGRAM_API_ORIGIN = "https://api.telegram.org"
+TG_BOT_USERNAME = "AstroWalletAppBot"
+TG_MINI_APP_SHORT_NAME = "wallet"
 
 [env.testnet]
 name = "astrowallet-server"
@@ -84,6 +86,8 @@ RELAY_MAX_OPERATIONS = "5"
 RELAY_MAX_FEE_STROOPS = "2000000"
 RELAY_DAILY_BUDGET_STROOPS = "500000000"
 TELEGRAM_API_ORIGIN = "https://api.telegram.org"
+TG_BOT_USERNAME = "AstroWalletAppBot"
+TG_MINI_APP_SHORT_NAME = "wallet"
 
 [env.mainnet]
 name = "astrowallet-server-mainnet"
@@ -120,3 +124,5 @@ RELAY_MAX_OPERATIONS = "5"
 RELAY_MAX_FEE_STROOPS = "2000000"
 RELAY_DAILY_BUDGET_STROOPS = "500000000"
 TELEGRAM_API_ORIGIN = "https://api.telegram.org"
+TG_BOT_USERNAME = "AstroWalletBot"
+# TG_MINI_APP_SHORT_NAME = "wallet"

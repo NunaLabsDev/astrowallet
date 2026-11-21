@@ -292,12 +292,14 @@ export function buildTonConnectSuccessEvent(input: {
   publicKeyHex: string;
   appName?: string | undefined;
   appVersion?: string | undefined;
-  tonProof?: {
-    timestamp: number;
-    domain: string;
-    payload: string;
-    signatureBase64: string;
-  };
+  tonProof?:
+    | {
+        timestamp: number;
+        domain: string;
+        payload: string;
+        signatureBase64: string;
+      }
+    | undefined;
 }): string {
   const items: Array<Record<string, unknown>> = [
     {

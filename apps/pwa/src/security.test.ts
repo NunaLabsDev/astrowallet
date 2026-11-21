@@ -1,10 +1,12 @@
 import { evaluateSecretStrength } from "@astrowallet/stellar-core";
+import { parseStartAppParam } from "@astrowallet/tg-protocol";
 import { describe, expect, it } from "vitest";
 import {
   SessionMnemonicVault,
   inspectDappAuthEntrySecurity,
   mapSep7MemoKind,
 } from "./state/session-vault.js";
+import { shouldAllowMiniAppAccess } from "./telegram/webapp.js";
 
 const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
 const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
@@ -58,5 +60,63 @@ describe("PWA Client Security Hardening", () => {
     expect(evaluateSecretStrength("000000").acceptable).toBe(false);
     expect(evaluateSecretStrength("839201").acceptable).toBe(true);
     expect(evaluateSecretStrength("DeepOrbital#2026").level).toBe("strong");
+  });
+
+  it("enforces 100% Telegram-only Mini App access gate", () => {
+    expect(
+      shouldAllowMiniAppAccess({
+        inTelegram: false,
+        allowDevOutsideTelegram: false,
+        authStatus: "outside",
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldAllowMiniAppAccess({
+        inTelegram: false,
+        allowDevOutsideTelegram: true,
+        authStatus: "outside",
+      }),
+    ).toBe(true);
+
+    expect(
+      shouldAllowMiniAppAccess({
+        inTelegram: true,
+        allowDevOutsideTelegram: true,
+        authStatus: "checking",
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldAllowMiniAppAccess({
+        inTelegram: true,
+        allowDevOutsideTelegram: false,
+        authStatus: "error",
+      }),
+    ).toBe(false);
+
+    expect(
+      shouldAllowMiniAppAccess({
+        inTelegram: true,
+        allowDevOutsideTelegram: false,
+        authStatus: "verified",
+      }),
+    ).toBe(true);
+  });
+
+  it("parses Telegram startapp intent and tab routing parameters cleanly", () => {
+    const sig = "A".repeat(64);
+    expect(parseStartAppParam(`i-it_abc123-${sig}`)).toEqual({
+      kind: "intent",
+      intentId: "it_abc123",
+      sig: "a".repeat(64),
+    });
+
+    expect(parseStartAppParam("t-ton")).toEqual({ kind: "tab", tab: "ton" });
+    expect(parseStartAppParam("t-accounts")).toEqual({ kind: "tab", tab: "accounts" });
+
+    expect(parseStartAppParam("")).toBeNull();
+    expect(parseStartAppParam("i-it_abc123-short")).toBeNull();
+    expect(parseStartAppParam("unknown-param")).toBeNull();
   });
 });

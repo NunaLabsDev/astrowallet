@@ -22,7 +22,9 @@ FRIENDBOT_URL=https://friendbot.stellar.org
 # RELAY_DAILY_BUDGET_STROOPS=500000000
 # TELEGRAM_API_ORIGIN=https://api.telegram.org
 
-# Required secrets (use `wrangler secret put` in deployment)
+# Required Telegram Bot & Mini App variables (use `wrangler secret put` in deployment)
+TG_BOT_USERNAME=AstroWalletAppBot
+# TG_MINI_APP_SHORT_NAME=wallet
 TG_BOT_TOKEN=replace_with_dedicated_testnet_bot_token
 TG_WEBHOOK_SECRET=replace_with_at_least_16_char_random_secret
 INTENT_HMAC_SECRET=replace_with_at_least_32_char_random_hmac_secret

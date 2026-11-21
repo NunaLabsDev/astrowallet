@@ -45,14 +45,14 @@ export function TonConnectSheet() {
       aria-label="TON Connect v2 Wallet Bridge"
       style={{ display: "grid", gap: 12 }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, minWidth: 0 }}>
         <AstroNavigatorAvatar
           seedKey={`${tonAccount.rawAddress}:tc`}
           kind="smart"
           state={pendingTonConnectTx ? "shield" : busy ? "warp" : "comms"}
           size={54}
         />
-        <div>
+        <div style={{ minWidth: 0, flex: "1 1 180px" }}>
           <div style={{ fontWeight: 700, fontSize: 15 }}>
             TON Connect v2 (Telegram §7.3 Compliant)
           </div>
@@ -74,12 +74,12 @@ export function TonConnectSheet() {
             Incoming TON Connect Signature Request · {pendingTonConnectTx.dappName}
           </div>
           {pendingTonConnectTx.messages.map((m, idx) => (
-            <div key={`${m.address}-${idx}`} style={{ fontSize: 11 }}>
-              To: <code>{m.address}</code> · Amount:{" "}
+            <div key={`${m.address}-${idx}`} style={{ fontSize: 11, overflowWrap: "anywhere" }}>
+              To: <code style={{ wordBreak: "break-all" }}>{m.address}</code> · Amount:{" "}
               <strong>{formatNanoTon(m.amountNano)} TON</strong>
             </div>
           ))}
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="button"
               className="aw-btn-secondary"
@@ -138,9 +138,9 @@ export function TonConnectSheet() {
         ) : (
           tonConnectSessions.map((sess) => (
             <div key={sess.walletClientId} className="aw-list-row">
-              <div>
+              <div style={{ minWidth: 0, flex: "1 1 180px" }}>
                 <div style={{ fontWeight: 700, fontSize: 13 }}>{sess.dappName}</div>
-                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)", overflowWrap: "anywhere" }}>
                   {sess.dappUrl} • {sess.network.toUpperCase()}
                 </div>
               </div>

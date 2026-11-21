@@ -24,6 +24,7 @@ import {
   IconArrowDownLeft,
   IconArrowUpRight,
   IconBridge,
+  IconChart,
   IconCheck,
   IconChevronRight,
   IconClose,
@@ -38,6 +39,7 @@ import {
   IconPlug,
   IconReceive,
   IconRefresh,
+  IconSearch,
   IconSend,
   IconShield,
   IconSwap,
@@ -48,6 +50,9 @@ import {
   IconWallet,
   IconZap,
 } from "./components/Icons.js";
+import type { SelectedTokenTarget } from "./components/TokenExplorerSheet.js";
+import { TokenBadge } from "./components/TokenBadge.js";
+import { classifyTokenTrust } from "./components/token-catalog.js";
 import {
   IntentSheet,
   parseIntentRouteFromLocation,
@@ -97,6 +102,9 @@ const TonConnectSheet = lazy(() =>
 const TonWalletSheet = lazy(() =>
   import("./components/TonWalletSheet.js").then((m) => ({ default: m.TonWalletSheet })),
 );
+const TokenExplorerSheet = lazy(() =>
+  import("./components/TokenExplorerSheet.js").then((m) => ({ default: m.TokenExplorerSheet })),
+);
 
 export type AppDockTab = "wallet" | "ton" | "activity" | "nfts" | "accounts";
 
@@ -105,6 +113,7 @@ type ActiveDrawer =
   | "receive"
   | "swap"
   | "scan"
+  | "tokens"
   | "tools"
   | "ramp"
   | "tonConnect"
@@ -178,6 +187,11 @@ function drawerMetadata(
       return {
         title: "Scan & Shield Firewall",
         subtitle: "Pre-sign XDR simulator & anti-drainer analysis",
+      };
+    case "tokens":
+      return {
+        title: "Stellar Token Explorer & Scanner",
+        subtitle: `Official SEP-42 directory, chart, SAC C... & issuer flags · ${network.toUpperCase()}`,
       };
     case "tools":
       return {
@@ -372,6 +386,7 @@ function WalletShell({
     chainError,
     fingerprintSupported,
     fingerprintEnrolled,
+    verifiedAssets,
     tonAccount,
     tonConnectSessions,
     pendingTonConnectTx,
@@ -397,6 +412,8 @@ function WalletShell({
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(initialDrawer ?? null);
   const [sendPrefill, setSendPrefill] = useState<SendPrefill>({});
   const [swapFromPrefill, setSwapFromPrefill] = useState<string | undefined>(undefined);
+  const [swapToPrefill, setSwapToPrefill] = useState<string | undefined>(undefined);
+  const [selectedTokenTarget, setSelectedTokenTarget] = useState<SelectedTokenTarget | null>(null);
 
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
@@ -587,9 +604,21 @@ function WalletShell({
     setActiveDrawer("send");
   };
 
-  const openSwapWith = (fromAsset?: string) => {
-    setSwapFromPrefill(fromAsset);
+  const openSwapWith = (opts?: string | { fromAsset?: string; toAsset?: string }) => {
+    if (typeof opts === "string") {
+      setSwapFromPrefill(opts);
+      setSwapToPrefill(undefined);
+    } else {
+      setSwapFromPrefill(opts?.fromAsset);
+      setSwapToPrefill(opts?.toAsset);
+    }
     setActiveDrawer("swap");
+  };
+
+  const openTokenExplorer = (target: SelectedTokenTarget | null = null) => {
+    triggerTelegramHaptic("selection");
+    setSelectedTokenTarget(target);
+    setActiveDrawer("tokens");
   };
 
   const handleCopyAddress = async () => {
@@ -1038,9 +1067,9 @@ function WalletShell({
             {/* Banking-Trust Custody Posture Strip */}
             {isWalletUnlocked && (
               <div className="aw-trust-strip" role="status" aria-label="Security posture">
-                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: "1 1 200px" }}>
                   <span className="aw-trust-dot" />
-                  <span>
+                  <span style={{ minWidth: 0 }}>
                     <strong>Self-Custodial Stellar &amp; TON</strong> · Argon2id IndexedDB · Scan &amp;
                     Shield Active
                   </span>
@@ -1276,7 +1305,15 @@ function WalletShell({
                           }}
                         >
                           <span style={{ fontWeight: 700, fontSize: 15 }}>On-Chain Balances</span>
-                          <div style={{ display: "flex", gap: 6 }}>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              className="aw-chip-btn"
+                              onClick={() => openTokenExplorer(null)}
+                            >
+                              <IconSearch size={13} />
+                              <span>Explore Tokens</span>
+                            </button>
                             <button
                               type="button"
                               className="aw-chip-btn"
@@ -1298,31 +1335,103 @@ function WalletShell({
 
                         {accountState?.balances && accountState.balances.length > 0 ? (
                           <div style={{ display: "grid", gap: 8 }}>
-                            {accountState.balances.map((b) => (
-                              <div
-                                key={`${b.assetCode}:${b.assetIssuer ?? "native"}`}
-                                className="aw-list-row"
-                              >
-                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                                  <span className="aw-asset-badge">
-                                    {b.assetCode.slice(0, 3)}
-                                  </span>
-                                  <div>
-                                    <div style={{ fontWeight: 700, fontSize: 14 }}>{b.assetCode}</div>
-                                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                                      {b.assetIssuer
-                                        ? `${b.assetIssuer.slice(0, 6)}…${b.assetIssuer.slice(-4)}`
-                                        : "Native Stellar Lumen"}
+                            {accountState.balances.map((b) => {
+                              const matchedVerified = verifiedAssets.find(
+                                (v) =>
+                                  v.code.toUpperCase() === b.assetCode.toUpperCase() &&
+                                  v.issuer === b.assetIssuer,
+                              );
+                              const trust = classifyTokenTrust({
+                                assetCode: b.assetCode,
+                                assetIssuer: b.assetIssuer,
+                                verifiedAssets,
+                              });
+                              return (
+                                <div
+                                  key={`${b.assetCode}:${b.assetIssuer ?? "native"}`}
+                                  className="aw-list-row"
+                                >
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      openTokenExplorer({
+                                        assetCode: b.assetCode,
+                                        assetIssuer: b.assetIssuer,
+                                        name: matchedVerified?.name,
+                                        domain: matchedVerified?.domain,
+                                        icon: matchedVerified?.icon,
+                                      })
+                                    }
+                                    style={{
+                                      display: "flex",
+                                      alignItems: "center",
+                                      gap: 10,
+                                      background: "transparent",
+                                      border: "none",
+                                      padding: 0,
+                                      color: "inherit",
+                                      fontFamily: "inherit",
+                                      cursor: "pointer",
+                                      textAlign: "left",
+                                      minWidth: 0,
+                                      flex: "1 1 160px",
+                                    }}
+                                  >
+                                    <TokenBadge
+                                      code={b.assetCode}
+                                      icon={matchedVerified?.icon}
+                                      size={36}
+                                      trustStatus={trust.status}
+                                    />
+                                    <div style={{ minWidth: 0 }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                        <span style={{ fontWeight: 700, fontSize: 14 }}>{b.assetCode}</span>
+                                        {(b.isVerifiedAsset || trust.status === "official") && (
+                                          <span className="glass-pill glass-pill--trust" style={{ padding: "1px 6px", fontSize: 10 }}>
+                                            ✓ Official
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)", overflowWrap: "anywhere" }}>
+                                        {matchedVerified?.domain
+                                          ? matchedVerified.domain
+                                          : b.assetIssuer
+                                            ? `${b.assetIssuer.slice(0, 6)}…${b.assetIssuer.slice(-4)}`
+                                            : "Native Stellar Lumen"}
+                                      </div>
                                     </div>
-                                  </div>
-                                </div>
+                                  </button>
 
-                                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                  <div style={{ textAlign: "right" }}>
+                                <div
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 8,
+                                    marginLeft: "auto",
+                                    minWidth: 0,
+                                    maxWidth: "100%",
+                                    flexWrap: "wrap",
+                                    justifyContent: "flex-end",
+                                  }}
+                                >
+                                  <div style={{ textAlign: "right", minWidth: 0, maxWidth: "100%" }}>
                                     <div className="tabular-nums" style={{ fontWeight: 700, fontSize: 14 }}>
                                       {Number(b.balance).toFixed(4)}
                                     </div>
-                                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", marginTop: 4 }}>
+                                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", flexWrap: "wrap", marginTop: 4 }}>
+                                      <button
+                                        type="button"
+                                        className="aw-mini-chip"
+                                        onClick={() =>
+                                          openTokenExplorer({
+                                            assetCode: b.assetCode,
+                                            assetIssuer: b.assetIssuer,
+                                          })
+                                        }
+                                      >
+                                        <IconChart size={11} />
+                                        <span>Inspect</span>
+                                      </button>
                                       <button
                                         type="button"
                                         className="aw-mini-chip"
@@ -1350,7 +1459,8 @@ function WalletShell({
                                   </div>
                                 </div>
                               </div>
-                            ))}
+                              );
+                            })}
                           </div>
                         ) : (
                           <div className="aw-empty-state">
@@ -1358,6 +1468,49 @@ function WalletShell({
                             <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
                               Fund this account with at least 1 XLM to activate it on{" "}
                               {config.network.toUpperCase()}.
+                            </div>
+                          </div>
+                        )}
+
+                        {verifiedAssets.length > 0 && (
+                          <div className="aw-vault-divider">
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <span style={{ fontSize: 11, fontWeight: 700, color: "var(--aw-ink-secondary)" }}>
+                                Official Stellar Tokens (SEP-42)
+                              </span>
+                              <button
+                                type="button"
+                                className="aw-mini-chip"
+                                onClick={() => openTokenExplorer(null)}
+                              >
+                                View All ({verifiedAssets.length + 1})
+                              </button>
+                            </div>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {verifiedAssets.slice(0, 6).map((v) => (
+                                <button
+                                  key={`${v.code}:${v.issuer}`}
+                                  type="button"
+                                  className="aw-mini-chip"
+                                  onClick={() =>
+                                    openTokenExplorer({
+                                      assetCode: v.code,
+                                      assetIssuer: v.issuer,
+                                      name: v.name,
+                                      domain: v.domain,
+                                      icon: v.icon,
+                                    })
+                                  }
+                                >
+                                  <TokenBadge
+                                    code={v.code}
+                                    icon={v.icon}
+                                    size={16}
+                                    trustStatus="official"
+                                  />
+                                  <span>{v.code}</span>
+                                </button>
+                              ))}
                             </div>
                           </div>
                         )}
@@ -1607,7 +1760,7 @@ function WalletShell({
                               </div>
                             </div>
 
-                            <div style={{ display: "grid", justifyItems: "end", gap: 4 }}>
+                            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", justifyItems: "end", gap: 4, marginLeft: "auto", minWidth: 0 }}>
                               <div
                                 className="tabular-nums"
                                 style={{
@@ -1620,7 +1773,7 @@ function WalletShell({
                                 {inbound ? "+" : "-"}
                                 {p.amount} {p.assetCode}
                               </div>
-                              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
                                 <button
                                   type="button"
                                   className="aw-mini-chip"
@@ -1746,7 +1899,7 @@ function WalletShell({
                                     </div>
                                   </div>
                                 </div>
-                                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
                                   <span className="glass-pill">m/44&apos;/148&apos;/{idx}&apos;</span>
                                   <button
                                     type="button"
@@ -1843,10 +1996,11 @@ function WalletShell({
                             </button>
                           </div>
                         ) : (
-                          <div style={{ display: "flex", gap: 8 }}>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                             <input
                               type="password"
                               className="aw-input"
+                              style={{ flex: "1 1 180px", minWidth: 0 }}
                               placeholder="Enter PIN to enroll Fingerprint"
                               value={fpPin}
                               onChange={(e) => setFpPin(e.target.value)}
@@ -2408,8 +2562,27 @@ function WalletShell({
           {activeDrawer === "receive" && (
             <ReceiveSheet embedded onClose={() => setActiveDrawer(null)} />
           )}
-          {activeDrawer === "swap" && <SwapSheet initialFromAsset={swapFromPrefill} />}
+          {activeDrawer === "swap" && (
+            <SwapSheet
+              initialFromAsset={swapFromPrefill}
+              initialToAsset={swapToPrefill}
+              onInspectToken={(target) => openTokenExplorer(target)}
+            />
+          )}
           {activeDrawer === "scan" && <ScanShieldSheet />}
+          {activeDrawer === "tokens" && (
+            <TokenExplorerSheet
+              initialToken={selectedTokenTarget}
+              onOpenSend={(prefill) => openSendWith(prefill)}
+              onOpenSwap={({ assetId, mode }) =>
+                openSwapWith(
+                  mode === "from"
+                    ? { fromAsset: assetId }
+                    : { fromAsset: "XLM", toAsset: assetId },
+                )
+              }
+            />
+          )}
           {activeDrawer === "tools" && <ClassicToolsSheet />}
           {activeDrawer === "ramp" && <RampSheet />}
           {activeDrawer === "tonConnect" && <TonConnectSheet />}

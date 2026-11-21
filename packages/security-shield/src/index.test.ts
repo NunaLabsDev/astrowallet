@@ -661,4 +661,62 @@ describe("Scan & Shield deterministic pre-sign rules", () => {
       },
     ]);
   });
+
+  it("preserves optional SEP-42 metadata (name, domain, icon, decimals, contract) when fetching asset lists", async () => {
+    clearSep42AssetCache();
+    const issuerA = Keypair.random().publicKey();
+    const contractA = StrKey.encodeContract(new Uint8Array(32).fill(7));
+
+    const assets = await fetchSep42VerifiedAssets(
+      ["https://sep42-list-a.example/assets.json", "https://sep42-list-b.example/assets.json"],
+      {
+        fetchFn: async (input) => {
+          const url = String(input);
+          if (url.includes("list-a")) {
+            return new Response(
+              JSON.stringify({
+                assets: [
+                  {
+                    code: "USDC",
+                    issuer: issuerA,
+                    name: "USD Coin",
+                    domain: "centre.io",
+                    icon: "https://assets.example/usdc.png",
+                    decimals: 7,
+                    contract: contractA,
+                  },
+                ],
+              }),
+              { status: 200 },
+            );
+          }
+          return new Response(
+            JSON.stringify({
+              assets: [
+                {
+                  code: "USDC",
+                  issuer: issuerA,
+                  org: "Circle Internet Financial",
+                  icon: "http://insecure.example/ignore.png",
+                },
+              ],
+            }),
+            { status: 200 },
+          );
+        },
+      },
+    );
+
+    expect(assets).toHaveLength(1);
+    expect(assets[0]).toEqual({
+      code: "USDC",
+      issuer: issuerA,
+      name: "USD Coin",
+      domain: "centre.io",
+      icon: "https://assets.example/usdc.png",
+      decimals: 7,
+      contract: contractA,
+    });
+    clearSep42AssetCache();
+  });
 });

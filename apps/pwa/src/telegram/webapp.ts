@@ -148,6 +148,10 @@ export function initTelegramMiniApp(): TelegramWebAppInstance | null {
         (wa.safeAreaInset?.top ?? 0) + (wa.contentSafeAreaInset?.top ?? 0);
       const bottomInset =
         (wa.safeAreaInset?.bottom ?? 0) + (wa.contentSafeAreaInset?.bottom ?? 0);
+      const leftInset =
+        (wa.safeAreaInset?.left ?? 0) + (wa.contentSafeAreaInset?.left ?? 0);
+      const rightInset =
+        (wa.safeAreaInset?.right ?? 0) + (wa.contentSafeAreaInset?.right ?? 0);
       if (topInset > 0) {
         document.documentElement.style.setProperty("--tg-safe-area-inset-top", `${topInset}px`);
       }
@@ -155,6 +159,25 @@ export function initTelegramMiniApp(): TelegramWebAppInstance | null {
         document.documentElement.style.setProperty(
           "--tg-safe-area-inset-bottom",
           `${bottomInset}px`,
+        );
+      }
+      if (leftInset > 0) {
+        document.documentElement.style.setProperty("--tg-safe-area-inset-left", `${leftInset}px`);
+      }
+      if (rightInset > 0) {
+        document.documentElement.style.setProperty(
+          "--tg-safe-area-inset-right",
+          `${rightInset}px`,
+        );
+      }
+      if (
+        typeof wa.viewportStableHeight === "number" &&
+        Number.isFinite(wa.viewportStableHeight) &&
+        wa.viewportStableHeight > 0
+      ) {
+        document.documentElement.style.setProperty(
+          "--tg-viewport-stable-height",
+          `${Math.round(wa.viewportStableHeight)}px`,
         );
       }
     }

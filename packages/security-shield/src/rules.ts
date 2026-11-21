@@ -22,6 +22,11 @@ export interface DirectoryTagEntry {
 export interface VerifiedAssetEntry {
   code: string;
   issuer: string;
+  name?: string | undefined;
+  domain?: string | undefined;
+  icon?: string | undefined;
+  decimals?: number | undefined;
+  contract?: string | undefined;
 }
 
 export interface SecurityRuleContext {

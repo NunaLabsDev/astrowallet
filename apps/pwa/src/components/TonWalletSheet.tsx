@@ -158,7 +158,7 @@ export function TonWalletSheet() {
   };
 
   return (
-    <div style={{ display: "grid", gap: 14 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 14, minWidth: 0 }}>
       <section className="glass-card glass-card--vault aw-hero-balance-card">
         <div className="aw-balance-top">
           <div className="aw-pixel-frame">
@@ -244,19 +244,31 @@ export function TonWalletSheet() {
         {showQr && (
           <div
             className="aw-banner"
-            style={{ display: "grid", gap: 10, justifyItems: "center", marginTop: 8 }}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr)",
+              gap: 10,
+              justifyItems: "center",
+              marginTop: 8,
+            }}
           >
-            {qrDataUrl && (
-              <div className="aw-qr-frame">
-                <img
-                  src={qrDataUrl}
-                  width={168}
-                  height={168}
-                  alt="TON wallet QR code"
-                  style={{ display: "block", borderRadius: 12 }}
-                />
-              </div>
-            )}
+            <div className="aw-qr-slot">
+              {qrDataUrl ? (
+                <div className="aw-qr-frame">
+                  <img
+                    src={qrDataUrl}
+                    width={168}
+                    height={168}
+                    alt="TON wallet QR code"
+                    style={{ display: "block", borderRadius: 12 }}
+                  />
+                </div>
+              ) : (
+                <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                  Generating QR...
+                </span>
+              )}
+            </div>
             <code style={{ fontSize: 11, wordBreak: "break-all", textAlign: "center" }}>
               {tonAccount.friendlyAddress}
             </code>
@@ -277,10 +289,21 @@ export function TonWalletSheet() {
         </div>
       )}
 
-      <section className="glass-card" style={{ display: "grid", gap: 10 }}>
+      <section
+        className="glass-card"
+        style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 10, minWidth: 0 }}
+      >
         {reviewPending ? (
           <div className="aw-review-card">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                flexWrap: "wrap",
+                gap: 8,
+              }}
+            >
               <span style={{ fontWeight: 700, fontSize: 15 }}>Review TON Transfer</span>
               <span className="glass-pill glass-pill--trust">
                 TON {config.tonNetwork.toUpperCase()}
@@ -307,6 +330,10 @@ export function TonWalletSheet() {
               <div className="aw-review-row">
                 <span>Comment</span>
                 <code>{reviewPending.comment ?? "None"}</code>
+              </div>
+              <div className="aw-review-row">
+                <span>Est. Network Fee</span>
+                <code className="tabular-nums">~0.005 – 0.015 TON</code>
               </div>
             </div>
 
@@ -340,7 +367,10 @@ export function TonWalletSheet() {
         ) : (
           <>
             <div style={{ fontWeight: 700, fontSize: 15 }}>Send TON</div>
-            <form onSubmit={handlePrepareReview} style={{ display: "grid", gap: 10 }}>
+            <form
+              onSubmit={handlePrepareReview}
+              style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 10, minWidth: 0 }}
+            >
               <div>
                 <label className="aw-label" htmlFor="ton-send-dest">
                   Recipient TON Address
@@ -400,7 +430,10 @@ export function TonWalletSheet() {
 
               {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
               {txHash && (
-                <div className="aw-banner" style={{ display: "grid", gap: 8, fontSize: 12 }}>
+                <div
+                  className="aw-banner"
+                  style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8, fontSize: 12 }}
+                >
                   <div>
                     Broadcasted TON transfer: <code style={{ wordBreak: "break-all" }}>{txHash}</code>
                   </div>

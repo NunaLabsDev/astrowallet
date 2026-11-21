@@ -114,10 +114,12 @@ export function ReceiveSheet({
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            flexWrap: "wrap",
+            gap: 8,
             marginBottom: 14,
           }}
         >
-          <div>
+          <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700 }}>
               Receive to {activeAccount.label}
             </div>
@@ -131,7 +133,7 @@ export function ReceiveSheet({
         </div>
       )}
 
-      <div style={{ display: "grid", gap: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 14, minWidth: 0 }}>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           <button
             type="button"
@@ -222,17 +224,23 @@ export function ReceiveSheet({
             textAlign: "center",
           }}
         >
-          {qrDataUrl && (
-            <div className="aw-qr-frame">
-              <img
-                src={qrDataUrl}
-                width={184}
-                height={184}
-                alt={`QR code for ${mode}`}
-                style={{ display: "block", borderRadius: 12 }}
-              />
-            </div>
-          )}
+          <div className="aw-qr-slot">
+            {qrDataUrl ? (
+              <div className="aw-qr-frame">
+                <img
+                  src={qrDataUrl}
+                  width={184}
+                  height={184}
+                  alt={`QR code for ${mode}`}
+                  style={{ display: "block", borderRadius: 12 }}
+                />
+              </div>
+            ) : (
+              <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                Generating QR...
+              </span>
+            )}
+          </div>
 
           <div
             style={{

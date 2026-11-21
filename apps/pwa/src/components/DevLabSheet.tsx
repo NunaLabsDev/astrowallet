@@ -500,7 +500,7 @@ export function DevLabSheet() {
                 <input
                   type="text"
                   className="aw-input"
-                  style={{ flex: 1, minWidth: 220 }}
+                  style={{ flex: "1 1 180px", minWidth: 0 }}
                   placeholder="G..."
                   value={faucetTarget}
                   onChange={(e) => setFaucetTarget(e.target.value)}
@@ -681,7 +681,7 @@ export function DevLabSheet() {
                   target="_blank"
                   rel="noreferrer"
                   className="aw-chip-btn"
-                  style={{ width: "fit-content" }}
+                  style={{ justifySelf: "start" }}
                 >
                   <span>View on Explorer</span>
                   <IconExternalLink size={13} />

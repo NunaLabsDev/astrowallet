@@ -101,15 +101,19 @@ export function ScanShieldSheet() {
   };
 
   return (
-    <section className="glass-card" aria-label="Scan and Shield Analyzer" style={{ display: "grid", gap: 12 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <section
+      className="glass-card"
+      aria-label="Scan and Shield Analyzer"
+      style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 12, minWidth: 0 }}
+    >
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, minWidth: 0 }}>
         <AstroNavigatorAvatar
           seedKey="scan-shield-engine"
           kind="smart"
           state="shield"
           size={56}
         />
-        <div>
+        <div style={{ minWidth: 0, flex: "1 1 180px" }}>
           <div style={{ fontWeight: 700, fontSize: 15 }}>
             Scan &amp; Shield Pre-Sign Analyzer
           </div>
@@ -119,7 +123,10 @@ export function ScanShieldSheet() {
         </div>
       </div>
 
-      <form onSubmit={handleAnalyze} style={{ display: "grid", gap: 10 }}>
+      <form
+        onSubmit={handleAnalyze}
+        style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 10, minWidth: 0 }}
+      >
         <textarea
           className="aw-textarea"
           rows={3}
@@ -139,7 +146,7 @@ export function ScanShieldSheet() {
       {error && <div className="aw-banner aw-banner--danger">{error}</div>}
 
       {report && (
-        <div style={{ display: "grid", gap: 10 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 10, minWidth: 0 }}>
           <div
             className={
               report.verdict === "malicious"
@@ -203,17 +210,7 @@ export function ScanShieldSheet() {
                     : "Open Raw XDR Inspector"}
               </button>
               {showRawInspector && rawDecodedJson && (
-                <pre
-                  style={{
-                    marginTop: 8,
-                    padding: 10,
-                    borderRadius: 12,
-                    background: "rgba(11, 20, 51, 0.78)",
-                    fontSize: 11,
-                    overflowX: "auto",
-                    maxHeight: 220,
-                  }}
-                >
+                <pre className="aw-code-block" style={{ marginTop: 8 }}>
                   {rawDecodedJson}
                 </pre>
               )}

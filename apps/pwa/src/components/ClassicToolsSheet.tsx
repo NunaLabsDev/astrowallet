@@ -213,15 +213,19 @@ export function ClassicToolsSheet() {
   };
 
   return (
-    <section className="glass-card" aria-label="Classic Stellar Power Tools" style={{ display: "grid", gap: 14 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <section
+      className="glass-card"
+      aria-label="Classic Stellar Power Tools"
+      style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 14, minWidth: 0 }}
+    >
+      <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: 12, minWidth: 0 }}>
         <AstroNavigatorAvatar
           seedKey={activeAccount.address}
           kind={activeAccount.kind}
           state={zenithSuccess ? "zenith" : busy ? "warp" : "vault"}
           size={54}
         />
-        <div>
+        <div style={{ minWidth: 0, flex: "1 1 180px" }}>
           <div style={{ fontWeight: 700, fontSize: 15 }}>
             Classic Stellar Tools &amp; Reserves
           </div>
@@ -232,8 +236,8 @@ export function ClassicToolsSheet() {
       </div>
 
       {/* 1. Reserve Calculator & LumenWipe Reclaimer */}
-      <div className="aw-list-row" style={{ display: "grid", gap: 8 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+      <div className="aw-list-row" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
           <span style={{ fontWeight: 700, fontSize: 13 }}>XLM Reserve &amp; LumenWipe</span>
           <span className="glass-pill tabular-nums">
             Min {accountState?.minReserveXlm ?? "0.0"} XLM
@@ -265,10 +269,11 @@ export function ClassicToolsSheet() {
       {/* 2. M... Muxed Address Encoder / Decoder */}
       <div style={{ display: "grid", gap: 8, paddingTop: 8, borderTop: "1px solid rgba(165, 139, 224, 0.2)" }}>
         <div style={{ fontWeight: 700, fontSize: 13 }}>M... Muxed Address Encoder / Decoder</div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input
             type="text"
             className="aw-input tabular-nums"
+            style={{ flex: "1 1 160px", minWidth: 0 }}
             placeholder="64-bit Muxed ID"
             value={muxedIdInput}
             onChange={(e) => setMuxedIdInput(e.target.value)}
@@ -277,10 +282,11 @@ export function ClassicToolsSheet() {
             Encode M...
           </button>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <input
             type="text"
             className="aw-input"
+            style={{ flex: "1 1 180px", minWidth: 0 }}
             placeholder="Paste M... address to decode"
             value={muxedDecodeInput}
             onChange={(e) => setMuxedDecodeInput(e.target.value)}
@@ -319,7 +325,7 @@ export function ClassicToolsSheet() {
             ))}
           </div>
         )}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <div className="aw-two-col-inputs">
           <input
             type="text"
             className="aw-input"
@@ -348,8 +354,25 @@ export function ClassicToolsSheet() {
       </form>
 
       {/* 4. Claimable Balances */}
-      <div style={{ display: "grid", gap: 8, paddingTop: 8, borderTop: "1px solid rgba(165, 139, 224, 0.2)" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 1fr)",
+          gap: 8,
+          minWidth: 0,
+          paddingTop: 8,
+          borderTop: "1px solid rgba(165, 139, 224, 0.2)",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 8,
+          }}
+        >
           <div style={{ fontWeight: 700, fontSize: 13 }}>
             Claimable Balances ({visibleClaimables.length})
           </div>
@@ -376,11 +399,11 @@ export function ClassicToolsSheet() {
         ) : (
           visibleClaimables.map((cb) => (
             <div key={cb.id} className="aw-list-row">
-              <div>
+              <div style={{ minWidth: 0, flex: "1 1 160px" }}>
                 <div className="tabular-nums" style={{ fontWeight: 700, fontSize: 13 }}>
                   {cb.amount} {sanitizeMemoPhishing(cb.assetCode)}
                 </div>
-                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)", overflowWrap: "anywhere" }}>
                   ID {cb.id.slice(0, 10)}…{cb.id.slice(-6)}
                   {cb.sponsor ? ` · Sponsor: ${sanitizeMemoPhishing(cb.sponsor.slice(0, 8))}…` : ""}
                 </div>
@@ -399,7 +422,16 @@ export function ClassicToolsSheet() {
       </div>
 
       {/* 5. Classic SDEX Orderbook Offers */}
-      <div style={{ display: "grid", gap: 8, paddingTop: 8, borderTop: "1px solid rgba(165, 139, 224, 0.2)" }}>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 1fr)",
+          gap: 8,
+          minWidth: 0,
+          paddingTop: 8,
+          borderTop: "1px solid rgba(165, 139, 224, 0.2)",
+        }}
+      >
         <div style={{ fontWeight: 700, fontSize: 13 }}>
           Classic SDEX Orderbook ({openOffers.length} open)
         </div>
@@ -409,7 +441,7 @@ export function ClassicToolsSheet() {
           </div>
         ) : (
           <form onSubmit={handlePlaceSdexOffer} style={{ display: "grid", gap: 8 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div className="aw-two-col-inputs">
               <input
                 type="text"
                 className="aw-input"
@@ -443,7 +475,7 @@ export function ClassicToolsSheet() {
                 onChange={(e) => setBuyIssuer(e.target.value)}
               />
             )}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div className="aw-two-col-inputs">
               <input
                 type="text"
                 inputMode="decimal"

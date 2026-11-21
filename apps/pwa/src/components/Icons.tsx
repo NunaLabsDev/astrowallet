@@ -376,3 +376,22 @@ export function IconFlip(props: IconProps) {
     </SvgBase>
   );
 }
+
+export function IconSearch(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <circle cx="11" cy="11" r="6.5" />
+      <path d="m16 16 4.5 4.5" />
+    </SvgBase>
+  );
+}
+
+export function IconChart(props: IconProps) {
+  return (
+    <SvgBase {...props}>
+      <path d="M4 19.5h16" />
+      <path d="m5 15 4.5-4.5 3.5 3 6-6.5" />
+      <path d="M15.5 7H19v3.5" />
+    </SvgBase>
+  );
+}

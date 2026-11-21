@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   calculateMinReceivedStroops7,
   createHorizonPathSwapAdapter,
@@ -107,6 +107,9 @@ export function IntentSheet({
     vaultStatus,
     accounts,
     activeAccount,
+    accountState,
+    fundActiveTestnetAccount,
+    addOrRemoveTrustline,
     signConnectChallenge,
     sendPayment,
     reclaimZeroBalanceReserves,
@@ -134,6 +137,75 @@ export function IntentSheet({
   const [copiedClaimUrl, setCopiedClaimUrl] = useState(false);
   const [destScanReport, setDestScanReport] = useState<ScanReport | null>(null);
   const [scanningIntent, setScanningIntent] = useState(false);
+
+  const isAccountUnfunded = accountState !== null && !accountState.funded;
+  const intentAssetCode = (intent?.payload.assetCode ?? "XLM").toUpperCase();
+  const intentAssetIssuer = intent?.payload.assetIssuer;
+  const isNativeIntentAsset = intentAssetCode === "XLM" && !intentAssetIssuer;
+
+  const missingClaimTrustline = Boolean(
+    activeAccount?.kind === "classic" &&
+      accountState?.funded &&
+      !isNativeIntentAsset &&
+      intentAssetIssuer &&
+      !accountState.balances.some(
+        (b) =>
+          b.assetCode.toUpperCase() === intentAssetCode &&
+          b.assetIssuer === intentAssetIssuer,
+      ),
+  );
+
+  const availableBalanceStr = useMemo(() => {
+    if (!accountState) return null;
+    if (!accountState.funded) return "0";
+    if (isNativeIntentAsset) {
+      return accountState.spendableXlm;
+    }
+    const match = accountState.balances.find(
+      (b) =>
+        b.assetCode.toUpperCase() === intentAssetCode &&
+        (!intentAssetIssuer || b.assetIssuer === intentAssetIssuer),
+    );
+    return match?.balance ?? "0";
+  }, [accountState, isNativeIntentAsset, intentAssetCode, intentAssetIssuer]);
+
+  const intentAmountNum = Number(intent?.payload.amount ?? "0");
+  const availableNum = availableBalanceStr !== null ? Number(availableBalanceStr) : null;
+  const hasInsufficientFunds = Boolean(
+    accountState &&
+      Number.isFinite(intentAmountNum) &&
+      intentAmountNum > 0 &&
+      availableNum !== null &&
+      (!accountState.funded || intentAmountNum > availableNum + 1e-8),
+  );
+
+  const handleFriendbotActivate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fundActiveTestnetAccount();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Testnet Friendbot activation failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const renderUnfundedBanner = (reason: string) => (
+    <div className="aw-banner aw-banner--warn" style={{ display: "grid", gap: 8, fontSize: 12 }}>
+      <div>{reason}</div>
+      {config.network === "testnet" && config.friendbotUrl && (
+        <button
+          type="button"
+          className="aw-chip-btn"
+          disabled={busy}
+          onClick={() => void handleFriendbotActivate()}
+        >
+          {busy ? "Funding Testnet Account..." : "Activate Account with Testnet Friendbot"}
+        </button>
+      )}
+    </div>
+  );
 
   useEffect(() => {
     setWarningAcknowledged(false);
@@ -322,6 +394,16 @@ export function IntentSheet({
       setError("Payment intent is missing destination or amount");
       return;
     }
+    if (isAccountUnfunded) {
+      setError("Activate your Stellar account (minimum 1 XLM base reserve) before signing.");
+      return;
+    }
+    if (hasInsufficientFunds) {
+      setError(
+        `Insufficient spendable ${intentAssetCode} (${availableBalanceStr ?? "0"} available; need ${intent.payload.amount}).`,
+      );
+      return;
+    }
     if (destScanReport?.verdict === "malicious") {
       setError(
         `Scan & Shield blocked transaction: ${destScanReport.findings[0]?.title ?? "malicious target"}`,
@@ -443,6 +525,16 @@ export function IntentSheet({
       setError("Claim escrow configuration or claimId is missing");
       return;
     }
+    if (isAccountUnfunded) {
+      setError("Activate your Stellar account (minimum 1 XLM base reserve) before funding escrow.");
+      return;
+    }
+    if (hasInsufficientFunds) {
+      setError(
+        `Insufficient spendable ${intentAssetCode} (${availableBalanceStr ?? "0"} available; need ${intent.payload.amount}).`,
+      );
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
@@ -453,6 +545,7 @@ export function IntentSheet({
         assetCode: intent.payload.assetCode ?? "XLM",
         assetIssuer: intent.payload.assetIssuer,
         expiresAtUnix: intent.expiresAt,
+        intentAuth: { intentId: route.intentId, sig: route.sig },
       });
 
       await confirmOnServer({
@@ -479,6 +572,10 @@ export function IntentSheet({
       setError("Claim escrow configuration or claimId is missing");
       return;
     }
+    if (isAccountUnfunded) {
+      setError("Activate your Stellar account (minimum 1 XLM base reserve) before claiming on-chain.");
+      return;
+    }
     const secretHex = (route.claimSecretHex ?? manualClaimSecret.trim()).toLowerCase();
     if (!/^[0-9a-f]{64}$/.test(secretHex)) {
       setError("Valid 64-char claim secret key (#k=) is required to unlock escrow");
@@ -487,10 +584,17 @@ export function IntentSheet({
     setBusy(true);
     setError(null);
     try {
+      if (missingClaimTrustline && intentAssetIssuer) {
+        await addOrRemoveTrustline(
+          intent.payload.assetCode ?? intentAssetCode,
+          intentAssetIssuer as ClassicAddress,
+        );
+      }
       const res = await claimFromEscrow({
         escrowContractId: resolvedEscrowContract,
         claimIdHex: intent.claimId,
         claimSecretSeedHex: secretHex,
+        intentAuth: { intentId: route.intentId, sig: route.sig },
       });
 
       await confirmOnServer({
@@ -519,14 +623,17 @@ export function IntentSheet({
     setBusy(true);
     setError(null);
     try {
+      const intentAuth = { intentId: route.intentId, sig: route.sig };
       const res = isExpired
         ? await refundExpiredClaimEscrow({
             escrowContractId: resolvedEscrowContract,
             claimIdHex: intent.claimId,
+            intentAuth,
           })
         : await cancelClaimEscrow({
             escrowContractId: resolvedEscrowContract,
             claimIdHex: intent.claimId,
+            intentAuth,
           });
 
       await confirmOnServer({
@@ -588,21 +695,23 @@ export function IntentSheet({
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
+          flexWrap: "wrap",
+          gap: 8,
           marginBottom: 14,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, flex: "1 1 200px" }}>
           <AstroNavigatorAvatar
             seedKey={route.intentId}
             kind="classic"
             state={completedMsg ? "zenith" : intent?.actionType === "connect" ? "comms" : "shield"}
             size={54}
           />
-          <div>
+          <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 16, fontWeight: 700 }}>
               Telegram Signed Intent
             </div>
-            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", overflowWrap: "anywhere" }}>
               ID: {route.intentId} • {config.network.toUpperCase()}
             </div>
           </div>
@@ -625,10 +734,13 @@ export function IntentSheet({
       )}
 
       {completedMsg && (
-        <div style={{ display: "grid", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 12, minWidth: 0 }}>
           <div className="aw-banner">{completedMsg}</div>
           {shareClaimUrl && (
-            <div className="aw-banner aw-banner--warn" style={{ display: "grid", gap: 8 }}>
+            <div
+              className="aw-banner aw-banner--warn"
+              style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8, minWidth: 0 }}
+            >
               <div style={{ fontWeight: 700, fontSize: 13 }}>
                 Private Claim Link (Secret stays client-side in #k=)
               </div>
@@ -791,18 +903,72 @@ export function IntentSheet({
                   This Claim Link was cancelled or refunded on-chain.
                 </div>
               ) : isClaimFundingView ? (
-                <button
-                  type="button"
-                  className="aw-btn-primary"
-                  disabled={busy || !resolvedEscrowContract}
-                  onClick={() => void handleFundClaimEscrow()}
-                >
-                  {busy
-                    ? "Locking Escrow on Soroban..."
-                    : `Fund Escrow (${intent.payload.amount} ${intent.payload.assetCode ?? "XLM"})`}
-                </button>
+                <>
+                  <div className="aw-list-row">
+                    <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                      Available Balance
+                    </span>
+                    <strong className="tabular-nums">
+                      {availableBalanceStr ?? "…"} {intentAssetCode}
+                    </strong>
+                  </div>
+                  <div className="aw-list-row">
+                    <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                      Est. Network Fee
+                    </span>
+                    <code className="tabular-nums">~0.00001 XLM (or sponsored relay)</code>
+                  </div>
+                  {isAccountUnfunded
+                    ? renderUnfundedBanner(
+                        `This account is not activated on ${config.network.toUpperCase()} yet (minimum 1 XLM base reserve required).`,
+                      )
+                    : hasInsufficientFunds && (
+                        <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+                          Insufficient spendable {intentAssetCode} ({availableBalanceStr ?? "0"}{" "}
+                          available; need {intent.payload.amount}).
+                        </div>
+                      )}
+                  <button
+                    type="button"
+                    className="aw-btn-primary"
+                    disabled={
+                      busy || !resolvedEscrowContract || isAccountUnfunded || hasInsufficientFunds
+                    }
+                    onClick={() => void handleFundClaimEscrow()}
+                  >
+                    {busy
+                      ? "Locking Escrow on Soroban..."
+                      : `Fund Escrow (${intent.payload.amount} ${intent.payload.assetCode ?? "XLM"})`}
+                  </button>
+                </>
               ) : (
                 <>
+                  <div className="aw-list-row">
+                    <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                      Claiming Into
+                    </span>
+                    <span style={{ fontSize: 13, fontWeight: 600 }}>
+                      {activeAccount?.label} ({activeAccount?.address.slice(0, 6)}…
+                      {activeAccount?.address.slice(-4)})
+                    </span>
+                  </div>
+                  <div className="aw-list-row">
+                    <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                      Est. Network Fee
+                    </span>
+                    <code className="tabular-nums">Sponsored relay / ~0.00001 XLM</code>
+                  </div>
+                  {isAccountUnfunded
+                    ? renderUnfundedBanner(
+                        "Activate your Classic G... account (minimum 1 XLM base reserve) before claiming on-chain.",
+                      )
+                    : missingClaimTrustline &&
+                      intentAssetIssuer && (
+                        <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+                          Auto-Trustline: claiming will activate your {intentAssetCode} trustline
+                          (0.5 XLM reserve) before unlocking this escrow.
+                        </div>
+                      )}
                   {!route.claimSecretHex && (
                     <div>
                       <label className="aw-label" htmlFor="manual-claim-secret">
@@ -821,12 +987,14 @@ export function IntentSheet({
                   <button
                     type="button"
                     className="aw-btn-gold"
-                    disabled={busy || !resolvedEscrowContract}
+                    disabled={busy || !resolvedEscrowContract || isAccountUnfunded}
                     onClick={() => void handleClaimFromEscrow()}
                   >
                     {busy
                       ? "Claiming from Escrow..."
-                      : `Claim ${intent.payload.amount} ${intent.payload.assetCode ?? "XLM"} to ${activeAccount?.label ?? "Account"}`}
+                      : missingClaimTrustline && intentAssetIssuer
+                        ? `Add ${intentAssetCode} Trustline & Claim ${intent.payload.amount} ${intentAssetCode}`
+                        : `Claim ${intent.payload.amount} ${intent.payload.assetCode ?? "XLM"} to ${activeAccount?.label ?? "Account"}`}
                   </button>
                   {intent.claimId && activeAccount && intent.claimStatus === "open" && (
                     <button
@@ -964,7 +1132,16 @@ export function IntentSheet({
               )}
               <div className="aw-list-row">
                 <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Recipient</span>
-                <span style={{ fontSize: 13, fontWeight: 600 }}>
+                <span
+                  style={{
+                    fontSize: 13,
+                    fontWeight: 600,
+                    minWidth: 0,
+                    overflowWrap: "anywhere",
+                    wordBreak: "break-all",
+                    textAlign: "right",
+                  }}
+                >
                   {intent.payload.recipientLabel ?? intent.payload.destination}
                 </span>
               </div>
@@ -976,6 +1153,20 @@ export function IntentSheet({
                   {activeAccount?.label} ({activeAccount?.address.slice(0, 6)}…
                   {activeAccount?.address.slice(-4)})
                 </span>
+              </div>
+              <div className="aw-list-row">
+                <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                  Available Balance
+                </span>
+                <strong className="tabular-nums">
+                  {availableBalanceStr ?? "…"} {intentAssetCode}
+                </strong>
+              </div>
+              <div className="aw-list-row">
+                <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                  Est. Network Fee
+                </span>
+                <code className="tabular-nums">~0.00001 XLM (100 stroops)</code>
               </div>
               {intent.payload.memo && (
                 <div className="aw-list-row">
@@ -1020,11 +1211,23 @@ export function IntentSheet({
                   )}
                 </div>
               )}
+              {isAccountUnfunded
+                ? renderUnfundedBanner(
+                    `This account is not activated on ${config.network.toUpperCase()} yet (minimum 1 XLM base reserve required).`,
+                  )
+                : hasInsufficientFunds && (
+                    <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+                      Insufficient spendable {intentAssetCode} ({availableBalanceStr ?? "0"}{" "}
+                      available; need {intent.payload.amount}).
+                    </div>
+                  )}
               <button
                 type="button"
                 className="aw-btn-primary"
                 disabled={
                   busy ||
+                  isAccountUnfunded ||
+                  hasInsufficientFunds ||
                   destScanReport?.verdict === "malicious" ||
                   (destScanReport?.verdict === "warning" && !warningAcknowledged) ||
                   Boolean(destScanReport?.requiresMemoCheck && !intent.payload.memo?.trim())

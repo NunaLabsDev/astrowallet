@@ -83,6 +83,42 @@ describe("DeFi Swap Adapters & Registry", () => {
     expect(quote.expectedOutputAmount).toBe("42.50");
   });
 
+  it("falls back to direct Horizon /order_book liquidity when /paths/strict-send returns empty records", async () => {
+    const horizonAdapter = createHorizonPathSwapAdapter({
+      horizonUrls: ["https://horizon-testnet.example.org"],
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url.includes("/paths/strict-send")) {
+          return new Response(
+            JSON.stringify({ _embedded: { records: [] } }),
+            { status: 200 },
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            bids: [
+              { price: "0.2000000", price_r: { n: 1, d: 5 }, amount: "10.0000000" },
+              { price: "0.1800000", price_r: { n: 9, d: 50 }, amount: "50.0000000" },
+            ],
+            asks: [],
+          }),
+          { status: 200 },
+        );
+      },
+    });
+
+    const quote = await horizonAdapter.getQuote({
+      fromAsset: "XLM",
+      toAsset: `USDC:${SAMPLE_ISSUER}`,
+      amount: "100",
+      slippageBps: 100,
+    });
+    expect(quote.provider).toBe("horizon-sdex-orderbook");
+    // First 50 XLM fills 10 USDC @ 0.20; remaining 50 XLM fills 9 USDC @ 0.18 => 19 USDC
+    expect(quote.expectedOutputAmount).toBe("19");
+    expect(quote.pathAssets).toEqual([]);
+  });
+
   it("registers and lists swap adapters cleanly in DeFiRegistry", () => {
     const registry = new DeFiRegistry();
     registry.registerSwapAdapter({

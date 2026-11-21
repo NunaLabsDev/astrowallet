@@ -534,7 +534,8 @@ export function createSorobanDevClient(input: {
       return withRpcFailover(async (server) => {
         const sent = await server.sendTransaction(parsed);
         if (sent.status === "ERROR") {
-          throw new NonRetryableDevLabError(`Soroban RPC rejected signed XDR (${sent.hash})`);
+          const reason = sent.errorResult ? ` — ${sent.errorResult.toXDR("base64").slice(0, 64)}` : "";
+          throw new NonRetryableDevLabError(`Soroban RPC rejected signed XDR (${sent.hash}${reason})`);
         }
         let polled = await server.getTransaction(sent.hash);
         for (

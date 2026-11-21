@@ -119,7 +119,7 @@ export function CollectiblesSheet() {
               size={88}
             />
           </div>
-          <div style={{ flex: 1, minWidth: 210 }}>
+          <div style={{ flex: "1 1 180px", minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
               <span className="glass-pill glass-pill--gold">
                 <IconSparkles size={12} />

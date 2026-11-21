@@ -143,6 +143,26 @@ pub struct ClaimEscrowContract;
 
 #[contractimpl]
 impl ClaimEscrowContract {
+    /// Optional deploy-time initialization of the governance guardian (recommended:
+    /// multisig/timelock) to eliminate any post-deploy `init()` front-running window.
+    pub fn __constructor(env: Env, guardian: Option<Address>) {
+        if let Some(g) = guardian {
+            if g == env.current_contract_address() {
+                panic_with_error!(&env, ClaimError::InvalidAddress);
+            }
+            env.storage().instance().set(&DataKey::Guardian, &g);
+            env.storage()
+                .instance()
+                .set(&DataKey::DepositsPaused, &false);
+            env.storage()
+                .instance()
+                .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
+
+            env.events()
+                .publish((symbol_short!("escrow"), symbol_short!("init")), g);
+        }
+    }
+
     /// Initializes an optional governance guardian (recommended: multisig/timelock)
     /// that can pause *new deposits only* or rescue unrelated excess tokens sent by mistake.
     pub fn init(env: Env, guardian: Address) -> Result<(), ClaimError> {
@@ -673,7 +693,7 @@ mod test {
         let token = TokenClient::new(&env, &token_id);
         sac.mint(&sender, &500);
 
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
@@ -725,7 +745,7 @@ mod test {
         let token_id = token_contract.address();
         StellarAssetClient::new(&env, &token_id).mint(&sender, &200);
 
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         let signing_key = SigningKey::from_bytes(&[11u8; 32]);
@@ -764,7 +784,7 @@ mod test {
         let token = TokenClient::new(&env, &token_id);
         StellarAssetClient::new(&env, &token_id).mint(&sender, &300);
 
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         let signing_key = SigningKey::from_bytes(&[5u8; 32]);
@@ -827,7 +847,7 @@ mod test {
         let token = TokenClient::new(&env, &token_id);
         StellarAssetClient::new(&env, &token_id).mint(&sender, &400);
 
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         let signing_key = SigningKey::from_bytes(&[12u8; 32]);
@@ -920,7 +940,7 @@ mod test {
 
         let sender = Address::generate(&env);
         let token_id = Address::generate(&env);
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         let signing_key = SigningKey::from_bytes(&[19u8; 32]);
@@ -976,7 +996,7 @@ mod test {
         });
 
         let sender = Address::generate(&env);
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         let fot_id = env.register(FeeOnTransferMockToken, ());
@@ -1035,7 +1055,7 @@ mod test {
         let token = TokenClient::new(&env, &token_id);
         StellarAssetClient::new(&env, &token_id).mint(&sender, &600);
 
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         let signing_key = SigningKey::from_bytes(&[33u8; 32]);
@@ -1091,7 +1111,7 @@ mod test {
         let token = TokenClient::new(&env, &token_id);
         sac.mint(&sender, &1_000);
 
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         assert_eq!(
@@ -1169,7 +1189,7 @@ mod test {
 
         let token_contract = env.register_stellar_asset_contract_v2(admin);
         let token_id = token_contract.address();
-        let escrow_id = env.register(ClaimEscrowContract, ());
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
         assert!(client.try_init(&guardian).is_err());
@@ -1210,5 +1230,25 @@ mod test {
             li.timestamp = 2_001;
         });
         assert!(client.try_refund_expired_to(&claim_id, &treasury).is_err());
+    }
+
+    #[test]
+    fn test_constructor_initializes_guardian_atomically() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let guardian = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let escrow_id = env.register(ClaimEscrowContract, (Some(guardian.clone()),));
+        let client = ClaimEscrowContractClient::new(&env, &escrow_id);
+
+        assert!(!client.is_deposits_paused());
+        assert_eq!(
+            client.try_init(&attacker),
+            Err(Ok(ClaimError::AlreadyInitialized))
+        );
+
+        client.set_deposits_paused(&true);
+        assert!(client.is_deposits_paused());
     }
 }

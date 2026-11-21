@@ -53,6 +53,7 @@ import {
   type ContactEntry,
   type DevTemplateKind,
   type RecentPaymentRecord,
+  type RelayIntentAuth,
   type SdexOfferRecord,
   type SorobanInvokeResult,
   type SorobanSimulationSummary,
@@ -292,6 +293,7 @@ export interface WalletContextValue {
     assetCode: string;
     assetIssuer?: string | undefined;
     expiresAtUnix: number;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{
     hash: string;
     ledger: number;
@@ -302,15 +304,18 @@ export interface WalletContextValue {
     escrowContractId: ContractAddress;
     claimIdHex: string;
     claimSecretSeedHex: string;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }>;
   cancelClaimEscrow(params: {
     escrowContractId: ContractAddress;
     claimIdHex: string;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }>;
   refundExpiredClaimEscrow(params: {
     escrowContractId: ContractAddress;
     claimIdHex: string;
     recipientAddress?: StellarAddress | undefined;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }>;
 }
 
@@ -358,7 +363,7 @@ export function WalletProvider({
         ...config,
         sorobanMaxResourceFeeStroops: config.sorobanMaxResourceFeeStroops,
         relaySubmitter: config.apiBaseUrl
-          ? async ({ signedTxXdrBase64, sourceKeypair }) => {
+          ? async ({ signedTxXdrBase64, sourceKeypair, intentAuth }) => {
               const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
               const rawPayload = signedTxXdrBase64;
               const digest = await crypto.subtle.digest(
@@ -382,6 +387,7 @@ export function WalletProvider({
                 body: JSON.stringify({
                   mode: "feebump",
                   signedTxXdrBase64: rawPayload,
+                  ...(intentAuth ? { intentAuth } : {}),
                   walletAuth: {
                     address: sourceKeypair.publicKey() as ClassicAddress,
                     timestamp,
@@ -1353,25 +1359,25 @@ export function WalletProvider({
     setVaultStatus("locked");
   }, []);
 
-  // Auto-lock after 5 min of inactivity or > 60s in background tab
+  // Auto-lock after 4 hours of inactivity or > 4 hours in background tab
   useEffect(() => {
     if (vaultStatus !== "unlocked" || typeof window === "undefined") {
       return undefined;
     }
 
-    const INACTIVITY_MS = 5 * 60 * 1000;
-    const BACKGROUND_LOCK_MS = 60 * 1000;
+    const INACTIVITY_MS = 4 * 60 * 60 * 1000;
+    const BACKGROUND_LOCK_MS = 4 * 60 * 60 * 1000;
 
     let timer = window.setTimeout(() => {
       lockVault();
-      showToast("Vault auto-locked after 5 minutes of inactivity", "info");
+      showToast("Vault auto-locked after 4 hours of inactivity", "info");
     }, INACTIVITY_MS);
 
     const resetInactivityTimer = () => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         lockVault();
-        showToast("Vault auto-locked after 5 minutes of inactivity", "info");
+        showToast("Vault auto-locked after 4 hours of inactivity", "info");
       }, INACTIVITY_MS);
     };
 
@@ -1818,6 +1824,7 @@ export function WalletProvider({
       assetCode: string;
       assetIssuer?: string | undefined;
       expiresAtUnix: number;
+      intentAuth?: RelayIntentAuth | undefined;
     }) => {
       return withActiveKeypair(async (keypair) => {
         const res = await stellarClient.fundClaimEscrow({
@@ -1837,6 +1844,7 @@ export function WalletProvider({
       escrowContractId: ContractAddress;
       claimIdHex: string;
       claimSecretSeedHex: string;
+      intentAuth?: RelayIntentAuth | undefined;
     }) => {
       return withActiveKeypair(async (keypair) => {
         const res = await stellarClient.claimFromEscrow({
@@ -1855,6 +1863,7 @@ export function WalletProvider({
     async (params: {
       escrowContractId: ContractAddress;
       claimIdHex: string;
+      intentAuth?: RelayIntentAuth | undefined;
     }) => {
       return withActiveKeypair(async (keypair) => {
         const res = await stellarClient.cancelClaimEscrow({
@@ -1874,6 +1883,7 @@ export function WalletProvider({
       escrowContractId: ContractAddress;
       claimIdHex: string;
       recipientAddress?: StellarAddress | undefined;
+      intentAuth?: RelayIntentAuth | undefined;
     }) => {
       return withActiveKeypair(async (keypair) => {
         const res = await stellarClient.refundExpiredClaimEscrow({

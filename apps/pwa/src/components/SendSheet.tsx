@@ -443,17 +443,19 @@ export function SendSheet({
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
+            flexWrap: "wrap",
+            gap: 8,
             marginBottom: 14,
           }}
         >
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0, flex: "1 1 200px" }}>
             <AstroNavigatorAvatar
               seedKey={activeAccount.address}
               kind={activeAccount.kind}
               state={confirmedTxHash ? "zenith" : busy ? "warp" : "shield"}
               size={52}
             />
-            <div>
+            <div style={{ minWidth: 0 }}>
               <div style={{ fontSize: 16, fontWeight: 700 }}>
                 {confirmedTxHash ? "Transaction Confirmed" : `Send from ${activeAccount.label}`}
               </div>
@@ -469,7 +471,7 @@ export function SendSheet({
       )}
 
       {confirmedTxHash ? (
-        <div style={{ display: "grid", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 12, minWidth: 0 }}>
           <div className="aw-banner">
             <div style={{ fontWeight: 700, color: "var(--aw-stellar-gold)", marginBottom: 4 }}>
               Confirmed on Stellar {config.network.toUpperCase()}
@@ -541,6 +543,10 @@ export function SendSheet({
               <span>Memo</span>
               <code>{reviewPending.memoSummary ?? "None"}</code>
             </div>
+            <div className="aw-review-row">
+              <span>Est. Network Fee</span>
+              <code className="tabular-nums">~0.00001 XLM (100 stroops)</code>
+            </div>
           </div>
 
           {destShieldReport?.verdict === "warning" && destShieldReport.findings[0] && (
@@ -582,7 +588,10 @@ export function SendSheet({
           </div>
         </div>
       ) : (
-        <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12 }}>
+        <form
+          onSubmit={handleSubmit}
+          style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 12, minWidth: 0 }}
+        >
           {accountState && !accountState.funded && (
             <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
               This account is not activated on the {config.network.toUpperCase()} ledger yet (needs
@@ -592,7 +601,7 @@ export function SendSheet({
 
           {/* Contacts & Own Accounts Quick Pickers */}
           {(contacts.length > 0 || otherOwnAccounts.length > 0) && (
-            <div style={{ display: "grid", gap: 6 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 6, minWidth: 0 }}>
               <span className="aw-label" style={{ marginBottom: 0 }}>
                 Quick Recipients
               </span>
@@ -634,6 +643,8 @@ export function SendSheet({
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
+                flexWrap: "wrap",
+                gap: 8,
                 marginBottom: 6,
               }}
             >
@@ -764,6 +775,8 @@ export function SendSheet({
                   display: "flex",
                   justifyContent: "space-between",
                   alignItems: "center",
+                  flexWrap: "wrap",
+                  gap: 6,
                   marginBottom: 6,
                 }}
               >
@@ -800,7 +813,7 @@ export function SendSheet({
           </div>
 
           {/* Memo Controls */}
-          <div style={{ display: "grid", gridTemplateColumns: "120px 1fr", gap: 8 }}>
+          <div className="aw-memo-grid">
             <div>
               <label className="aw-label" htmlFor="send-memo-kind">
                 Memo Type

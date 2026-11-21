@@ -90,6 +90,11 @@ export interface RecentPaymentRecord {
   assetIssuer?: string | undefined;
 }
 
+export interface RelayIntentAuth {
+  intentId: string;
+  sig: string;
+}
+
 export interface BuildAndSubmitPaymentInput {
   sourceKeypair: Keypair;
   destination: StellarAddress;
@@ -154,6 +159,7 @@ export interface StellarClient {
     assetIssuer?: string | undefined;
     expiresAtUnix: number;
     cancellable?: boolean | undefined;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{
     hash: string;
     ledger: number;
@@ -165,17 +171,20 @@ export interface StellarClient {
     escrowContractId: ContractAddress;
     claimIdHex: string;
     claimSecretSeedHex: string;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }>;
   cancelClaimEscrow(input: {
     sourceKeypair: Keypair;
     escrowContractId: ContractAddress;
     claimIdHex: string;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }>;
   refundExpiredClaimEscrow(input: {
     sourceKeypair: Keypair;
     escrowContractId: ContractAddress;
     claimIdHex: string;
     recipientAddress?: StellarAddress | undefined;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }>;
   extendClaimEscrowTtl(input: {
     sourceKeypair: Keypair;
@@ -309,6 +318,7 @@ export function createStellarClient(
       | ((input: {
           signedTxXdrBase64: string;
           sourceKeypair: Keypair;
+          intentAuth?: RelayIntentAuth | undefined;
         }) => Promise<{ hash: string; ledger?: number | undefined } | null>)
       | undefined;
   },
@@ -420,6 +430,7 @@ export function createStellarClient(
     sourceKeypair: Keypair,
     operation: xdr.Operation,
     memoInput?: TypedMemoInput,
+    intentAuth?: RelayIntentAuth,
   ): Promise<{ hash: string; ledger: number }> {
     const sourceAddress = sourceKeypair.publicKey();
     return enqueueAccountTx(sourceAddress, async () => {
@@ -466,6 +477,7 @@ export function createStellarClient(
           const relayed = await config.relaySubmitter({
             signedTxXdrBase64: preparedTx.toXDR(),
             sourceKeypair,
+            intentAuth,
           });
           if (relayed && typeof relayed.hash === "string" && relayed.hash.trim().length > 0) {
             const relayedHash = relayed.hash.trim();
@@ -925,6 +937,7 @@ export function createStellarClient(
     assetIssuer?: string | undefined;
     expiresAtUnix: number;
     cancellable?: boolean | undefined;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{
     hash: string;
     ledger: number;
@@ -947,7 +960,12 @@ export function createStellarClient(
       expiresAtUnix: input.expiresAtUnix,
       cancellable: input.cancellable,
     });
-    const res = await submitSorobanOperation(input.sourceKeypair, op);
+    const res = await submitSorobanOperation(
+      input.sourceKeypair,
+      op,
+      undefined,
+      input.intentAuth,
+    );
     return {
       ...res,
       claimSecretSeedHex: ephemeral.secretSeedHex,
@@ -960,6 +978,7 @@ export function createStellarClient(
     escrowContractId: ContractAddress;
     claimIdHex: string;
     claimSecretSeedHex: string;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }> {
     const recipientAddress = input.sourceKeypair.publicKey() as ClassicAddress;
     const signatureHex = signClaimEscrowPayload(
@@ -974,19 +993,20 @@ export function createStellarClient(
       recipientAddress,
       signatureHex,
     });
-    return submitSorobanOperation(input.sourceKeypair, op);
+    return submitSorobanOperation(input.sourceKeypair, op, undefined, input.intentAuth);
   }
 
   async function cancelClaimEscrow(input: {
     sourceKeypair: Keypair;
     escrowContractId: ContractAddress;
     claimIdHex: string;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }> {
     const op = buildCancelClaimOperation({
       escrowContractId: input.escrowContractId,
       claimIdHex: input.claimIdHex,
     });
-    return submitSorobanOperation(input.sourceKeypair, op);
+    return submitSorobanOperation(input.sourceKeypair, op, undefined, input.intentAuth);
   }
 
   async function refundExpiredClaimEscrow(input: {
@@ -994,6 +1014,7 @@ export function createStellarClient(
     escrowContractId: ContractAddress;
     claimIdHex: string;
     recipientAddress?: StellarAddress | undefined;
+    intentAuth?: RelayIntentAuth | undefined;
   }): Promise<{ hash: string; ledger: number }> {
     const op = input.recipientAddress
       ? buildRefundExpiredToOperation({
@@ -1005,7 +1026,7 @@ export function createStellarClient(
           escrowContractId: input.escrowContractId,
           claimIdHex: input.claimIdHex,
         });
-    return submitSorobanOperation(input.sourceKeypair, op);
+    return submitSorobanOperation(input.sourceKeypair, op, undefined, input.intentAuth);
   }
 
   async function extendClaimEscrowTtl(input: {

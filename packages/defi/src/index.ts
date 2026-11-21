@@ -45,8 +45,99 @@ interface HorizonStrictSendPathRecord {
   path?: HorizonStrictSendPathHop[];
 }
 
+interface HorizonOrderbookBid {
+  price?: string;
+  amount?: string;
+  price_r?: { n?: number; d?: number };
+}
+
+interface HorizonOrderbookResponse {
+  bids?: HorizonOrderbookBid[];
+}
+
+function setHorizonAssetQueryParams(
+  params: URLSearchParams,
+  prefix: string,
+  parsed: ParsedSwapAsset,
+): void {
+  if (parsed.code === "XLM" && !parsed.issuer) {
+    params.set(`${prefix}_asset_type`, "native");
+    return;
+  }
+  if (!parsed.issuer) {
+    throw new Error(`Issuer is required for non-native asset ${parsed.code}`);
+  }
+  params.set(
+    `${prefix}_asset_type`,
+    parsed.code.length <= 4 ? "credit_alphanum4" : "credit_alphanum12",
+  );
+  params.set(`${prefix}_asset_code`, parsed.code);
+  params.set(`${prefix}_asset_issuer`, parsed.issuer);
+}
+
+function computeOrderbookStrictSendOutput(
+  inputAmountDecimal: string,
+  bids: readonly HorizonOrderbookBid[],
+): { expectedOutputAmount: string; priceImpactPct: string } | null {
+  const inputNum = Number(inputAmountDecimal);
+  if (!Number.isFinite(inputNum) || inputNum <= 0 || bids.length === 0) {
+    return null;
+  }
+
+  let remainingBase = inputNum;
+  let totalCounterOut = 0;
+  let topPrice: number | null = null;
+
+  for (const bid of bids) {
+    const rN = bid.price_r?.n;
+    const rD = bid.price_r?.d;
+    const price =
+      typeof rN === "number" && typeof rD === "number" && rD > 0 && rN > 0
+        ? rN / rD
+        : Number(bid.price ?? "0");
+    const counterAvail = Number(bid.amount ?? "0");
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(counterAvail) || counterAvail <= 0) {
+      continue;
+    }
+    if (topPrice === null) {
+      topPrice = price;
+    }
+    const maxBaseConsumable = counterAvail / price;
+    const takeBase = Math.min(remainingBase, maxBaseConsumable);
+    const gainCounter =
+      takeBase >= maxBaseConsumable ? counterAvail : takeBase * price;
+    totalCounterOut += gainCounter;
+    remainingBase -= takeBase;
+    if (remainingBase <= 1e-8) {
+      remainingBase = 0;
+      break;
+    }
+  }
+
+  if (remainingBase > 1e-7 || totalCounterOut <= 0) {
+    return null;
+  }
+
+  const stroopsOut = BigInt(Math.floor(totalCounterOut * 10_000_000));
+  if (stroopsOut <= 0n) {
+    return null;
+  }
+
+  const effectivePrice = totalCounterOut / inputNum;
+  const impactPct =
+    topPrice && topPrice > 0
+      ? Math.max(0, ((topPrice - effectivePrice) / topPrice) * 100).toFixed(2)
+      : "N/A";
+
+  return {
+    expectedOutputAmount: stroops7ToDecimal(stroopsOut),
+    priceImpactPct: impactPct,
+  };
+}
+
 /**
- * Zero-API-key Classic SDEX / AMM Path Payment swap adapter backed by Horizon failover.
+ * Zero-API-key Classic SDEX / AMM Path Payment swap adapter backed by Horizon failover
+ * (with automatic direct `/order_book` fallback when `/paths/strict-send` returns empty).
  */
 export function createHorizonPathSwapAdapter(input: {
   horizonUrls: readonly string[];
@@ -84,6 +175,9 @@ export function createHorizonPathSwapAdapter(input: {
           : to.issuer
             ? `${to.code}:${to.issuer}`
             : to.code;
+      if (to.code !== "XLM" && !to.issuer) {
+        throw new Error(`Issuer is required for non-native asset ${to.code}`);
+      }
       params.set("destination_assets", destSpec);
 
       let lastErr: unknown;
@@ -94,42 +188,67 @@ export function createHorizonPathSwapAdapter(input: {
             `${cleanBase}/paths/strict-send?${params.toString()}`,
             { headers: { Accept: "application/json" } },
           );
-          if (!res.ok) {
+          if (res.ok) {
+            const body = (await res.json()) as {
+              _embedded?: { records?: HorizonStrictSendPathRecord[] };
+            };
+            const records = body._embedded?.records ?? [];
+            const [first, ...rest] = records;
+            if (first) {
+              let best = first;
+              let bestStroops = decimalToStroops7(best.destination_amount);
+              for (const rec of rest) {
+                const candidateStroops = decimalToStroops7(rec.destination_amount);
+                if (candidateStroops > bestStroops) {
+                  best = rec;
+                  bestStroops = candidateStroops;
+                }
+              }
+
+              const pathAssets = (best.path ?? []).map((hop) =>
+                hop.asset_type === "native" || !hop.asset_code
+                  ? { assetCode: "XLM" }
+                  : { assetCode: hop.asset_code, assetIssuer: hop.asset_issuer },
+              );
+
+              return {
+                provider: "horizon-path",
+                inputAmount: request.amount,
+                expectedOutputAmount: best.destination_amount,
+                priceImpactPct: "N/A",
+                pathAssets,
+              };
+            }
+          } else {
             lastErr = new Error(`Horizon path search returned HTTP ${res.status}`);
-            continue;
-          }
-          const body = (await res.json()) as {
-            _embedded?: { records?: HorizonStrictSendPathRecord[] };
-          };
-          const records = body._embedded?.records ?? [];
-          const [first, ...rest] = records;
-          if (!first) {
-            throw new Error(`No liquidity path found between ${from.code} and ${to.code}`);
           }
 
-          let best = first;
-          let bestStroops = decimalToStroops7(best.destination_amount);
-          for (const rec of rest) {
-            const candidateStroops = decimalToStroops7(rec.destination_amount);
-            if (candidateStroops > bestStroops) {
-              best = rec;
-              bestStroops = candidateStroops;
+          // Fallback: check direct SDEX /order_book depth when /paths/strict-send is empty
+          const obParams = new URLSearchParams({ limit: "20" });
+          setHorizonAssetQueryParams(obParams, "selling", from);
+          setHorizonAssetQueryParams(obParams, "buying", to);
+          const obRes = await fetchFn(
+            `${cleanBase}/order_book?${obParams.toString()}`,
+            { headers: { Accept: "application/json" } },
+          );
+          if (obRes.ok) {
+            const obBody = (await obRes.json()) as HorizonOrderbookResponse;
+            const filled = computeOrderbookStrictSendOutput(
+              request.amount,
+              obBody.bids ?? [],
+            );
+            if (filled) {
+              return {
+                provider: "horizon-sdex-orderbook",
+                inputAmount: request.amount,
+                expectedOutputAmount: filled.expectedOutputAmount,
+                priceImpactPct: filled.priceImpactPct,
+                pathAssets: [],
+              };
             }
           }
 
-          const pathAssets = (best.path ?? []).map((hop) =>
-            hop.asset_type === "native" || !hop.asset_code
-              ? { assetCode: "XLM" }
-              : { assetCode: hop.asset_code, assetIssuer: hop.asset_issuer },
-          );
-
-          return {
-            provider: "horizon-path",
-            inputAmount: request.amount,
-            expectedOutputAmount: best.destination_amount,
-            priceImpactPct: "N/A",
-            pathAssets,
-          };
+          lastErr = new Error(`No liquidity path found between ${from.code} and ${to.code}`);
         } catch (err) {
           lastErr = err;
         }

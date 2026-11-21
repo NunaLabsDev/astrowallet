@@ -838,7 +838,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
           <div>
             <span className="aw-label">Recovery Phrase Length</span>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, minWidth: 0 }}>
               <button
                 type="button"
                 className="aw-chip-btn"
@@ -1211,7 +1211,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
             <span className="aw-welcome-feature-icon aw-welcome-feature-icon--purple">
               <IconKey size={18} />
             </span>
-            <div style={{ flex: 1, textAlign: "left" }}>
+            <div style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
               <div style={{ fontWeight: 700, fontSize: 14 }}>12 or 24-Word Recovery Phrase</div>
               <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
                 SEP-0005 &amp; BIP-39 compatible (LOBSTR, Ledger, Freighter, TON wallets)
@@ -1232,7 +1232,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
             <span className="aw-welcome-feature-icon aw-welcome-feature-icon--gold">
               <IconShield size={18} />
             </span>
-            <div style={{ flex: 1, textAlign: "left" }}>
+            <div style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
               <div style={{ fontWeight: 700, fontSize: 14 }}>Encrypted .agvault.json Backup</div>
               <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
                 Upload or paste your AstroWallet encrypted backup bundle and original PIN
@@ -1244,13 +1244,17 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
       )}
 
       {view === "import_seed" && (
-        <form onSubmit={(e) => void handleImportSeedSubmit(e)} style={{ display: "grid", gap: 14 }}>
-          <div>
+        <form
+          onSubmit={(e) => void handleImportSeedSubmit(e)}
+          style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 14, minWidth: 0 }}
+        >
+          <div style={{ minWidth: 0 }}>
             <div
               style={{
                 display: "flex",
                 justifyContent: "space-between",
                 alignItems: "center",
+                flexWrap: "wrap",
                 gap: 8,
                 marginBottom: 6,
               }}
@@ -1384,8 +1388,11 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
       )}
 
       {view === "import_agvault" && (
-        <form onSubmit={(e) => void handleRestoreAgVaultSubmit(e)} style={{ display: "grid", gap: 14 }}>
-          <div>
+        <form
+          onSubmit={(e) => void handleRestoreAgVaultSubmit(e)}
+          style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 14, minWidth: 0 }}
+        >
+          <div style={{ minWidth: 0 }}>
             <label className="aw-file-drop">
               <input
                 type="file"
@@ -1393,7 +1400,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
                 onChange={(e) => void handleAgVaultFile(e)}
               />
               <IconShield size={18} />
-              <span>
+              <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>
                 {agVaultFileName
                   ? `Selected: ${agVaultFileName}`
                   : "Choose .agvault.json File from Device"}

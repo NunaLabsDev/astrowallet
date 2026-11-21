@@ -50,7 +50,7 @@ export function AccountSwitcher() {
   };
 
   return (
-    <div style={{ display: "grid", gap: 10 }}>
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 10, minWidth: 0 }}>
       <div
         style={{
           display: "flex",
@@ -58,6 +58,9 @@ export function AccountSwitcher() {
           overflowX: "auto",
           paddingBottom: 4,
           alignItems: "center",
+          maxWidth: "100%",
+          minWidth: 0,
+          scrollbarWidth: "none",
         }}
       >
         {accounts.map((acc) => {

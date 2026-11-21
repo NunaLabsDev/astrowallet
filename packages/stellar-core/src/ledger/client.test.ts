@@ -279,7 +279,7 @@ describe("StellarLedgerClient hardening (sequence mutex, restore guard, fee cap,
   it("supports cancelClaimEscrow, refundExpiredClaimEscrow, extendClaimEscrowTtl, and relaySubmitter fallback", async () => {
     const kp = Keypair.random();
     const recipient = Keypair.random().publicKey() as `${"G"}${string}`;
-    const relaySeen: string[] = [];
+    const relaySeen: Array<{ xdr: string; intentAuth?: { intentId: string; sig: string } }> = [];
     let rpcSendCount = 0;
     let relayShouldFail = false;
 
@@ -290,8 +290,8 @@ describe("StellarLedgerClient hardening (sequence mutex, restore guard, fee cap,
       rpcUrls: ["https://rpc-1.example"],
       friendbotUrl: "https://friendbot.example",
       sorobanPollIntervalMs: 0,
-      relaySubmitter: async ({ signedTxXdrBase64 }) => {
-        relaySeen.push(signedTxXdrBase64);
+      relaySubmitter: async ({ signedTxXdrBase64, intentAuth }) => {
+        relaySeen.push({ xdr: signedTxXdrBase64, intentAuth });
         if (relayShouldFail) {
           throw new Error("Relayer 503");
         }
@@ -329,6 +329,17 @@ describe("StellarLedgerClient hardening (sequence mutex, restore guard, fee cap,
     expect(cancelled).toEqual({ hash: "a".repeat(64), ledger: 801 });
     expect(rpcSendCount).toBe(0);
     expect(relaySeen).toHaveLength(1);
+
+    const claimAuth = { intentId: "intent_12345678", sig: "ab".repeat(32) };
+    const claimedWithIntent = await client.claimFromEscrow({
+      sourceKeypair: kp,
+      escrowContractId: ESCROW_CONTRACT,
+      claimIdHex: "55".repeat(32),
+      claimSecretSeedHex: "07".repeat(32),
+      intentAuth: claimAuth,
+    });
+    expect(claimedWithIntent).toEqual({ hash: "a".repeat(64), ledger: 801 });
+    expect(relaySeen[1]?.intentAuth).toEqual(claimAuth);
 
     const refundedDirect = await client.refundExpiredClaimEscrow({
       sourceKeypair: kp,

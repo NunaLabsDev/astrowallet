@@ -2,6 +2,12 @@ import { evaluateSecretStrength } from "@astrowallet/stellar-core";
 import { parseStartAppParam } from "@astrowallet/tg-protocol";
 import { describe, expect, it } from "vitest";
 import {
+  buildWordQuizChallenges,
+  formatSeedBackupFilename,
+  parseSeedWordCount,
+  pickVerificationIndices,
+} from "./components/onboarding-helpers.js";
+import {
   SessionMnemonicVault,
   inspectDappAuthEntrySecurity,
   mapSep7MemoKind,
@@ -118,5 +124,66 @@ describe("PWA Client Security Hardening", () => {
     expect(parseStartAppParam("")).toBeNull();
     expect(parseStartAppParam("i-it_abc123-short")).toBeNull();
     expect(parseStartAppParam("unknown-param")).toBeNull();
+  });
+
+  it("builds unique sorted onboarding verification indices and 4-choice blind quiz challenges", () => {
+    const indices12 = pickVerificationIndices(12, 3);
+    expect(indices12).toHaveLength(3);
+    expect(new Set(indices12).size).toBe(3);
+    expect(indices12).toEqual([...indices12].sort((a, b) => a - b));
+    for (const idx of indices12) {
+      expect(idx).toBeGreaterThanOrEqual(0);
+      expect(idx).toBeLessThan(12);
+    }
+
+    const indices24 = pickVerificationIndices(24, 3);
+    expect(indices24).toHaveLength(3);
+    for (const idx of indices24) {
+      expect(idx).toBeLessThan(24);
+    }
+
+    const sample12 = [
+      "abandon",
+      "ability",
+      "able",
+      "about",
+      "above",
+      "absent",
+      "absorb",
+      "abstract",
+      "absurd",
+      "abuse",
+      "access",
+      "accident",
+    ];
+    const challenges = buildWordQuizChallenges(sample12);
+    expect(challenges).toHaveLength(3);
+    for (const c of challenges) {
+      expect(c.expectedWord).toBe(sample12[c.wordIndex]);
+      expect(c.choices).toHaveLength(4);
+      expect(new Set(c.choices).size).toBe(4);
+      expect(c.choices).toContain(c.expectedWord);
+    }
+
+    // Even a phrase with repeated words yields 4 distinct choices via fallback decoys.
+    const repeated = Array.from({ length: 12 }, () => "abandon");
+    repeated[11] = "about";
+    const repeatedChallenges = buildWordQuizChallenges(repeated, [0, 5, 11]);
+    for (const c of repeatedChallenges) {
+      expect(c.choices).toHaveLength(4);
+      expect(new Set(c.choices).size).toBe(4);
+      expect(c.choices).toContain(c.expectedWord);
+    }
+  });
+
+  it("counts seed words and formats deterministic .agvault.json backup filenames", () => {
+    expect(parseSeedWordCount("")).toBe(0);
+    expect(parseSeedWordCount("   \n  ")).toBe(0);
+    expect(parseSeedWordCount("word1   word2\nword3")).toBe(3);
+
+    const ts = new Date("2026-11-21T09:00:00Z");
+    expect(formatSeedBackupFilename("testnet", ts)).toBe(
+      "astrowallet-testnet-vault-2026-11-21.agvault.json",
+    );
   });
 });

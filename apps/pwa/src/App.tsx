@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -52,6 +53,7 @@ import {
 import { IosBrowserGuard } from "./components/IosBrowserGuard.js";
 import { ModalDrawer } from "./components/ModalDrawer.js";
 import { OnboardingSheet } from "./components/OnboardingSheet.js";
+import { formatSeedBackupFilename } from "./components/onboarding-helpers.js";
 import { UnlockSheet } from "./components/UnlockSheet.js";
 import { loadPwaEnv } from "./config/env.js";
 import { TelegramProvider, useTelegram } from "./state/telegram-context.js";
@@ -396,6 +398,24 @@ function WalletShell({
   const [fpPin, setFpPin] = useState("");
   const [fpStatusMsg, setFpStatusMsg] = useState<string | null>(null);
   const [exportedVault, setExportedVault] = useState<string | null>(null);
+  const [copiedVaultExport, setCopiedVaultExport] = useState(false);
+
+  const onboardingBackRef = useRef<(() => void) | null>(null);
+  const [onboardingCanGoBack, setOnboardingCanGoBack] = useState(false);
+
+  const registerOnboardingBack = useCallback((handler: (() => void) | null) => {
+    onboardingBackRef.current = handler;
+    setOnboardingCanGoBack(handler !== null);
+  }, []);
+
+  const isWalletUnlocked = vaultStatus === "unlocked" && activeAccount !== null;
+
+  useEffect(() => {
+    if (vaultStatus !== "unlocked") {
+      setExportedVault(null);
+      setActiveDrawer(null);
+    }
+  }, [vaultStatus]);
 
   const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
   const [renameLabel, setRenameLabel] = useState("");
@@ -424,12 +444,12 @@ function WalletShell({
   const selectTab = useCallback((tab: AppDockTab) => {
     triggerTelegramHaptic("selection");
     setActiveTab(tab);
-    if (
-      typeof window !== "undefined" &&
-      (window.location.pathname === "/" || window.location.pathname.startsWith("/app"))
-    ) {
-      const targetUrl = tab === "wallet" ? "/app" : `/app?tab=${tab}`;
-      window.history.replaceState({}, "", targetUrl);
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      if (window.location.pathname === "/" || window.location.pathname.startsWith("/app")) {
+        const targetUrl = tab === "wallet" ? "/app" : `/app?tab=${tab}`;
+        window.history.replaceState({}, "", targetUrl);
+      }
     }
   }, []);
 
@@ -448,7 +468,11 @@ function WalletShell({
       onClearIntent();
       return;
     }
-    if (activeTab !== "wallet") {
+    if (vaultStatus === "uninitialized" && onboardingBackRef.current) {
+      onboardingBackRef.current();
+      return;
+    }
+    if (isWalletUnlocked && activeTab !== "wallet") {
       selectTab("wallet");
     }
   }, [
@@ -458,6 +482,8 @@ function WalletShell({
     activeDrawer,
     intentRoute,
     onClearIntent,
+    vaultStatus,
+    isWalletUnlocked,
     activeTab,
     selectTab,
   ]);
@@ -466,7 +492,8 @@ function WalletShell({
     pendingTonConnectTx !== null ||
       activeDrawer !== null ||
       intentRoute !== null ||
-      activeTab !== "wallet",
+      (vaultStatus === "uninitialized" && onboardingCanGoBack) ||
+      (isWalletUnlocked && activeTab !== "wallet"),
     handleBack,
   );
 
@@ -591,9 +618,38 @@ function WalletShell({
     try {
       const json = await exportAgVaultJson();
       setExportedVault(json);
+      setCopiedVaultExport(false);
     } catch (err) {
       setFpStatusMsg(err instanceof Error ? err.message : "Export failed");
     }
+  };
+
+  const handleCopyExportedVault = async () => {
+    if (!exportedVault) return;
+    try {
+      await navigator.clipboard.writeText(exportedVault);
+      setCopiedVaultExport(true);
+      triggerTelegramHaptic("selection");
+      showToast("Encrypted .agvault JSON copied");
+      setTimeout(() => setCopiedVaultExport(false), 1800);
+    } catch {
+      // Clipboard unavailable
+    }
+  };
+
+  const handleDownloadExportedVault = () => {
+    if (!exportedVault) return;
+    const blob = new Blob([exportedVault], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = formatSeedBackupFilename(config.network);
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    triggerTelegramHaptic("success");
+    showToast("Downloaded .agvault.json backup");
   };
 
   const handleRenameSubmit = async (e: FormEvent) => {
@@ -717,14 +773,16 @@ function WalletShell({
     <div className="aw-app-canvas">
       <div className="aw-app-frame">
         {/* Main Mini App Workspace Stage */}
-        <main className="aw-app-main">
+        <main className={isWalletUnlocked ? "aw-app-main" : "aw-app-main aw-app-main--no-dock"}>
           <div className="aw-main-inner">
             {/* Compact Mini App Header */}
             <header className="aw-mobile-header">
               <button
                 type="button"
                 className="aw-sidebar-brand"
-                onClick={() => selectTab("wallet")}
+                onClick={() => {
+                  if (isWalletUnlocked) selectTab("wallet");
+                }}
                 title="AstroWallet Home"
               >
                 <AstroWalletLogo size={34} />
@@ -739,7 +797,7 @@ function WalletShell({
               </button>
 
               <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                {vaultStatus === "unlocked" && (
+                {isWalletUnlocked && (
                   <button
                     type="button"
                     className="aw-chip-btn"
@@ -761,7 +819,7 @@ function WalletShell({
                 >
                   {config.network.toUpperCase()}
                 </span>
-                {vaultStatus === "unlocked" && (
+                {isWalletUnlocked && (
                   <button type="button" className="aw-chip-btn" onClick={lockVault}>
                     <IconLock size={13} />
                     <span>Lock</span>
@@ -771,21 +829,25 @@ function WalletShell({
             </header>
 
             {/* Banking-Trust Custody Posture Strip */}
-            <div className="aw-trust-strip" role="status" aria-label="Security posture">
-              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                <span className="aw-trust-dot" />
-                <span>
-                  <strong>Self-Custodial Stellar &amp; TON</strong> · Argon2id IndexedDB · Scan &amp;
-                  Shield Active
-                </span>
+            {isWalletUnlocked && (
+              <div className="aw-trust-strip" role="status" aria-label="Security posture">
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <span className="aw-trust-dot" />
+                  <span>
+                    <strong>Self-Custodial Stellar &amp; TON</strong> · Argon2id IndexedDB · Scan &amp;
+                    Shield Active
+                  </span>
+                </div>
+                <span className="glass-pill glass-pill--trust">0 Server Keys</span>
               </div>
-              <span className="glass-pill glass-pill--trust">0 Server Keys</span>
-            </div>
+            )}
 
-            <IosBrowserGuard
-              isIntentRoute={intentRoute !== null}
-              uninitialized={vaultStatus === "uninitialized"}
-            />
+            {intentRoute !== null && vaultStatus === "uninitialized" && (
+              <IosBrowserGuard
+                isIntentRoute={intentRoute !== null}
+                uninitialized={vaultStatus === "uninitialized"}
+              />
+            )}
 
             {intentRoute && (
               <IntentSheet route={intentRoute} onDismiss={onClearIntent} />
@@ -799,7 +861,7 @@ function WalletShell({
 
             {vaultStatus === "uninitialized" && (
               <div className="aw-center-stage">
-                <OnboardingSheet />
+                <OnboardingSheet onRegisterBackHandler={registerOnboardingBack} />
               </div>
             )}
 
@@ -811,7 +873,7 @@ function WalletShell({
 
             {vaultStatus === "unlocked" && activeAccount && (
               <>
-                <AccountSwitcher />
+                {activeTab !== "accounts" && <AccountSwitcher />}
 
                 {activeTab === "wallet" && (
                   <div className="aw-wallet-stack">
@@ -1609,12 +1671,39 @@ function WalletShell({
                           </button>
                         </div>
                         {exportedVault && (
-                          <textarea
-                            readOnly
-                            className="aw-textarea"
-                            rows={4}
-                            value={exportedVault}
-                          />
+                          <div style={{ display: "grid", gap: 8 }}>
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              <button
+                                type="button"
+                                className="aw-chip-btn"
+                                onClick={() => void handleCopyExportedVault()}
+                              >
+                                {copiedVaultExport ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                                <span>{copiedVaultExport ? "Copied JSON" : "Copy JSON"}</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="aw-chip-btn"
+                                onClick={handleDownloadExportedVault}
+                              >
+                                <IconKey size={13} />
+                                <span>Download .agvault.json</span>
+                              </button>
+                              <button
+                                type="button"
+                                className="aw-chip-btn"
+                                onClick={() => setExportedVault(null)}
+                              >
+                                Hide
+                              </button>
+                            </div>
+                            <textarea
+                              readOnly
+                              className="aw-textarea"
+                              rows={4}
+                              value={exportedVault}
+                            />
+                          </div>
                         )}
                       </div>
 
@@ -1845,21 +1934,23 @@ function WalletShell({
         </main>
       </div>
 
-      {/* Bottom Floating Apple Liquid Glass Dock */}
-      <nav className="glass-dock" aria-label="Primary Mini App navigation">
-        {MOBILE_DOCK_ITEMS.map((item) => (
-          <button
-            key={item.id}
-            type="button"
-            className="dock-btn"
-            aria-current={activeTab === item.id ? "page" : undefined}
-            onClick={() => selectTab(item.id)}
-          >
-            <span className="aw-dock-icon">{renderDockIcon(item.id)}</span>
-            <span className="aw-dock-label">{item.label}</span>
-          </button>
-        ))}
-      </nav>
+      {/* Bottom Floating Apple Liquid Glass Dock (Unlocked Wallet Only) */}
+      {isWalletUnlocked && (
+        <nav className="glass-dock" aria-label="Primary Mini App navigation">
+          {MOBILE_DOCK_ITEMS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className="dock-btn"
+              aria-current={activeTab === item.id ? "page" : undefined}
+              onClick={() => selectTab(item.id)}
+            >
+              <span className="aw-dock-icon">{renderDockIcon(item.id)}</span>
+              <span className="aw-dock-label">{item.label}</span>
+            </button>
+          ))}
+        </nav>
+      )}
 
       {/* Global Liquid Glass Toast Notification */}
       {toast && (

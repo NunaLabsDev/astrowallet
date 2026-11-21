@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { StellarAddressSchema, type ScanReport } from "@astrowallet/domain";
+import {
+  StellarAddressSchema,
+  type ScanReport,
+  type StellarAddress,
+} from "@astrowallet/domain";
 import {
   parseSep7Uri,
   resolveFederationAddress,
@@ -7,6 +11,7 @@ import {
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { mapSep7MemoKind } from "../state/session-vault.js";
+import { triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import {
   IconCheck,
@@ -14,11 +19,23 @@ import {
   IconCopy,
   IconExternalLink,
   IconQr,
+  IconSend,
   IconShield,
   IconUserPlus,
 } from "./Icons.js";
 
 type MemoKind = TypedMemoInput["kind"];
+
+interface PendingStellarReview {
+  destination: StellarAddress;
+  amount: string;
+  assetCode: string;
+  assetIssuer?: string | undefined;
+  typedMemo?: TypedMemoInput | undefined;
+  memoSummary?: string | undefined;
+  saveAsContact: boolean;
+  contactLabel: string;
+}
 
 interface DetectedBarcode {
   rawValue?: string;
@@ -91,6 +108,7 @@ export function SendSheet({
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reviewPending, setReviewPending] = useState<PendingStellarReview | null>(null);
   const [confirmedTxHash, setConfirmedTxHash] = useState<string | null>(null);
   const [copiedHash, setCopiedHash] = useState(false);
 
@@ -288,7 +306,7 @@ export function SendSheet({
     setAmount(formatTruncatedAmount(maxSpendableNumber * ratio));
   };
 
-  const handleSubmit = async (e: FormEvent) => {
+  const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     setError(null);
 
@@ -336,24 +354,47 @@ export function SendSheet({
       }
     }
 
+    triggerTelegramHaptic("selection");
+    setReviewPending({
+      destination: parsedDest.data,
+      amount: amount.trim(),
+      assetCode: selectedBalance.assetCode,
+      assetIssuer: selectedBalance.assetIssuer,
+      typedMemo,
+      memoSummary: typedMemo ? `${memoKind.toUpperCase()}: ${cleanMemo}` : undefined,
+      saveAsContact,
+      contactLabel: contactLabel.trim(),
+    });
+  };
+
+  const handleConfirmBroadcast = async () => {
+    if (!reviewPending) return;
     setBusy(true);
+    setError(null);
     try {
       const res = await sendPayment({
-        destination: parsedDest.data,
-        amount: amount.trim(),
-        assetCode: selectedBalance.assetCode,
-        assetIssuer: selectedBalance.assetIssuer,
-        typedMemo,
+        destination: reviewPending.destination,
+        amount: reviewPending.amount,
+        assetCode: reviewPending.assetCode,
+        assetIssuer: reviewPending.assetIssuer,
+        typedMemo: reviewPending.typedMemo,
       });
-      if (saveAsContact && contactLabel.trim()) {
+      if (reviewPending.saveAsContact && reviewPending.contactLabel) {
+        const defaultMemo =
+          reviewPending.typedMemo?.kind === "text" || reviewPending.typedMemo?.kind === "id"
+            ? reviewPending.typedMemo.value
+            : undefined;
         await saveContact({
-          label: contactLabel.trim(),
-          address: parsedDest.data,
-          defaultMemo: cleanMemo || undefined,
+          label: reviewPending.contactLabel,
+          address: reviewPending.destination,
+          defaultMemo,
         }).catch(() => undefined);
       }
       setConfirmedTxHash(res.hash);
+      setReviewPending(null);
+      triggerTelegramHaptic("success");
     } catch (err) {
+      triggerTelegramHaptic("error");
       setError(err instanceof Error ? err.message : "Transaction failed");
     } finally {
       setBusy(false);
@@ -439,6 +480,85 @@ export function SendSheet({
           <button type="button" className="aw-btn-primary" onClick={onClose}>
             Done
           </button>
+        </div>
+      ) : reviewPending ? (
+        <div className="aw-review-card">
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <span style={{ fontWeight: 700, fontSize: 15 }}>Review Stellar Transfer</span>
+            <span
+              className={`glass-pill ${
+                destShieldReport?.verdict === "warning" ? "glass-pill--gold" : "glass-pill--trust"
+              }`}
+            >
+              Shield: {destShieldReport?.verdict.toUpperCase() ?? "PRE-CHECKED"}
+            </span>
+          </div>
+
+          <div className="aw-review-amount tabular-nums">
+            {reviewPending.amount} <span>{reviewPending.assetCode}</span>
+          </div>
+
+          <div className="aw-review-rows">
+            <div className="aw-review-row">
+              <span>From</span>
+              <strong>
+                {activeAccount.label} ({activeAccount.address.slice(0, 6)}…
+                {activeAccount.address.slice(-4)})
+              </strong>
+            </div>
+            <div className="aw-review-row">
+              <span>Destination</span>
+              <code style={{ wordBreak: "break-all", textAlign: "right" }}>
+                {reviewPending.destination}
+              </code>
+            </div>
+            <div className="aw-review-row">
+              <span>Network</span>
+              <strong>STELLAR {config.network.toUpperCase()}</strong>
+            </div>
+            <div className="aw-review-row">
+              <span>Memo</span>
+              <code>{reviewPending.memoSummary ?? "None"}</code>
+            </div>
+          </div>
+
+          {destShieldReport?.verdict === "warning" && destShieldReport.findings[0] && (
+            <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+              <strong>{destShieldReport.findings[0].title}:</strong>{" "}
+              {destShieldReport.findings[0].description}
+            </div>
+          )}
+
+          {error && (
+            <div className="aw-banner aw-banner--danger" role="alert">
+              {error}
+            </div>
+          )}
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              className="aw-btn-secondary"
+              style={{ flex: 1 }}
+              disabled={busy}
+              onClick={() => {
+                setError(null);
+                setReviewPending(null);
+              }}
+            >
+              ← Edit
+            </button>
+            <button
+              type="button"
+              className="aw-btn-primary"
+              style={{ flex: 2 }}
+              disabled={busy}
+              onClick={() => void handleConfirmBroadcast()}
+            >
+              <IconSend size={15} />
+              <span>{busy ? "Signing & Broadcasting..." : "Confirm & Broadcast"}</span>
+            </button>
+          </div>
         </div>
       ) : (
         <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12 }}>
@@ -728,9 +848,7 @@ export function SendSheet({
             className="aw-btn-primary"
             disabled={busy || destShieldReport?.verdict === "malicious"}
           >
-            {busy
-              ? "Signing & Broadcasting..."
-              : `Sign & Send ${selectedBalance.assetCode}`}
+            Review Transfer →
           </button>
         </form>
       )}

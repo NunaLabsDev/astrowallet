@@ -1,9 +1,19 @@
 import { useState, type FormEvent } from "react";
-import { formatNanoTon } from "@astrowallet/ton-core";
+import {
+  formatNanoTon,
+  isValidTonAddress,
+  parseTonToNano,
+} from "@astrowallet/ton-core";
 import { useWallet } from "../state/wallet-context.js";
 import { triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { IconCheck, IconCopy, IconExternalLink, IconRefresh, IconSend } from "./Icons.js";
+
+interface PendingTonReview {
+  destination: string;
+  amountTon: string;
+  comment?: string | undefined;
+}
 
 export function TonWalletSheet() {
   const {
@@ -20,6 +30,7 @@ export function TonWalletSheet() {
   const [destination, setDestination] = useState("");
   const [amountTon, setAmountTon] = useState("0.1");
   const [comment, setComment] = useState("");
+  const [reviewPending, setReviewPending] = useState<PendingTonReview | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -40,18 +51,52 @@ export function TonWalletSheet() {
     }
   };
 
-  const handleSend = async (e: FormEvent) => {
+  const handlePrepareReview = (e: FormEvent) => {
     e.preventDefault();
-    setBusy(true);
     setErrorMsg(null);
     setTxHash(null);
+
+    const cleanDest = destination.trim();
+    if (!isValidTonAddress(cleanDest)) {
+      setErrorMsg("Enter a valid TON destination address (UQ..., EQ..., or 0:...).");
+      return;
+    }
+
+    let nano: bigint;
+    try {
+      nano = parseTonToNano(amountTon.trim());
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Invalid TON amount");
+      return;
+    }
+
+    if (tonState && nano > BigInt(tonState.balanceNano)) {
+      setErrorMsg(
+        `Insufficient TON balance (${formatNanoTon(tonState.balanceNano)} TON available).`,
+      );
+      return;
+    }
+
+    triggerTelegramHaptic("selection");
+    setReviewPending({
+      destination: cleanDest,
+      amountTon: amountTon.trim(),
+      comment: comment.trim() || undefined,
+    });
+  };
+
+  const handleConfirmSend = async () => {
+    if (!reviewPending) return;
+    setBusy(true);
+    setErrorMsg(null);
     try {
       const res = await sendTonPayment({
-        destination: destination.trim(),
-        amountTon: amountTon.trim(),
-        comment: comment.trim() || undefined,
+        destination: reviewPending.destination,
+        amountTon: reviewPending.amountTon,
+        comment: reviewPending.comment,
       });
       setTxHash(res.hash);
+      setReviewPending(null);
       setDestination("");
       setComment("");
       triggerTelegramHaptic("success");
@@ -153,67 +198,130 @@ export function TonWalletSheet() {
       )}
 
       <section className="glass-card" style={{ display: "grid", gap: 10 }}>
-        <div style={{ fontWeight: 700, fontSize: 15 }}>Send TON</div>
-        <form onSubmit={handleSend} style={{ display: "grid", gap: 10 }}>
-          <div>
-            <label className="aw-label" htmlFor="ton-send-dest">
-              Recipient TON Address
-            </label>
-            <input
-              id="ton-send-dest"
-              type="text"
-              className="aw-input"
-              placeholder="UQ... / EQ... / 0:..."
-              value={destination}
-              onChange={(e) => setDestination(e.target.value)}
-            />
-          </div>
-          <div className="aw-two-col-inputs">
-            <div>
-              <label className="aw-label" htmlFor="ton-send-amount">
-                Amount (TON)
-              </label>
-              <input
-                id="ton-send-amount"
-                type="text"
-                inputMode="decimal"
-                className="aw-input tabular-nums"
-                value={amountTon}
-                onChange={(e) => setAmountTon(e.target.value)}
-              />
+        {reviewPending ? (
+          <div className="aw-review-card">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <span style={{ fontWeight: 700, fontSize: 15 }}>Review TON Transfer</span>
+              <span className="glass-pill glass-pill--trust">
+                TON {config.tonNetwork.toUpperCase()}
+              </span>
             </div>
-            <div>
-              <label className="aw-label" htmlFor="ton-send-comment">
-                Comment (Optional)
-              </label>
-              <input
-                id="ton-send-comment"
-                type="text"
-                maxLength={120}
-                className="aw-input"
-                placeholder="Payment memo"
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-              />
-            </div>
-          </div>
 
-          {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
-          {txHash && (
-            <div className="aw-banner" style={{ fontSize: 12 }}>
-              Broadcasted TON transfer: <code>{txHash}</code>
+            <div className="aw-review-amount tabular-nums">
+              {reviewPending.amountTon} <span>TON</span>
             </div>
-          )}
 
-          <button
-            type="submit"
-            className="aw-btn-primary"
-            disabled={busy || !destination.trim() || config.tonRpcUrls.length === 0}
-          >
-            <IconSend size={15} />
-            <span>{busy ? "Signing & Broadcasting TON..." : "Send TON Now"}</span>
-          </button>
-        </form>
+            <div className="aw-review-rows">
+              <div className="aw-review-row">
+                <span>From</span>
+                <code>
+                  {tonAccount.friendlyAddress.slice(0, 8)}…{tonAccount.friendlyAddress.slice(-6)}
+                </code>
+              </div>
+              <div className="aw-review-row">
+                <span>Destination</span>
+                <code style={{ wordBreak: "break-all", textAlign: "right" }}>
+                  {reviewPending.destination}
+                </code>
+              </div>
+              <div className="aw-review-row">
+                <span>Comment</span>
+                <code>{reviewPending.comment ?? "None"}</code>
+              </div>
+            </div>
+
+            {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
+
+            <div style={{ display: "flex", gap: 8 }}>
+              <button
+                type="button"
+                className="aw-btn-secondary"
+                style={{ flex: 1 }}
+                disabled={busy}
+                onClick={() => {
+                  setErrorMsg(null);
+                  setReviewPending(null);
+                }}
+              >
+                ← Edit
+              </button>
+              <button
+                type="button"
+                className="aw-btn-primary"
+                style={{ flex: 2 }}
+                disabled={busy}
+                onClick={() => void handleConfirmSend()}
+              >
+                <IconSend size={15} />
+                <span>{busy ? "Signing & Broadcasting TON..." : "Confirm & Send TON"}</span>
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ fontWeight: 700, fontSize: 15 }}>Send TON</div>
+            <form onSubmit={handlePrepareReview} style={{ display: "grid", gap: 10 }}>
+              <div>
+                <label className="aw-label" htmlFor="ton-send-dest">
+                  Recipient TON Address
+                </label>
+                <input
+                  id="ton-send-dest"
+                  type="text"
+                  className="aw-input"
+                  placeholder="UQ... / EQ... / 0:..."
+                  value={destination}
+                  onChange={(e) => setDestination(e.target.value)}
+                />
+              </div>
+              <div className="aw-two-col-inputs">
+                <div>
+                  <label className="aw-label" htmlFor="ton-send-amount">
+                    Amount (TON)
+                  </label>
+                  <input
+                    id="ton-send-amount"
+                    type="text"
+                    inputMode="decimal"
+                    className="aw-input tabular-nums"
+                    value={amountTon}
+                    onChange={(e) => setAmountTon(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label className="aw-label" htmlFor="ton-send-comment">
+                    Comment (Optional)
+                  </label>
+                  <input
+                    id="ton-send-comment"
+                    type="text"
+                    maxLength={120}
+                    className="aw-input"
+                    placeholder="Payment memo"
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                  />
+                </div>
+              </div>
+
+              {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
+              {txHash && (
+                <div className="aw-banner" style={{ fontSize: 12 }}>
+                  Broadcasted TON transfer: <code>{txHash}</code>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="aw-btn-primary"
+                disabled={busy || !destination.trim() || config.tonRpcUrls.length === 0}
+              >
+                <IconSend size={15} />
+                <span>Review TON Transfer →</span>
+              </button>
+            </form>
+          </>
+        )}
       </section>
     </div>
   );

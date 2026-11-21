@@ -6,22 +6,25 @@ import {
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
-import { IconFingerprint, IconLock } from "./Icons.js";
+import { IconFingerprint, IconLock, IconTrash } from "./Icons.js";
 
 export function UnlockSheet() {
   const {
     config,
     unlockWithPin,
     unlockWithBiometric,
+    wipeLocalVault,
     fingerprintSupported,
     fingerprintEnrolled,
   } = useWallet();
 
   const [pin, setPin] = useState("");
+  const [showPin, setShowPin] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [cooldownUntilMs, setCooldownUntilMs] = useState(0);
   const [remainingSec, setRemainingSec] = useState(0);
+  const [resetArmed, setResetArmed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -116,15 +119,24 @@ export function UnlockSheet() {
           <label className="aw-label" htmlFor="unlock-pin-input">
             PIN or Passphrase
           </label>
-          <input
-            id="unlock-pin-input"
-            type="password"
-            className="aw-input"
-            autoComplete="current-password"
-            placeholder="Enter your PIN or passphrase"
-            value={pin}
-            onChange={(e) => setPin(e.target.value)}
-          />
+          <div className="aw-input-row">
+            <input
+              id="unlock-pin-input"
+              type={showPin ? "text" : "password"}
+              className="aw-input"
+              autoComplete="current-password"
+              placeholder="Enter your PIN or passphrase"
+              value={pin}
+              onChange={(e) => setPin(e.target.value)}
+            />
+            <button
+              type="button"
+              className="aw-chip-btn"
+              onClick={() => setShowPin((v) => !v)}
+            >
+              {showPin ? "Hide" : "Show"}
+            </button>
+          </div>
         </div>
 
         {error && (
@@ -163,6 +175,49 @@ export function UnlockSheet() {
           )}
         </div>
       </form>
+
+      <div className="aw-unlock-footer" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
+        {!resetArmed ? (
+          <button
+            type="button"
+            className="aw-chip-btn"
+            style={{ alignSelf: "center" }}
+            onClick={() => setResetArmed(true)}
+          >
+            Forgot PIN? Reset / Restore Wallet
+          </button>
+        ) : (
+          <div className="aw-banner aw-banner--danger" style={{ display: "grid", gap: 8 }}>
+            <div style={{ fontSize: 12 }}>
+              <strong>Reset Local Device Vault?</strong> This erases the encrypted vault from
+              this device&apos;s IndexedDB. You can restore anytime using your 12/24-word phrase or{" "}
+              <code>.agvault.json</code> backup.
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <button
+                type="button"
+                className="aw-btn-danger"
+                style={{ flex: 1 }}
+                disabled={busy}
+                onClick={() => {
+                  setResetArmed(false);
+                  void wipeLocalVault();
+                }}
+              >
+                <IconTrash size={14} />
+                <span>Confirm Reset Vault</span>
+              </button>
+              <button
+                type="button"
+                className="aw-btn-secondary"
+                onClick={() => setResetArmed(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     </section>
   );
 }

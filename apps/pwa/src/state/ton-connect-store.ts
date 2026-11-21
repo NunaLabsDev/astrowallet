@@ -5,6 +5,7 @@ const TC_DB_VERSION = 1;
 const TC_STORE_NAME = "ton_connect_sessions";
 
 export interface StoredTonConnectSession {
+  scopeId?: string | undefined;
   walletClientId: string;
   walletSecretHex: string;
   dappClientId: string;
@@ -34,11 +35,13 @@ function openTonConnectDb(): Promise<IDBDatabase> {
   });
 }
 
-export async function loadTonConnectSessions(): Promise<StoredTonConnectSession[]> {
+export async function loadTonConnectSessions(
+  scopeId?: string,
+): Promise<StoredTonConnectSession[]> {
   try {
     const db = await openTonConnectDb();
     try {
-      return await new Promise((resolve, reject) => {
+      const all = await new Promise<StoredTonConnectSession[]>((resolve, reject) => {
         const tx = db.transaction(TC_STORE_NAME, "readonly");
         const store = tx.objectStore(TC_STORE_NAME);
         const req = store.getAll();
@@ -46,6 +49,8 @@ export async function loadTonConnectSessions(): Promise<StoredTonConnectSession[
           resolve(Array.isArray(req.result) ? (req.result as StoredTonConnectSession[]) : []);
         req.onerror = () => reject(req.error ?? new Error("Failed to read TON Connect sessions"));
       });
+      const cleanScope = scopeId?.trim();
+      return all.filter((s) => (cleanScope ? s.scopeId === cleanScope : !s.scopeId));
     } finally {
       db.close();
     }
@@ -82,8 +87,14 @@ export async function removeTonConnectSession(walletClientId: string): Promise<v
   }
 }
 
-export async function clearAllTonConnectSessions(): Promise<void> {
+export async function clearAllTonConnectSessions(scopeId?: string): Promise<void> {
   try {
+    const cleanScope = scopeId?.trim();
+    if (cleanScope) {
+      const scoped = await loadTonConnectSessions(cleanScope);
+      await Promise.all(scoped.map((s) => removeTonConnectSession(s.walletClientId)));
+      return;
+    }
     const db = await openTonConnectDb();
     try {
       await new Promise<void>((resolve, reject) => {

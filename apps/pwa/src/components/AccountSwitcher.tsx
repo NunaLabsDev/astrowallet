@@ -1,9 +1,19 @@
 import { useState, type FormEvent } from "react";
+import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import { computeNextDerivationIndex } from "./flow-validators.js";
 
 export function AccountSwitcher() {
-  const { accounts, activeAccount, setActiveIndex, addDerivedAccount } = useWallet();
+  const { hasEncryptedBackup, uploadEncryptedBackup } = useTelegram();
+  const {
+    accounts,
+    activeAccount,
+    setActiveIndex,
+    addDerivedAccount,
+    exportAgVaultJson,
+    showToast,
+  } = useWallet();
 
   const [adding, setAdding] = useState(false);
   const [newLabel, setNewLabel] = useState("");
@@ -11,12 +21,24 @@ export function AccountSwitcher() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const nextDerivationIndex = computeNextDerivationIndex(accounts);
+
   const handleAddAccount = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
       await addDerivedAccount(newLabel, pin);
+      if (hasEncryptedBackup) {
+        void exportAgVaultJson()
+          .then((json) => uploadEncryptedBackup(json))
+          .catch(() => {
+            showToast(
+              "Derived locally — tap Re-Sync in Vault tab to update Telegram backup",
+              "info",
+            );
+          });
+      }
       setNewLabel("");
       setPin("");
       setAdding(false);
@@ -89,7 +111,7 @@ export function AccountSwitcher() {
           style={{ display: "grid", gap: 10 }}
         >
           <div style={{ fontSize: 13, fontWeight: 700 }}>
-            Derive Next SEP-0005 Account (m/44&apos;/148&apos;/{accounts.length}&apos;)
+            Derive Next SEP-0005 Account (m/44&apos;/148&apos;/{nextDerivationIndex}&apos;)
           </div>
           <input
             type="text"

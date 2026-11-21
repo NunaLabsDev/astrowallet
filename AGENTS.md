@@ -36,11 +36,12 @@ Before editing or bootstrapping any package, read in this order:
 
 ### Rule 4 — Non-Custodial Key Isolation & Seed Sovereignty
 - One **SEP-0005** 12/24-word mnemonic (`m/44'/148'/i'`) controls multiple linked Stellar Classic accounts (`G...`) and optionally acts as the **Recovery Guardian** for paired Soroban Smart Accounts (`C...`).
-- Private keys, mnemonics, and decrypted seed material **never** touch:
+- **Plaintext** private keys, mnemonics, decrypted seed material, PINs, and recovery passwords **never** touch:
   - `localStorage` or `sessionStorage`,
   - Telegram `CloudStorage`, bot webhook payloads, or D1/KV,
   - Cloudflare Worker logs, analytics, or error trackers.
-- Telegram `/connect` binds `telegram_user_id` (immutable primary key) and `@username` (mutable index) **exclusively via cryptographic signature verification of public addresses (`G...` / `C...`)**—never by transmitting secrets.
+- **Zero-Knowledge Encrypted Vault Sync (`AGVAULT` v1):** Clients may persist ONLY client-encrypted `AGVAULT` v1 ciphertext envelopes (`Argon2id >= 64 MiB` + `AES-GCM-256`, strictly schema-validated, protected by a strong Recovery Password `>= 10` chars) keyed by `telegram_user_id` + `network` in Cloudflare D1 (`encrypted_vault_backups`) and mirrored to `Telegram.WebApp.CloudStorage`, ensuring users never lose wallet access on cache clears or device changes while keeping decryption 100% client-side.
+- Telegram `/connect` and in-app Telegram Sync (`/v1/tg/link-challenge` -> `/v1/tg/link-confirm`) bind `telegram_user_id` (immutable primary key) and `@username` (mutable index) **exclusively via cryptographic signature verification of public addresses (`G...` / `C...`)**—never by transmitting secrets.
 
 ### Rule 5 — Strict Hexagonal Package Dependency Matrix
 
@@ -69,7 +70,7 @@ Enforce this DAG in `tsconfig` / ESLint boundaries (`no-restricted-imports`):
   - Both Stellar (`G...`/`C...`) and TON (`WalletContractV4`/`WalletContractV5R1`, BIP-39 + SLIP-0010 `m/44'/607'/i'`) non-custodial asset management happen directly inside the Mini App UI.
   - External app/dApp connections inside the Mini App operate **exclusively via TON Connect v2**. Never inject `window.stellar`, ship WalletConnect/Reown non-TON external dApp connectors, or embed non-TON external app catalogs/promotions (ToS §7.3–7.4).
 - **Cryptographic Identity & Sessions:** Server verifies `Telegram.WebApp.initData` via HMAC-SHA256 (`WebAppData` + `TG_BOT_TOKEN`, `auth_date <= 300s`) on `POST /v1/tg/auth` and mints short-lived (`15m`) Mini App session tokens. **Never** trust unverified `initDataUnsafe`. Every bot action link still carries a short-lived HMAC-signed Intent Token.
-- **Key Storage Safety (Rule 4 Preserved):** Secrets, mnemonics, and PINs **never** touch `Telegram.WebApp.CloudStorage`, `localStorage`, `sessionStorage`, server logs, or D1/KV. Optional `BiometricManager` + `SecureStorage` (Bot API 9.0 local device Keychain/Keystore) complements mandatory client-side Argon2id + AES-GCM-256 IndexedDB custody and `.agvault.json` export.
+- **Key Storage Safety (Rule 4 Preserved):** **Plaintext** secrets, mnemonics, PINs, and recovery passwords **never** touch `Telegram.WebApp.CloudStorage`, `localStorage`, `sessionStorage`, server logs, or D1/KV. Only client-side `Argon2id >= 64 MiB` + `AES-GCM-256` encrypted `AGVAULT` v1 ciphertext envelopes (protected by a `>= 10` char strong Recovery Password) may sync per `telegram_user_id` (`encrypted_vault_backups` + `CloudStorage` mirror), alongside optional `BiometricManager` + `SecureStorage` (Bot API 9.0 local device Keychain/Keystore), local IndexedDB custody, and `.agvault.json` export.
 - **Telegram-Scoped CSP Framing:** Security headers allow framing **only** by Telegram Web/clients (`frame-ancestors https://web.telegram.org https://*.telegram.org`) and `script-src 'self' https://telegram.org 'wasm-unsafe-eval'`.
 
 ---

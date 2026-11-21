@@ -4,13 +4,17 @@ import {
   getPinLockoutState,
   recordFailedPinAttempt,
 } from "@astrowallet/stellar-core";
+import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { IconFingerprint, IconLock, IconTrash } from "./Icons.js";
 
 export function UnlockSheet() {
+  const { hasEncryptedBackup, backupUpdatedAt } = useTelegram();
   const {
     config,
+    storageScopeId,
+    localVaultUpdatedAt,
     unlockWithPin,
     unlockWithBiometric,
     wipeLocalVault,
@@ -28,14 +32,14 @@ export function UnlockSheet() {
 
   useEffect(() => {
     let cancelled = false;
-    void getPinLockoutState().then((state) => {
+    void getPinLockoutState(storageScopeId).then((state) => {
       if (cancelled) return;
       setCooldownUntilMs(state.lockedUntilMs);
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [storageScopeId]);
 
   useEffect(() => {
     if (cooldownUntilMs <= Date.now()) {
@@ -58,12 +62,12 @@ export function UnlockSheet() {
     setError(null);
     try {
       await unlockWithPin(pin);
-      await clearPinLockoutState();
+      await clearPinLockoutState(storageScopeId);
       setPin("");
       setCooldownUntilMs(0);
       setRemainingSec(0);
     } catch (err) {
-      const nextState = await recordFailedPinAttempt();
+      const nextState = await recordFailedPinAttempt(Date.now(), storageScopeId);
       if (nextState.lockedUntilMs > Date.now()) {
         const sec = Math.max(1, Math.ceil((nextState.lockedUntilMs - Date.now()) / 1000));
         setCooldownUntilMs(nextState.lockedUntilMs);
@@ -83,7 +87,7 @@ export function UnlockSheet() {
     setError(null);
     try {
       await unlockWithBiometric();
-      await clearPinLockoutState();
+      await clearPinLockoutState(storageScopeId);
       setCooldownUntilMs(0);
       setRemainingSec(0);
     } catch (err) {
@@ -113,6 +117,16 @@ export function UnlockSheet() {
           Decrypt locally with your PIN/passphrase or enrolled Fingerprint
         </p>
       </div>
+
+      {hasEncryptedBackup &&
+        backupUpdatedAt !== null &&
+        localVaultUpdatedAt !== null &&
+        backupUpdatedAt > localVaultUpdatedAt + 5 && (
+          <div className="aw-banner" style={{ fontSize: 12, marginTop: 12 }}>
+            A newer Telegram Encrypted Backup was detected from another device. If your password
+            changed, reset this device&apos;s local copy below to pull the latest backup.
+          </div>
+        )}
 
       <form onSubmit={handlePinSubmit} style={{ display: "grid", gap: 12, marginTop: 18 }}>
         <div>
@@ -189,8 +203,9 @@ export function UnlockSheet() {
         ) : (
           <div className="aw-banner aw-banner--danger" style={{ display: "grid", gap: 8 }}>
             <div style={{ fontSize: 12 }}>
-              <strong>Reset Local Device Vault?</strong> This erases the encrypted vault from
-              this device&apos;s IndexedDB. You can restore anytime using your 12/24-word phrase or{" "}
+              <strong>Reset Local Device Vault?</strong> This erases only the local encrypted vault
+              from this device&apos;s IndexedDB (your Telegram Encrypted Backup stays safe). You can
+              restore anytime using your Recovery Password, 12/24-word phrase, or{" "}
               <code>.agvault.json</code> backup.
             </div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

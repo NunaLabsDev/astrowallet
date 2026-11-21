@@ -47,6 +47,22 @@ export interface TelegramDeviceSecureStorage {
   ): void;
 }
 
+export interface TelegramCloudStorage {
+  setItem(
+    key: string,
+    value: string,
+    cb?: (err: string | null, stored?: boolean) => void,
+  ): void;
+  getItem(
+    key: string,
+    cb?: (err: string | null, value?: string | null) => void,
+  ): void;
+  removeItem(
+    key: string,
+    cb?: (err: string | null, removed?: boolean) => void,
+  ): void;
+}
+
 export interface TelegramSafeAreaInset {
   top?: number;
   bottom?: number;
@@ -87,6 +103,7 @@ export interface TelegramWebAppInstance {
   HapticFeedback?: TelegramHapticFeedback;
   BiometricManager?: TelegramBiometricManager;
   SecureStorage?: TelegramDeviceSecureStorage;
+  CloudStorage?: TelegramCloudStorage;
 }
 
 export type TelegramAuthStatus = "checking" | "verified" | "outside" | "error";
@@ -162,6 +179,41 @@ export function triggerTelegramHaptic(
     }
   } catch {
     // Ignore haptic errors
+  }
+}
+
+/**
+ * Copies text to clipboard with safe execCommand fallback for restricted Telegram WebViews.
+ */
+export async function copyTextToClipboard(text: string): Promise<boolean> {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch {
+      // Fall through to execCommand fallback
+    }
+  }
+  if (typeof document === "undefined") {
+    return false;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  textarea.style.top = "-9999px";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  try {
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
   }
 }
 
@@ -305,6 +357,100 @@ export function tgSecureStorageRemove(key: string): Promise<boolean> {
       store.removeItem(key, (err, removed) => resolve(!err && Boolean(removed ?? true)));
     } catch {
       resolve(false);
+    }
+  });
+}
+
+const CLOUD_STORAGE_TIMEOUT_MS = 2500;
+
+/**
+ * Telegram CloudStorage wrappers used ONLY for Zero-Knowledge AGVAULT ciphertext envelopes
+ * (never plaintext mnemonics, private keys, PINs, or passwords).
+ */
+export function tgCloudStorageGet(key: string): Promise<string | null> {
+  const store = getTelegramWebApp()?.CloudStorage;
+  if (!store) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(null);
+      }
+    }, CLOUD_STORAGE_TIMEOUT_MS);
+    try {
+      store.getItem(key, (err, value) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        if (err || typeof value !== "string" || value.trim().length === 0) {
+          resolve(null);
+        } else {
+          resolve(value);
+        }
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(null);
+      }
+    }
+  });
+}
+
+export function tgCloudStorageSet(key: string, value: string): Promise<boolean> {
+  const store = getTelegramWebApp()?.CloudStorage;
+  if (!store) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    }, CLOUD_STORAGE_TIMEOUT_MS);
+    try {
+      store.setItem(key, value, (err, stored) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(!err && Boolean(stored ?? true));
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(false);
+      }
+    }
+  });
+}
+
+export function tgCloudStorageRemove(key: string): Promise<boolean> {
+  const store = getTelegramWebApp()?.CloudStorage;
+  if (!store) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    }, CLOUD_STORAGE_TIMEOUT_MS);
+    try {
+      store.removeItem(key, (err, removed) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(!err && Boolean(removed ?? true));
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(false);
+      }
     }
   });
 }

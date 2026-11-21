@@ -31,6 +31,16 @@ export interface WatchedAccountRecord {
   label: string;
 }
 
+export interface StoredEncryptedVaultBackup {
+  telegramUserId: string;
+  network: StellarNetwork;
+  envelopeJson: string;
+  envelopeSha256: string;
+  version: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface ServerRepository {
   upsertTelegramUser(input: {
     telegramUserId: string;
@@ -104,6 +114,22 @@ export interface ServerRepository {
   }): Promise<{ allowed: boolean; spentStroops: string }>;
   claimTelegramUpdateId(updateId: number, nowSec?: number): Promise<boolean>;
   purgeExpiredRecords(nowSec: number): Promise<void>;
+
+  upsertEncryptedVaultBackup(input: {
+    telegramUserId: string;
+    network: StellarNetwork;
+    envelopeJson: string;
+    envelopeSha256: string;
+    version?: number | undefined;
+  }): Promise<StoredEncryptedVaultBackup>;
+  getEncryptedVaultBackup(
+    telegramUserId: string,
+    network: StellarNetwork,
+  ): Promise<StoredEncryptedVaultBackup | null>;
+  deleteEncryptedVaultBackup(
+    telegramUserId: string,
+    network: StellarNetwork,
+  ): Promise<boolean>;
 }
 
 interface RawUserRow {
@@ -149,6 +175,28 @@ interface RawClaimRow {
   status: ClaimLink["status"];
   expires_at: number;
   created_at: number;
+}
+
+interface RawEncryptedBackupRow {
+  telegram_user_id: string;
+  network: StellarNetwork;
+  envelope_json: string;
+  envelope_sha256: string;
+  version: number;
+  created_at: number;
+  updated_at: number;
+}
+
+function mapEncryptedBackupRow(row: RawEncryptedBackupRow): StoredEncryptedVaultBackup {
+  return {
+    telegramUserId: row.telegram_user_id,
+    network: row.network,
+    envelopeJson: row.envelope_json,
+    envelopeSha256: row.envelope_sha256,
+    version: row.version,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function mapClaimRow(row: RawClaimRow): ClaimLink {
@@ -712,6 +760,71 @@ export function createD1Repository(db: D1Database): ServerRepository {
           .prepare("DELETE FROM processed_alerts WHERE created_at < ?")
           .bind(nowSec - 30 * 86_400),
       ]);
+    },
+
+    async upsertEncryptedVaultBackup({
+      telegramUserId,
+      network,
+      envelopeJson,
+      envelopeSha256,
+      version = 1,
+    }) {
+      const now = Math.floor(Date.now() / 1000);
+      await db.batch([
+        db
+          .prepare(
+            `INSERT OR IGNORE INTO tg_users (telegram_user_id, username_lower, alerts_enabled, created_at, updated_at)
+             VALUES (?, NULL, 1, ?, ?)`,
+          )
+          .bind(telegramUserId, now, now),
+        db
+          .prepare(
+            `INSERT INTO encrypted_vault_backups
+             (telegram_user_id, network, envelope_json, envelope_sha256, version, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(telegram_user_id, network) DO UPDATE SET
+               envelope_json = excluded.envelope_json,
+               envelope_sha256 = excluded.envelope_sha256,
+               version = excluded.version,
+               updated_at = excluded.updated_at`,
+          )
+          .bind(telegramUserId, network, envelopeJson, envelopeSha256, version, now, now),
+      ]);
+
+      const row = await db
+        .prepare(
+          `SELECT telegram_user_id, network, envelope_json, envelope_sha256, version, created_at, updated_at
+           FROM encrypted_vault_backups
+           WHERE telegram_user_id = ? AND network = ?`,
+        )
+        .bind(telegramUserId, network)
+        .first<RawEncryptedBackupRow>();
+      if (!row) {
+        throw new Error("Failed to read stored encrypted vault backup");
+      }
+      return mapEncryptedBackupRow(row);
+    },
+
+    async getEncryptedVaultBackup(telegramUserId, network) {
+      const row = await db
+        .prepare(
+          `SELECT telegram_user_id, network, envelope_json, envelope_sha256, version, created_at, updated_at
+           FROM encrypted_vault_backups
+           WHERE telegram_user_id = ? AND network = ?`,
+        )
+        .bind(telegramUserId, network)
+        .first<RawEncryptedBackupRow>();
+      return row ? mapEncryptedBackupRow(row) : null;
+    },
+
+    async deleteEncryptedVaultBackup(telegramUserId, network) {
+      const res = await db
+        .prepare(
+          "DELETE FROM encrypted_vault_backups WHERE telegram_user_id = ? AND network = ?",
+        )
+        .bind(telegramUserId, network)
+        .run();
+      return (res.meta?.changes ?? 0) > 0;
     },
   };
 }

@@ -1,4 +1,7 @@
-import { evaluateSecretStrength } from "@astrowallet/stellar-core";
+import {
+  evaluateCloudBackupSecretStrength,
+  evaluateSecretStrength,
+} from "@astrowallet/stellar-core";
 import { parseStartAppParam } from "@astrowallet/tg-protocol";
 import { describe, expect, it } from "vitest";
 import {
@@ -66,6 +69,11 @@ describe("PWA Client Security Hardening", () => {
     expect(evaluateSecretStrength("000000").acceptable).toBe(false);
     expect(evaluateSecretStrength("839201").acceptable).toBe(true);
     expect(evaluateSecretStrength("DeepOrbital#2026").level).toBe("strong");
+
+    expect(evaluateCloudBackupSecretStrength("839201").acceptable).toBe(false);
+    expect(evaluateCloudBackupSecretStrength("1234567890").acceptable).toBe(false);
+    expect(evaluateCloudBackupSecretStrength("OrbitSky#2026").acceptable).toBe(true);
+    expect(evaluateCloudBackupSecretStrength("stellar-ton-vault-2026").acceptable).toBe(true);
   });
 
   it("enforces 100% Telegram-only Mini App access gate", () => {

@@ -1,4 +1,7 @@
-import type { ServerConfig } from "@astrowallet/domain";
+import {
+  EncryptedVaultBackupEnvelopeSchema,
+  type ServerConfig,
+} from "@astrowallet/domain";
 import {
   formatConnectChallengeMessage,
   signIntentToken,
@@ -26,6 +29,22 @@ const LinkConfirmBodySchema = z.object({
   sig: z.string().regex(/^[a-f0-9]{64}$/i),
   accounts: z.array(ConnectAccountSubmissionSchema).min(1).max(10),
 });
+
+const PutVaultBackupBodySchema = z
+  .object({
+    envelope: EncryptedVaultBackupEnvelopeSchema,
+  })
+  .strict();
+
+const MAX_VAULT_BACKUP_BYTES = 16_384;
+
+async function sha256Hex(raw: string): Promise<string> {
+  const bytes = new TextEncoder().encode(raw);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
 
 export type TgAuthRouteEnv = {
   Variables: {
@@ -110,7 +129,10 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
       config.intentHmacSecret,
     );
 
-    const linkedAccounts = await repo.listLinkedAddresses(tgUser.id);
+    const [linkedAccounts, encryptedBackup] = await Promise.all([
+      repo.listLinkedAddresses(tgUser.id),
+      repo.getEncryptedVaultBackup(tgUser.id, config.network),
+    ]);
 
     return c.json({
       sessionToken,
@@ -118,6 +140,45 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
       user: tgUser,
       startParam: verified.data.startParam,
       linkedAccounts,
+      hasEncryptedBackup: Boolean(encryptedBackup),
+      backupUpdatedAt: encryptedBackup?.updatedAt,
+    });
+  });
+
+  router.post("/refresh", async (c) => {
+    const session = await authenticateMiniAppSession(c);
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
+    const config = c.get("config");
+    const repo = c.get("repo");
+    const rl = await repo.incrementRateLimit({
+      key: `tg_refresh:${session.claims.telegramUserId}`,
+      windowSec: 60,
+      limit: 10,
+    });
+    if (!rl.allowed) {
+      c.header("Retry-After", String(rl.retryAfterSeconds));
+      return c.json({ error: "Too many session refresh requests" }, 429);
+    }
+
+    const user = await repo.getUserById(session.claims.telegramUserId);
+    const now = Math.floor(Date.now() / 1000);
+    const expiresAt = now + MINI_APP_SESSION_TTL_SECONDS;
+    const sessionToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: session.claims.telegramUserId,
+        usernameLower: user?.usernameLower ?? session.claims.usernameLower,
+        network: config.network,
+        issuedAt: now,
+        expiresAt,
+      },
+      config.intentHmacSecret,
+    );
+
+    return c.json({
+      sessionToken,
+      expiresAt,
     });
   });
 
@@ -126,10 +187,12 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
     if (!session.ok) {
       return c.json({ error: session.error }, session.status);
     }
+    const config = c.get("config");
     const repo = c.get("repo");
-    const [user, linkedAccounts] = await Promise.all([
+    const [user, linkedAccounts, encryptedBackup] = await Promise.all([
       repo.getUserById(session.claims.telegramUserId),
       repo.listLinkedAddresses(session.claims.telegramUserId),
+      repo.getEncryptedVaultBackup(session.claims.telegramUserId, config.network),
     ]);
     return c.json({
       user: user ?? {
@@ -138,7 +201,136 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
         alertsEnabled: true,
       },
       linkedAccounts,
+      hasEncryptedBackup: Boolean(encryptedBackup),
+      backupUpdatedAt: encryptedBackup?.updatedAt,
     });
+  });
+
+  router.get("/vault-backup", async (c) => {
+    const session = await authenticateMiniAppSession(c);
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
+    const config = c.get("config");
+    const repo = c.get("repo");
+    const rl = await repo.incrementRateLimit({
+      key: `tg_vault_get:${session.claims.telegramUserId}`,
+      windowSec: 60,
+      limit: 30,
+    });
+    if (!rl.allowed) {
+      c.header("Retry-After", String(rl.retryAfterSeconds));
+      return c.json({ error: "Too many vault backup fetches" }, 429);
+    }
+
+    const row = await repo.getEncryptedVaultBackup(
+      session.claims.telegramUserId,
+      config.network,
+    );
+    if (!row) {
+      return c.json({ hasBackup: false });
+    }
+
+    try {
+      const envelope = EncryptedVaultBackupEnvelopeSchema.parse(JSON.parse(row.envelopeJson));
+      return c.json({
+        hasBackup: true,
+        backup: {
+          envelope,
+          envelopeSha256: row.envelopeSha256,
+          version: row.version,
+          updatedAt: row.updatedAt,
+        },
+      });
+    } catch {
+      return c.json({ error: "Stored vault backup envelope is invalid" }, 500);
+    }
+  });
+
+  router.put("/vault-backup", async (c) => {
+    const session = await authenticateMiniAppSession(c);
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
+    const config = c.get("config");
+    const repo = c.get("repo");
+    const rl = await repo.incrementRateLimit({
+      key: `tg_vault_put:${session.claims.telegramUserId}`,
+      windowSec: 60,
+      limit: 10,
+    });
+    if (!rl.allowed) {
+      c.header("Retry-After", String(rl.retryAfterSeconds));
+      return c.json({ error: "Too many vault backup uploads" }, 429);
+    }
+
+    let rawBody: string;
+    try {
+      rawBody = await c.req.text();
+    } catch {
+      return c.json({ error: "Failed to read request body" }, 400);
+    }
+    if (new TextEncoder().encode(rawBody).byteLength > MAX_VAULT_BACKUP_BYTES) {
+      return c.json({ error: "Encrypted vault backup exceeds 16 KB limit" }, 413);
+    }
+
+    let parsedBody: z.infer<typeof PutVaultBackupBodySchema>;
+    try {
+      parsedBody = PutVaultBackupBodySchema.parse(JSON.parse(rawBody));
+    } catch (err) {
+      return c.json(
+        {
+          error: "Invalid encrypted vault backup envelope",
+          details: err instanceof Error ? err.message : undefined,
+        },
+        400,
+      );
+    }
+
+    const compactJson = JSON.stringify(parsedBody.envelope);
+    if (new TextEncoder().encode(compactJson).byteLength > MAX_VAULT_BACKUP_BYTES) {
+      return c.json({ error: "Encrypted vault backup exceeds 16 KB limit" }, 413);
+    }
+
+    const envelopeSha256 = await sha256Hex(compactJson);
+    const saved = await repo.upsertEncryptedVaultBackup({
+      telegramUserId: session.claims.telegramUserId,
+      network: config.network,
+      envelopeJson: compactJson,
+      envelopeSha256,
+      version: parsedBody.envelope.version,
+    });
+
+    return c.json({
+      ok: true,
+      envelopeSha256: saved.envelopeSha256,
+      version: saved.version,
+      updatedAt: saved.updatedAt,
+    });
+  });
+
+  router.delete("/vault-backup", async (c) => {
+    const session = await authenticateMiniAppSession(c);
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
+    const config = c.get("config");
+    const repo = c.get("repo");
+    const rl = await repo.incrementRateLimit({
+      key: `tg_vault_del:${session.claims.telegramUserId}`,
+      windowSec: 60,
+      limit: 10,
+    });
+    if (!rl.allowed) {
+      c.header("Retry-After", String(rl.retryAfterSeconds));
+      return c.json({ error: "Too many vault backup deletions" }, 429);
+    }
+
+    const deleted = await repo.deleteEncryptedVaultBackup(
+      session.claims.telegramUserId,
+      config.network,
+    );
+    return c.json({ ok: true, deleted });
   });
 
   router.post("/link-challenge", async (c) => {

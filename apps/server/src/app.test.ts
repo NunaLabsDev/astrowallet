@@ -19,7 +19,11 @@ import {
 } from "@astrowallet/tg-protocol";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
-import type { ServerRepository, TelegramUserRecord } from "./db/repository.js";
+import type {
+  ServerRepository,
+  StoredEncryptedVaultBackup,
+  TelegramUserRecord,
+} from "./db/repository.js";
 import { resetMemoryRateLimits } from "./rate-limit.js";
 import {
   fetchLiveAccountReserveInfo,
@@ -143,6 +147,7 @@ function createMemoryRepo(): ServerRepository {
   const rateLimits = new Map<string, number>();
   const relayBudget = new Map<string, bigint>();
   const tgUpdates = new Set<number>();
+  const encryptedBackups = new Map<string, StoredEncryptedVaultBackup>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -357,6 +362,34 @@ function createMemoryRepo(): ServerRepository {
       return true;
     },
     async purgeExpiredRecords() {},
+    async upsertEncryptedVaultBackup({
+      telegramUserId,
+      network,
+      envelopeJson,
+      envelopeSha256,
+      version = 1,
+    }) {
+      const now = Math.floor(Date.now() / 1000);
+      const key = `${telegramUserId}:${network}`;
+      const existing = encryptedBackups.get(key);
+      const saved: StoredEncryptedVaultBackup = {
+        telegramUserId,
+        network,
+        envelopeJson,
+        envelopeSha256,
+        version,
+        createdAt: existing?.createdAt ?? now,
+        updatedAt: now,
+      };
+      encryptedBackups.set(key, saved);
+      return saved;
+    },
+    async getEncryptedVaultBackup(telegramUserId, network) {
+      return encryptedBackups.get(`${telegramUserId}:${network}`) ?? null;
+    },
+    async deleteEncryptedVaultBackup(telegramUserId, network) {
+      return encryptedBackups.delete(`${telegramUserId}:${network}`);
+    },
   };
 }
 
@@ -2046,5 +2079,163 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     };
     const groupUrl = groupMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.url ?? "";
     expect(groupUrl).toMatch(/^https:\/\/t\.me\/AstroWalletTestBot\/wallet\?startapp=i-/);
+  });
+
+  it("stores, verifies, and deletes Zero-Knowledge encrypted vault backups strictly per telegram_user_id", async () => {
+    const repo = createMemoryRepo();
+    const app = createApp({ createRepo: () => repo });
+
+    // 1. Unauthenticated requests fail closed (401)
+    expect((await app.request("/v1/tg/vault-backup", {}, TEST_ENV)).status).toBe(401);
+    expect(
+      (await app.request("/v1/tg/vault-backup", { method: "PUT", body: "{}" }, TEST_ENV)).status,
+    ).toBe(401);
+
+    const now = Math.floor(Date.now() / 1000);
+    const sessionToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: "555777",
+        usernameLower: "zk_tester",
+        network: "testnet",
+        issuedAt: now,
+        expiresAt: now + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
+    const validEnvelope = {
+      version: 1,
+      format: "AGVAULT",
+      kdf: {
+        algorithm: "argon2id",
+        memoryKiB: 65536,
+        iterations: 3,
+        parallelism: 1,
+        hashLength: 32,
+      },
+      saltB64: "AAAAAAAAAAAAAAAAAAAAAA==",
+      ivB64: "AAAAAAAAAAAAAAAA",
+      ciphertextB64: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    // 2. Rejects plaintext extra fields and weak Argon2id params
+    const badExtra = await app.request(
+      "/v1/tg/vault-backup",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          envelope: { ...validEnvelope, mnemonic: "secret phrase" },
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(badExtra.status).toBe(400);
+
+    const weakKdf = await app.request(
+      "/v1/tg/vault-backup",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          envelope: {
+            ...validEnvelope,
+            kdf: { ...validEnvelope.kdf, memoryKiB: 1024 },
+          },
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(weakKdf.status).toBe(400);
+
+    // 3. Round-trip PUT -> GET /me -> GET /vault-backup -> /v1/tg/auth -> DELETE -> GET empty
+    const putRes = await app.request(
+      "/v1/tg/vault-backup",
+      {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({ envelope: validEnvelope }),
+      },
+      TEST_ENV,
+    );
+    expect(putRes.status).toBe(200);
+    const putJson = (await putRes.json()) as { ok: boolean; envelopeSha256: string };
+    expect(putJson.ok).toBe(true);
+    expect(putJson.envelopeSha256).toMatch(/^[a-f0-9]{64}$/);
+
+    const meRes = await app.request(
+      "/v1/tg/me",
+      { headers: { Authorization: `Bearer ${sessionToken}` } },
+      TEST_ENV,
+    );
+    const meJson = (await meRes.json()) as { hasEncryptedBackup: boolean; backupUpdatedAt?: number };
+    expect(meJson.hasEncryptedBackup).toBe(true);
+    expect(meJson.backupUpdatedAt).toBeGreaterThan(0);
+
+    const getRes = await app.request(
+      "/v1/tg/vault-backup",
+      { headers: { Authorization: `Bearer ${sessionToken}` } },
+      TEST_ENV,
+    );
+    expect(getRes.status).toBe(200);
+    const getJson = (await getRes.json()) as {
+      hasBackup: boolean;
+      backup?: { envelope: typeof validEnvelope; envelopeSha256: string };
+    };
+    expect(getJson.hasBackup).toBe(true);
+    expect(getJson.backup?.envelope).toEqual(validEnvelope);
+    expect(getJson.backup?.envelopeSha256).toBe(putJson.envelopeSha256);
+
+    const authPairs: Array<[string, string]> = [
+      ["auth_date", String(now - 2)],
+      ["user", JSON.stringify({ id: 555777, username: "zk_tester", first_name: "ZK" })],
+    ];
+    authPairs.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const authHash = await computeTelegramInitDataHash(
+      authPairs.map(([k, v]) => `${k}=${v}`).join("\n"),
+      TEST_ENV.TG_BOT_TOKEN,
+    );
+    const authParams = new URLSearchParams(Object.fromEntries(authPairs));
+    authParams.set("hash", authHash);
+    const authRes = await app.request(
+      "/v1/tg/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: authParams.toString() }),
+      },
+      TEST_ENV,
+    );
+    const authJson = (await authRes.json()) as { hasEncryptedBackup: boolean };
+    expect(authJson.hasEncryptedBackup).toBe(true);
+
+    const delRes = await app.request(
+      "/v1/tg/vault-backup",
+      { method: "DELETE", headers: { Authorization: `Bearer ${sessionToken}` } },
+      TEST_ENV,
+    );
+    expect(delRes.status).toBe(200);
+    expect((await delRes.json()) as { ok: boolean; deleted: boolean }).toEqual({
+      ok: true,
+      deleted: true,
+    });
+
+    const afterDel = await app.request(
+      "/v1/tg/vault-backup",
+      { headers: { Authorization: `Bearer ${sessionToken}` } },
+      TEST_ENV,
+    );
+    expect((await afterDel.json()) as { hasBackup: boolean }).toEqual({ hasBackup: false });
   });
 });

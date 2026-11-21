@@ -25,6 +25,7 @@ import {
 } from "@astrowallet/security-shield";
 import { formatSmartAccountLinkMessage } from "@astrowallet/tg-protocol";
 import {
+  clearPinLockoutState,
   createSorobanDevClient,
   createStellarClient,
   decryptVaultPayload,
@@ -35,7 +36,6 @@ import {
   disableFingerprintUnlock,
   encryptVaultPayload,
   enrollFingerprintUnlock,
-  hasEncryptedVault,
   isFingerprintSupported,
   loadBiometricRecord,
   loadContacts,
@@ -196,11 +196,21 @@ export interface WalletContextValue {
   tonChainError: string | null;
   tonConnectSessions: readonly StoredTonConnectSession[];
   pendingTonConnectTx: PendingTonConnectTxRequest | null;
+  localVaultUpdatedAt: number | null;
+  storageScopeId: string | undefined;
 
   setActiveIndex(index: number): void;
   showToast(message: string, kind?: "success" | "info" | "error"): void;
   dismissToast(): void;
-  createOrImportVault(mnemonic: string, pinOrPassphrase: string, initialLabel?: string): Promise<void>;
+  createOrImportVault(
+    mnemonic: string,
+    pinOrPassphrase: string,
+    initialLabel?: string,
+  ): Promise<{ envelopeJson: string }>;
+  reEncryptLocalVault(
+    currentPin: string,
+    newPinOrPassphrase: string,
+  ): Promise<{ envelopeJson: string }>;
   restoreAgVaultJson(rawJson: string, pinOrPassphrase: string): Promise<void>;
   exportAgVaultJson(): Promise<string>;
   revealMnemonicWithPin(pinOrPassphrase: string): Promise<string>;
@@ -273,6 +283,7 @@ export interface WalletContextValue {
     message: string,
     selectedIndices: readonly number[],
     includePairedSmartAccount?: boolean,
+    preferredDefaultAddress?: string,
   ): Promise<SignedConnectAccountProof[]>;
   fundClaimEscrow(params: {
     escrowContractId: ContractAddress;
@@ -323,11 +334,15 @@ function toLinkedAccounts(metaList: readonly VaultAccountMetadata[]): LinkedAcco
 
 export function WalletProvider({
   config,
+  storageScopeId,
   children,
 }: {
   config: PwaConfig;
+  storageScopeId?: string | undefined;
   children: ReactNode;
 }) {
+  const cleanScopeId = storageScopeId?.trim() || undefined;
+  const securePinKey = cleanScopeId ? `${TG_SECURE_PIN_KEY}:${cleanScopeId}` : TG_SECURE_PIN_KEY;
   const stellarClient = useMemo(
     () =>
       createStellarClient({
@@ -377,8 +392,11 @@ export function WalletProvider({
   const [tonConnectSessions, setTonConnectSessions] = useState<StoredTonConnectSession[]>([]);
   const [pendingTonConnectTx, setPendingTonConnectTx] =
     useState<PendingTonConnectTxRequest | null>(null);
+  const [localVaultUpdatedAt, setLocalVaultUpdatedAt] = useState<number | null>(null);
   const tonConnectSessionsRef = useRef<StoredTonConnectSession[]>([]);
   tonConnectSessionsRef.current = tonConnectSessions;
+  const chainFetchSeqRef = useRef(0);
+  const tonFetchSeqRef = useRef(0);
 
   const tonClient = useMemo(
     () =>
@@ -440,15 +458,15 @@ export function WalletProvider({
   useEffect(() => {
     let cancelled = false;
     async function init() {
-      const [exists, fpSupported, tgBio, bioRecord, tgPin, storedContacts, storedTcSessions] =
+      const [vaultEnvelope, fpSupported, tgBio, bioRecord, tgPin, storedContacts, storedTcSessions] =
         await Promise.all([
-          hasEncryptedVault().catch(() => false),
+          loadEncryptedVault(cleanScopeId).catch(() => null),
           isFingerprintSupported().catch(() => false),
           isTelegramBiometricAvailable().catch(() => false),
-          loadBiometricRecord().catch(() => null),
-          tgSecureStorageGet(TG_SECURE_PIN_KEY).catch(() => null),
-          loadContacts().catch(() => []),
-          loadTonConnectSessions().catch(() => []),
+          loadBiometricRecord(cleanScopeId).catch(() => null),
+          tgSecureStorageGet(securePinKey).catch(() => null),
+          loadContacts(cleanScopeId).catch(() => []),
+          loadTonConnectSessions(cleanScopeId).catch(() => []),
         ]);
       if (cancelled) return;
       const bmSaved = Boolean(getTelegramWebApp()?.BiometricManager?.isBiometricTokenSaved);
@@ -457,13 +475,14 @@ export function WalletProvider({
       setFingerprintEnrolled(bioRecord !== null || Boolean(tgPin) || bmSaved);
       setContacts(storedContacts);
       setTonConnectSessions(storedTcSessions);
-      setVaultStatus(exists ? "locked" : "uninitialized");
+      setLocalVaultUpdatedAt(vaultEnvelope?.updatedAt ?? null);
+      setVaultStatus(vaultEnvelope ? "locked" : "uninitialized");
     }
     void init();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [cleanScopeId, securePinKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -483,15 +502,18 @@ export function WalletProvider({
 
   const refreshChainState = useCallback(async () => {
     if (!activeAccount) return;
+    const seq = ++chainFetchSeqRef.current;
+    const targetAddress = activeAccount.address;
     setLoadingChain(true);
     setChainError(null);
     try {
       const [state, payments, claimables, offers] = await Promise.all([
-        stellarClient.fetchAccountState(activeAccount.address),
-        stellarClient.fetchRecentPayments(activeAccount.address, 25),
-        stellarClient.fetchClaimableBalances(activeAccount.address, 20),
-        stellarClient.fetchOpenOffers(activeAccount.address, 20),
+        stellarClient.fetchAccountState(targetAddress),
+        stellarClient.fetchRecentPayments(targetAddress, 25),
+        stellarClient.fetchClaimableBalances(targetAddress, 20),
+        stellarClient.fetchOpenOffers(targetAddress, 20),
       ]);
+      if (seq !== chainFetchSeqRef.current) return;
       const verifiedSet = new Set(
         verifiedAssets.map((v) => `${v.code.toUpperCase()}:${v.issuer}`),
       );
@@ -508,9 +530,12 @@ export function WalletProvider({
       setClaimableBalances(claimables);
       setOpenOffers(offers);
     } catch (err) {
+      if (seq !== chainFetchSeqRef.current) return;
       setChainError(err instanceof Error ? err.message : "Failed to load Stellar Horizon state");
     } finally {
-      setLoadingChain(false);
+      if (seq === chainFetchSeqRef.current) {
+        setLoadingChain(false);
+      }
     }
   }, [activeAccount, stellarClient, verifiedAssets]);
 
@@ -518,6 +543,8 @@ export function WalletProvider({
     if (vaultStatus === "unlocked" && activeAccount) {
       void refreshChainState();
     } else {
+      chainFetchSeqRef.current += 1;
+      setLoadingChain(false);
       setAccountState(null);
       setRecentPayments([]);
       setClaimableBalances([]);
@@ -561,18 +588,25 @@ export function WalletProvider({
 
   const refreshTonState = useCallback(async () => {
     if (!tonAccount || config.tonRpcUrls.length === 0) {
+      tonFetchSeqRef.current += 1;
       setTonState(null);
+      setLoadingTonChain(false);
       return;
     }
+    const seq = ++tonFetchSeqRef.current;
     setLoadingTonChain(true);
     setTonChainError(null);
     try {
       const state = await tonClient.getAccountState(tonAccount.friendlyAddress);
+      if (seq !== tonFetchSeqRef.current) return;
       setTonState(state);
     } catch (err) {
+      if (seq !== tonFetchSeqRef.current) return;
       setTonChainError(err instanceof Error ? err.message : "Failed to fetch TON account state");
     } finally {
-      setLoadingTonChain(false);
+      if (seq === tonFetchSeqRef.current) {
+        setLoadingTonChain(false);
+      }
     }
   }, [tonAccount, tonClient, config.tonRpcUrls.length]);
 
@@ -580,6 +614,8 @@ export function WalletProvider({
     if (vaultStatus === "unlocked" && tonAccount && config.tonRpcUrls.length > 0) {
       void refreshTonState();
     } else {
+      tonFetchSeqRef.current += 1;
+      setLoadingTonChain(false);
       setTonState(null);
       setTonChainError(null);
     }
@@ -699,6 +735,7 @@ export function WalletProvider({
       });
 
       const stored: StoredTonConnectSession = {
+        ...(cleanScopeId ? { scopeId: cleanScopeId } : {}),
         walletClientId: cryptoSess.clientId,
         walletSecretHex: cryptoSess.secretKeyHex,
         dappClientId: parsed.clientId,
@@ -725,6 +762,7 @@ export function WalletProvider({
       activeIndex,
       config.tonBridgeUrl,
       config.tonNetwork,
+      cleanScopeId,
       showToast,
     ],
   );
@@ -965,50 +1003,56 @@ export function WalletProvider({
       const envelope = await encryptVaultPayload(payload, pinOrPassphrase, {
         deriveKeyFn: deriveKeyInWorker,
       });
-      await saveEncryptedVault(envelope);
+      await saveEncryptedVault(envelope, cleanScopeId);
+      setLocalVaultUpdatedAt(envelope.updatedAt);
 
       sessionVault.set(payload.mnemonic);
       setAccountMetaList(initialAccounts);
       setActiveIndex(0);
       setVaultStatus("unlocked");
       showToast("Sovereign SEP-0005 Vault created locally");
+      return { envelopeJson: serializeAgVaultBackup(envelope) };
     },
-    [showToast],
+    [cleanScopeId, showToast],
   );
 
-  const unlockWithPin = useCallback(async (pinOrPassphrase: string) => {
-    const envelope = await loadEncryptedVault();
-    if (!envelope) {
-      throw new Error("No local vault found on this device");
-    }
-    const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
-      deriveKeyFn: deriveKeyInWorker,
-    });
-    sessionVault.set(decrypted.mnemonic);
-    setAccountMetaList(decrypted.accounts);
-    setActiveIndex(decrypted.accounts[0]?.index ?? 0);
-    setVaultStatus("unlocked");
-  }, []);
+  const unlockWithPin = useCallback(
+    async (pinOrPassphrase: string) => {
+      const envelope = await loadEncryptedVault(cleanScopeId);
+      if (!envelope) {
+        throw new Error("No local vault found on this device");
+      }
+      const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+        deriveKeyFn: deriveKeyInWorker,
+      });
+      sessionVault.set(decrypted.mnemonic);
+      setAccountMetaList(decrypted.accounts);
+      setActiveIndex(decrypted.accounts[0]?.index ?? 0);
+      setLocalVaultUpdatedAt(envelope.updatedAt);
+      setVaultStatus("unlocked");
+    },
+    [cleanScopeId],
+  );
 
   const unlockWithBiometric = useCallback(async () => {
     if (telegramBioAvailable) {
       const bio = await authenticateTelegramBiometric("Unlock your AstroWallet vault");
       if (bio.authenticated) {
         const pinFromBio =
-          bio.token || (await tgSecureStorageGet(TG_SECURE_PIN_KEY));
+          bio.token || (await tgSecureStorageGet(securePinKey));
         if (pinFromBio) {
           await unlockWithPin(pinFromBio);
           return;
         }
       }
     }
-    const pin = await unlockWithFingerprint(resolveWebAuthnRpId(config.pwaOrigin));
+    const pin = await unlockWithFingerprint(resolveWebAuthnRpId(config.pwaOrigin), cleanScopeId);
     await unlockWithPin(pin);
-  }, [telegramBioAvailable, unlockWithPin, config.pwaOrigin]);
+  }, [telegramBioAvailable, securePinKey, unlockWithPin, config.pwaOrigin, cleanScopeId]);
 
   const enableFingerprint = useCallback(
     async (pinOrPassphrase: string) => {
-      const envelope = await loadEncryptedVault();
+      const envelope = await loadEncryptedVault(cleanScopeId);
       if (!envelope) {
         throw new Error("Create and save your vault first");
       }
@@ -1024,7 +1068,7 @@ export function WalletProvider({
           return { enrolled: false, message: "Telegram biometric permission was not granted." };
         }
         const savedBm = await updateTelegramBiometricToken(pinOrPassphrase);
-        const savedStore = await tgSecureStorageSet(TG_SECURE_PIN_KEY, pinOrPassphrase);
+        const savedStore = await tgSecureStorageSet(securePinKey, pinOrPassphrase);
         if (savedBm || savedStore) {
           setFingerprintEnrolled(true);
           return {
@@ -1038,6 +1082,7 @@ export function WalletProvider({
         pinOrPassphrase,
         "AstroWallet",
         resolveWebAuthnRpId(config.pwaOrigin),
+        cleanScopeId,
       );
       if (res.enrolled) {
         setFingerprintEnrolled(true);
@@ -1045,15 +1090,15 @@ export function WalletProvider({
       }
       return { enrolled: false, message: res.reason };
     },
-    [telegramBioAvailable, config.pwaOrigin],
+    [telegramBioAvailable, securePinKey, config.pwaOrigin, cleanScopeId],
   );
 
   const disableFingerprint = useCallback(async () => {
     await updateTelegramBiometricToken("").catch(() => false);
-    await tgSecureStorageRemove(TG_SECURE_PIN_KEY).catch(() => false);
-    await disableFingerprintUnlock();
+    await tgSecureStorageRemove(securePinKey).catch(() => false);
+    await disableFingerprintUnlock(cleanScopeId);
     setFingerprintEnrolled(false);
-  }, []);
+  }, [securePinKey, cleanScopeId]);
 
   const restoreAgVaultJson = useCallback(
     async (rawJson: string, pinOrPassphrase: string) => {
@@ -1061,41 +1106,73 @@ export function WalletProvider({
       const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
         deriveKeyFn: deriveKeyInWorker,
       });
-      await saveEncryptedVault(envelope);
+      await saveEncryptedVault(envelope, cleanScopeId);
+      setLocalVaultUpdatedAt(envelope.updatedAt);
       sessionVault.set(decrypted.mnemonic);
       setAccountMetaList(decrypted.accounts);
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setVaultStatus("unlocked");
       showToast("Encrypted .agvault restored locally");
     },
-    [showToast],
+    [cleanScopeId, showToast],
   );
 
   const exportAgVaultJson = useCallback(async () => {
-    const envelope = await loadEncryptedVault();
+    const envelope = await loadEncryptedVault(cleanScopeId);
     if (!envelope) {
       throw new Error("No encrypted vault present to export");
     }
     return serializeAgVaultBackup(envelope);
-  }, []);
+  }, [cleanScopeId]);
 
-  const revealMnemonicWithPin = useCallback(async (pinOrPassphrase: string): Promise<string> => {
-    const envelope = await loadEncryptedVault();
-    if (!envelope) {
-      throw new Error("No encrypted vault stored on this device");
-    }
-    const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
-      deriveKeyFn: deriveKeyInWorker,
-    });
-    return decrypted.mnemonic;
-  }, []);
+  const reEncryptLocalVault = useCallback(
+    async (currentPin: string, newPinOrPassphrase: string): Promise<{ envelopeJson: string }> => {
+      const envelope = await loadEncryptedVault(cleanScopeId);
+      if (!envelope) {
+        throw new Error("No encrypted vault present on this device");
+      }
+      const decrypted = await decryptVaultPayload(envelope, currentPin, {
+        deriveKeyFn: deriveKeyInWorker,
+      });
+      const updatedEnvelope = await encryptVaultPayload(
+        {
+          mnemonic: decrypted.mnemonic,
+          accounts: decrypted.accounts,
+          createdAt: decrypted.createdAt,
+        },
+        newPinOrPassphrase,
+        { deriveKeyFn: deriveKeyInWorker },
+      );
+      await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+      setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
+      // Clear any previous biometric PIN wrapper so stale PIN credentials never cause a mismatch
+      await disableFingerprint();
+      showToast("Vault protection updated", "info");
+      return { envelopeJson: serializeAgVaultBackup(updatedEnvelope) };
+    },
+    [cleanScopeId, disableFingerprint, showToast],
+  );
+
+  const revealMnemonicWithPin = useCallback(
+    async (pinOrPassphrase: string): Promise<string> => {
+      const envelope = await loadEncryptedVault(cleanScopeId);
+      if (!envelope) {
+        throw new Error("No encrypted vault stored on this device");
+      }
+      const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+        deriveKeyFn: deriveKeyInWorker,
+      });
+      return decrypted.mnemonic;
+    },
+    [cleanScopeId],
+  );
 
   const addDerivedAccount = useCallback(
     async (label: string, pinOrPassphrase: string): Promise<LinkedAccount> => {
       if (!sessionVault.has()) {
         throw new Error("Unlock your vault before deriving a new account");
       }
-      const envelope = await loadEncryptedVault();
+      const envelope = await loadEncryptedVault(cleanScopeId);
       if (!envelope) {
         throw new Error("Encrypted vault missing from IndexedDB");
       }
@@ -1125,7 +1202,8 @@ export function WalletProvider({
         { deriveKeyFn: deriveKeyInWorker },
       );
 
-      await saveEncryptedVault(updatedEnvelope);
+      await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+      setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
       setAccountMetaList(updatedAccounts);
       setActiveIndex(nextIndex);
 
@@ -1136,7 +1214,7 @@ export function WalletProvider({
       showToast(`Derived ${cleanLabel} (m/44'/148'/${nextIndex}')`);
       return linked;
     },
-    [showToast],
+    [cleanScopeId, showToast],
   );
 
   const renameDerivedAccount = useCallback(
@@ -1145,7 +1223,7 @@ export function WalletProvider({
       if (!cleaned) {
         throw new Error("Account label cannot be empty");
       }
-      const envelope = await loadEncryptedVault();
+      const envelope = await loadEncryptedVault(cleanScopeId);
       if (!envelope) {
         throw new Error("Encrypted vault missing from IndexedDB");
       }
@@ -1168,11 +1246,12 @@ export function WalletProvider({
         pinOrPassphrase,
         { deriveKeyFn: deriveKeyInWorker },
       );
-      await saveEncryptedVault(updatedEnvelope);
+      await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+      setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
       setAccountMetaList(updatedAccounts);
       showToast(`Renamed account to "${cleaned}"`);
     },
-    [showToast],
+    [cleanScopeId, showToast],
   );
 
   const saveContact = useCallback(
@@ -1191,22 +1270,22 @@ export function WalletProvider({
       };
       const filtered = contacts.filter((c) => c.address !== cleanAddr);
       const updated = [nextEntry, ...filtered].slice(0, 50);
-      await saveContacts(updated);
+      await saveContacts(updated, cleanScopeId);
       setContacts(updated);
       showToast(`Saved contact "${nextEntry.label}"`);
       return nextEntry;
     },
-    [contacts, showToast],
+    [contacts, cleanScopeId, showToast],
   );
 
   const deleteContact = useCallback(
     async (id: string) => {
       const updated = contacts.filter((c) => c.id !== id);
-      await saveContacts(updated);
+      await saveContacts(updated, cleanScopeId);
       setContacts(updated);
       showToast("Removed contact", "info");
     },
-    [contacts, showToast],
+    [contacts, cleanScopeId, showToast],
   );
 
   const lockVault = useCallback(() => {
@@ -1274,10 +1353,12 @@ export function WalletProvider({
   const wipeLocalVault = useCallback(async () => {
     setPendingTonConnectTx(null);
     await updateTelegramBiometricToken("").catch(() => false);
-    await tgSecureStorageRemove(TG_SECURE_PIN_KEY).catch(() => false);
-    await clearAllTonConnectSessions().catch(() => undefined);
-    await deleteEncryptedVault();
+    await tgSecureStorageRemove(securePinKey).catch(() => false);
+    await clearAllTonConnectSessions(cleanScopeId).catch(() => undefined);
+    await clearPinLockoutState(cleanScopeId).catch(() => undefined);
+    await deleteEncryptedVault(cleanScopeId);
     sessionVault.clear();
+    setLocalVaultUpdatedAt(null);
     setAccountMetaList([]);
     setAccountState(null);
     setTonState(null);
@@ -1288,7 +1369,7 @@ export function WalletProvider({
     setFingerprintEnrolled(false);
     setVaultStatus("uninitialized");
     showToast("Local vault wiped from this device", "info");
-  }, [showToast]);
+  }, [securePinKey, cleanScopeId, showToast]);
 
   const fundActiveTestnetAccount = useCallback(async () => {
     if (!activeAccount) {
@@ -1620,6 +1701,7 @@ export function WalletProvider({
       message: string,
       selectedIndices: readonly number[],
       includePairedSmartAccount = false,
+      preferredDefaultAddress?: string,
     ): Promise<SignedConnectAccountProof[]> => {
       if (!sessionVault.has()) {
         throw new Error("Unlock your vault first to sign the Telegram link challenge");
@@ -1638,11 +1720,14 @@ export function WalletProvider({
           try {
             const kp = derived.toKeypair();
             const signatureBase64 = signChallengeMessage(kp, message);
+            const isClassicDefault = preferredDefaultAddress
+              ? derived.publicKey === preferredDefaultAddress
+              : i === 0;
             proofs.push({
               address: derived.publicKey,
               kind: "classic",
               label: meta.label,
-              isDefault: i === 0,
+              isDefault: isClassicDefault,
               signatureBase64,
             });
             if (i === 0 && includePairedSmartAccount && config.smartAccountWasmHash) {
@@ -1656,7 +1741,7 @@ export function WalletProvider({
                 address: smart.contractAddress,
                 kind: "smart",
                 label: `${meta.label} Smart`,
-                isDefault: false,
+                isDefault: preferredDefaultAddress === smart.contractAddress,
                 guardianAddress: derived.publicKey,
                 signatureBase64: signChallengeMessage(kp, boundMsg),
               });
@@ -1736,10 +1821,13 @@ export function WalletProvider({
     tonChainError,
     tonConnectSessions,
     pendingTonConnectTx,
+    localVaultUpdatedAt,
+    storageScopeId: cleanScopeId,
     setActiveIndex,
     showToast,
     dismissToast,
     createOrImportVault,
+    reEncryptLocalVault,
     restoreAgVaultJson,
     exportAgVaultJson,
     revealMnemonicWithPin,

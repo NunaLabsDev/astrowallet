@@ -1,5 +1,5 @@
 /* global self, caches, fetch, URL, Response */
-const CACHE_NAME = "astrowallet-tma-v3";
+const CACHE_NAME = "astrowallet-tma-v5";
 const STATIC_ASSETS = [
   "/manifest.webmanifest",
   "/favicon.svg",

@@ -3,6 +3,7 @@ import type { ClassicAddress } from "@astrowallet/domain";
 import { buildSep7PayUri, encodeMuxedAddress } from "@astrowallet/stellar-core";
 import QRCode from "qrcode";
 import { useWallet } from "../state/wallet-context.js";
+import { copyTextToClipboard } from "../telegram/webapp.js";
 import { IconCheck, IconCopy, IconExternalLink } from "./Icons.js";
 
 type ReceiveMode = "standard" | "sep7" | "muxed";
@@ -80,12 +81,12 @@ export function ReceiveSheet({
   if (!activeAccount) return null;
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(activePayload);
+    const ok = await copyTextToClipboard(activePayload);
+    if (ok) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Clipboard unavailable
+    } else {
+      showToast("Clipboard copy blocked by WebView", "error");
     }
   };
 

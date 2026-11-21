@@ -71,7 +71,7 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
       }
       c.header("Access-Control-Allow-Origin", origin);
       c.header("Vary", "Origin");
-      c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
       c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
       if (c.req.method === "OPTIONS") {

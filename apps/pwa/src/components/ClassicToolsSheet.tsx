@@ -302,6 +302,23 @@ export function ClassicToolsSheet() {
         style={{ display: "grid", gap: 8, paddingTop: 8, borderTop: "1px solid rgba(165, 139, 224, 0.2)" }}
       >
         <div style={{ fontWeight: 700, fontSize: 13 }}>Trustline Manager (changeTrust)</div>
+        {verifiedAssets.length > 0 && (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {verifiedAssets.slice(0, 6).map((v) => (
+              <button
+                key={`${v.code}:${v.issuer}`}
+                type="button"
+                className="aw-mini-chip"
+                onClick={() => {
+                  setTrustCode(v.code);
+                  setTrustIssuer(v.issuer);
+                }}
+              >
+                {v.code} ({v.issuer.slice(0, 4)}…{v.issuer.slice(-4)})
+              </button>
+            ))}
+          </div>
+        )}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
           <input
             type="text"

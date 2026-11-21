@@ -9,7 +9,10 @@ import {
   type FormEvent,
 } from "react";
 import { StellarAddressSchema, type PwaConfig } from "@astrowallet/domain";
-import { deriveCounterfactualSmartAccount } from "@astrowallet/stellar-core";
+import {
+  deriveCounterfactualSmartAccount,
+  evaluateCloudBackupSecretStrength,
+} from "@astrowallet/stellar-core";
 import { formatNanoTon } from "@astrowallet/ton-core";
 import { AccountSwitcher } from "./components/AccountSwitcher.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
@@ -50,7 +53,6 @@ import {
   parseIntentRouteFromLocation,
   type ActiveIntentRoute,
 } from "./components/IntentSheet.js";
-import { IosBrowserGuard } from "./components/IosBrowserGuard.js";
 import { ModalDrawer } from "./components/ModalDrawer.js";
 import { OnboardingSheet } from "./components/OnboardingSheet.js";
 import { formatSeedBackupFilename } from "./components/onboarding-helpers.js";
@@ -59,6 +61,7 @@ import { loadPwaEnv } from "./config/env.js";
 import { TelegramProvider, useTelegram } from "./state/telegram-context.js";
 import { WalletProvider, useWallet } from "./state/wallet-context.js";
 import {
+  copyTextToClipboard,
   setTelegramClosingConfirmation,
   triggerTelegramHaptic,
   useTelegramBackButton,
@@ -115,6 +118,7 @@ interface SendPrefill {
   assetCode?: string | undefined;
   assetIssuer?: string | undefined;
   destination?: string | undefined;
+  memo?: string | undefined;
 }
 
 const VALID_TABS: readonly AppDockTab[] = [
@@ -252,11 +256,11 @@ function RevealSeedModalContent({ onDone }: { onDone: () => void }) {
 
   const handleCopy = async () => {
     if (!revealed) return;
-    try {
-      await navigator.clipboard.writeText(revealed);
+    const ok = await copyTextToClipboard(revealed);
+    if (ok) {
       showToast("Recovery phrase copied — clear clipboard after storing", "info");
-    } catch {
-      // Clipboard unavailable
+    } else {
+      showToast("Clipboard copy blocked by WebView", "error");
     }
   };
 
@@ -343,7 +347,16 @@ function WalletShell({
   intentRoute: ActiveIntentRoute | null;
   onClearIntent: () => void;
 }) {
-  const { tgUser, sessionToken, linkedAccounts, refreshLinkedAccounts } = useTelegram();
+  const {
+    tgUser,
+    sessionToken,
+    linkedAccounts,
+    refreshLinkedAccounts,
+    hasEncryptedBackup,
+    backupUpdatedAt,
+    uploadEncryptedBackup,
+    deleteEncryptedBackup,
+  } = useTelegram();
   const {
     config,
     vaultStatus,
@@ -366,6 +379,7 @@ function WalletShell({
     signConnectChallenge,
     enableFingerprint,
     disableFingerprint,
+    reEncryptLocalVault,
     exportAgVaultJson,
     renameDerivedAccount,
     saveContact,
@@ -396,10 +410,23 @@ function WalletShell({
 
   // Vault controls state
   const [fpPin, setFpPin] = useState("");
+  const [fpBusy, setFpBusy] = useState(false);
   const [fpStatusMsg, setFpStatusMsg] = useState<string | null>(null);
   const [exportedVault, setExportedVault] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
   const [copiedVaultExport, setCopiedVaultExport] = useState(false);
 
+  // Zero-Knowledge Telegram cloud backup controls
+  const [cloudSyncBusy, setCloudSyncBusy] = useState(false);
+  const [cloudSyncError, setCloudSyncError] = useState<string | null>(null);
+  const [cloudUpgradeOpen, setCloudUpgradeOpen] = useState(false);
+  const [cloudCurrentPin, setCloudCurrentPin] = useState("");
+  const [cloudNewPassword, setCloudNewPassword] = useState("");
+  const [cloudConfirmPassword, setCloudConfirmPassword] = useState("");
+  const [pendingSyncEnvelopeJson, setPendingSyncEnvelopeJson] = useState<string | null>(null);
+  const [cloudDeleteArmed, setCloudDeleteArmed] = useState(false);
+
+  const autoLinkedKeyRef = useRef<string | null>(null);
   const onboardingBackRef = useRef<(() => void) | null>(null);
   const [onboardingCanGoBack, setOnboardingCanGoBack] = useState(false);
 
@@ -413,13 +440,21 @@ function WalletShell({
   useEffect(() => {
     if (vaultStatus !== "unlocked") {
       setExportedVault(null);
+      setExportError(null);
       setActiveDrawer(null);
+      setCloudUpgradeOpen(false);
+      setCloudCurrentPin("");
+      setCloudNewPassword("");
+      setCloudConfirmPassword("");
+      setPendingSyncEnvelopeJson(null);
+      setCloudDeleteArmed(false);
     }
   }, [vaultStatus]);
 
   const [renamingIndex, setRenamingIndex] = useState<number | null>(null);
   const [renameLabel, setRenameLabel] = useState("");
   const [renamePin, setRenamePin] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
 
   const [contactAdding, setContactAdding] = useState(false);
@@ -559,22 +594,22 @@ function WalletShell({
 
   const handleCopyAddress = async () => {
     if (!activeAccount) return;
-    try {
-      await navigator.clipboard.writeText(activeAccount.address);
+    const ok = await copyTextToClipboard(activeAccount.address);
+    if (ok) {
       setCopiedAddr(true);
       setTimeout(() => setCopiedAddr(false), 1800);
-    } catch {
-      // Clipboard unavailable
+    } else {
+      showToast("Clipboard copy blocked by WebView", "error");
     }
   };
 
   const handleCopyTxHash = async (txHash: string) => {
-    try {
-      await navigator.clipboard.writeText(txHash);
+    const ok = await copyTextToClipboard(txHash);
+    if (ok) {
       setCopiedTxId(txHash);
       setTimeout(() => setCopiedTxId(null), 1600);
-    } catch {
-      // Clipboard unavailable
+    } else {
+      showToast("Clipboard copy blocked by WebView", "error");
     }
   };
 
@@ -603,7 +638,8 @@ function WalletShell({
   };
 
   const handleEnrollFingerprint = async () => {
-    if (!fpPin) return;
+    if (!fpPin || fpBusy) return;
+    setFpBusy(true);
     setFpStatusMsg(null);
     try {
       const res = await enableFingerprint(fpPin);
@@ -611,29 +647,32 @@ function WalletShell({
       setFpPin("");
     } catch (err) {
       setFpStatusMsg(err instanceof Error ? err.message : "Failed to enroll Fingerprint");
+    } finally {
+      setFpBusy(false);
     }
   };
 
   const handleExportVault = async () => {
+    setExportError(null);
     try {
       const json = await exportAgVaultJson();
       setExportedVault(json);
       setCopiedVaultExport(false);
     } catch (err) {
-      setFpStatusMsg(err instanceof Error ? err.message : "Export failed");
+      setExportError(err instanceof Error ? err.message : "Export failed");
     }
   };
 
   const handleCopyExportedVault = async () => {
     if (!exportedVault) return;
-    try {
-      await navigator.clipboard.writeText(exportedVault);
+    const ok = await copyTextToClipboard(exportedVault);
+    if (ok) {
       setCopiedVaultExport(true);
       triggerTelegramHaptic("selection");
       showToast("Encrypted .agvault JSON copied");
       setTimeout(() => setCopiedVaultExport(false), 1800);
-    } catch {
-      // Clipboard unavailable
+    } else {
+      showToast("Clipboard copy blocked by WebView — use Download instead", "error");
     }
   };
 
@@ -654,15 +693,23 @@ function WalletShell({
 
   const handleRenameSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (renamingIndex === null) return;
+    if (renamingIndex === null || renameBusy) return;
+    setRenameBusy(true);
     setRenameError(null);
     try {
       await renameDerivedAccount(renamingIndex, renameLabel, renamePin);
       setRenamingIndex(null);
       setRenameLabel("");
       setRenamePin("");
+      if (hasEncryptedBackup) {
+        void exportAgVaultJson()
+          .then((json) => uploadEncryptedBackup(json))
+          .catch(() => undefined);
+      }
     } catch (err) {
       setRenameError(err instanceof Error ? err.message : "Rename failed");
+    } finally {
+      setRenameBusy(false);
     }
   };
 
@@ -689,64 +736,224 @@ function WalletShell({
     }
   };
 
-  const handleSyncWalletWithTelegram = async () => {
-    if (!sessionToken || accounts.length === 0) return;
-    setTgSyncBusy(true);
-    setTgSyncError(null);
-    try {
-      const base = config.apiBaseUrl.replace(/\/+$/, "");
-      const chRes = await fetch(`${base}/v1/tg/link-challenge`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${sessionToken}` },
-      });
-      const chData = (await chRes.json()) as {
-        intentId?: string;
-        sig?: string;
-        message?: string;
-        error?: string;
-      };
-      if (!chRes.ok || !chData.intentId || !chData.sig || !chData.message) {
-        throw new Error(
-          chData.error ?? `Failed to start Telegram link challenge (${chRes.status})`,
+  const handleSyncWalletWithTelegram = useCallback(
+    async (opts: { silent?: boolean } = {}) => {
+      if (!sessionToken || accounts.length === 0) return;
+      setTgSyncBusy(true);
+      if (!opts.silent) {
+        setTgSyncError(null);
+      }
+      try {
+        const base = config.apiBaseUrl.replace(/\/+$/, "");
+        const chRes = await fetch(`${base}/v1/tg/link-challenge`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${sessionToken}` },
+        });
+        const chData = (await chRes.json()) as {
+          intentId?: string;
+          sig?: string;
+          message?: string;
+          error?: string;
+        };
+        if (!chRes.ok || !chData.intentId || !chData.sig || !chData.message) {
+          throw new Error(
+            chData.error ?? `Failed to start Telegram link challenge (${chRes.status})`,
+          );
+        }
+        const preferredDefault = linkedAccounts.find((a) => a.isDefault)?.address;
+        const proofs = await signConnectChallenge(
+          chData.message,
+          accounts.map((a) => a.derivationIndex ?? 0),
+          Boolean(config.smartAccountWasmHash),
+          preferredDefault,
         );
+        const cfRes = await fetch(`${base}/v1/tg/link-confirm`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${sessionToken}`,
+          },
+          body: JSON.stringify({
+            intentId: chData.intentId,
+            sig: chData.sig,
+            accounts: proofs,
+          }),
+        });
+        const cfData = (await cfRes.json()) as {
+          ok?: boolean;
+          linkedCount?: number;
+          error?: string;
+        };
+        if (!cfRes.ok) {
+          throw new Error(cfData.error ?? `Failed to verify Telegram link (${cfRes.status})`);
+        }
+        await refreshLinkedAccounts();
+        if (!opts.silent) {
+          triggerTelegramHaptic("success");
+        }
+        showToast(
+          `Linked ${cfData.linkedCount ?? proofs.length} address(es) with @${config.tgBotUsername}`,
+        );
+      } catch (err) {
+        if (!opts.silent) {
+          triggerTelegramHaptic("error");
+          setTgSyncError(
+            err instanceof Error ? err.message : "Failed to sync wallet with Telegram",
+          );
+        }
+      } finally {
+        setTgSyncBusy(false);
       }
-      const proofs = await signConnectChallenge(
-        chData.message,
-        accounts.map((a) => a.derivationIndex ?? 0),
-        Boolean(config.smartAccountWasmHash),
-      );
-      const cfRes = await fetch(`${base}/v1/tg/link-confirm`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${sessionToken}`,
-        },
-        body: JSON.stringify({
-          intentId: chData.intentId,
-          sig: chData.sig,
-          accounts: proofs,
-        }),
-      });
-      const cfData = (await cfRes.json()) as {
-        ok?: boolean;
-        linkedCount?: number;
-        error?: string;
-      };
-      if (!cfRes.ok) {
-        throw new Error(cfData.error ?? `Failed to verify Telegram link (${cfRes.status})`);
-      }
-      await refreshLinkedAccounts();
+    },
+    [
+      sessionToken,
+      accounts,
+      linkedAccounts,
+      config.apiBaseUrl,
+      config.smartAccountWasmHash,
+      config.tgBotUsername,
+      signConnectChallenge,
+      refreshLinkedAccounts,
+      showToast,
+    ],
+  );
+
+  // Automatically bind verified public addresses to the user's Telegram ID on unlock/import
+  useEffect(() => {
+    if (
+      vaultStatus !== "unlocked" ||
+      !activeAccount ||
+      !sessionToken ||
+      accounts.length === 0
+    ) {
+      return;
+    }
+    const allLinked = accounts.every((acc) =>
+      linkedAccounts.some((linked) => linked.address === acc.address),
+    );
+    if (allLinked) return;
+    const key = `${sessionToken}:${accounts.map((a) => a.address).join(",")}`;
+    if (autoLinkedKeyRef.current === key) return;
+    autoLinkedKeyRef.current = key;
+    void handleSyncWalletWithTelegram({ silent: true });
+  }, [
+    vaultStatus,
+    activeAccount,
+    sessionToken,
+    accounts,
+    linkedAccounts,
+    handleSyncWalletWithTelegram,
+  ]);
+
+  const handleReSyncCloudBackup = async () => {
+    setCloudSyncBusy(true);
+    setCloudSyncError(null);
+    try {
+      const json = await exportAgVaultJson();
+      await uploadEncryptedBackup(json);
       triggerTelegramHaptic("success");
-      showToast(
-        `Synced ${cfData.linkedCount ?? proofs.length} address(es) with @${config.tgBotUsername}`,
-      );
+      showToast("Encrypted backup synced to Telegram");
     } catch (err) {
       triggerTelegramHaptic("error");
-      setTgSyncError(
-        err instanceof Error ? err.message : "Failed to sync wallet with Telegram",
+      setCloudSyncError(
+        err instanceof Error ? err.message : "Failed to sync encrypted backup",
       );
     } finally {
-      setTgSyncBusy(false);
+      setCloudSyncBusy(false);
+    }
+  };
+
+  const cloudPasswordStrength = useMemo(
+    () => evaluateCloudBackupSecretStrength(cloudNewPassword),
+    [cloudNewPassword],
+  );
+
+  const handleRetryPendingCloudUpload = async () => {
+    if (!pendingSyncEnvelopeJson) return;
+    setCloudSyncBusy(true);
+    setCloudSyncError(null);
+    try {
+      await uploadEncryptedBackup(pendingSyncEnvelopeJson);
+      setPendingSyncEnvelopeJson(null);
+      setCloudCurrentPin("");
+      setCloudNewPassword("");
+      setCloudConfirmPassword("");
+      setCloudUpgradeOpen(false);
+      triggerTelegramHaptic("success");
+      showToast("Telegram Zero-Knowledge Sync enabled");
+    } catch (err) {
+      triggerTelegramHaptic("error");
+      setCloudSyncError(
+        err instanceof Error ? err.message : "Cloud upload failed — tap Retry Upload again",
+      );
+    } finally {
+      setCloudSyncBusy(false);
+    }
+  };
+
+  const handleEnableCloudSyncSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setCloudSyncError(null);
+    if (!cloudPasswordStrength.acceptable) {
+      setCloudSyncError(
+        cloudPasswordStrength.reasons[0] ??
+          "Recovery Password must be at least 10 characters with strong entropy.",
+      );
+      return;
+    }
+    if (cloudNewPassword !== cloudConfirmPassword) {
+      setCloudSyncError("Recovery Password confirmation does not match.");
+      return;
+    }
+    setCloudSyncBusy(true);
+    let envelopeJson: string;
+    try {
+      const updated = await reEncryptLocalVault(cloudCurrentPin, cloudNewPassword);
+      envelopeJson = updated.envelopeJson;
+    } catch (err) {
+      triggerTelegramHaptic("error");
+      setCloudSyncError(
+        err instanceof Error ? err.message : "Failed to re-encrypt local vault",
+      );
+      setCloudSyncBusy(false);
+      return;
+    }
+
+    try {
+      await uploadEncryptedBackup(envelopeJson);
+      setPendingSyncEnvelopeJson(null);
+      setCloudCurrentPin("");
+      setCloudNewPassword("");
+      setCloudConfirmPassword("");
+      setCloudUpgradeOpen(false);
+      triggerTelegramHaptic("success");
+      showToast("Telegram Zero-Knowledge Sync enabled");
+    } catch (err) {
+      setPendingSyncEnvelopeJson(envelopeJson);
+      setCloudCurrentPin("");
+      triggerTelegramHaptic("error");
+      setCloudSyncError(
+        `Local vault updated to your new Recovery Password, but cloud upload failed: ${err instanceof Error ? err.message : "network error"}. Tap Retry Upload below.`,
+      );
+    } finally {
+      setCloudSyncBusy(false);
+    }
+  };
+
+  const handleDeleteCloudBackup = async () => {
+    setCloudSyncBusy(true);
+    setCloudSyncError(null);
+    try {
+      await deleteEncryptedBackup();
+      setCloudDeleteArmed(false);
+      triggerTelegramHaptic("warning");
+      showToast("Removed cloud copy (local vault kept on device)", "info");
+    } catch (err) {
+      setCloudSyncError(
+        err instanceof Error ? err.message : "Failed to remove cloud copy",
+      );
+    } finally {
+      setCloudSyncBusy(false);
     }
   };
 
@@ -786,17 +993,17 @@ function WalletShell({
                 title="AstroWallet Home"
               >
                 <AstroWalletLogo size={34} />
-                <div style={{ textAlign: "left" }}>
+                <div className="aw-brand-text">
                   <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em" }}>
                     AstroWallet
                   </div>
-                  <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                  <div className="aw-brand-subline">
                     {tgUser?.username ? `@${tgUser.username} · Stellar & TON` : "Stellar & TON Mini App"}
                   </div>
                 </div>
               </button>
 
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <div className="aw-header-actions">
                 {isWalletUnlocked && (
                   <button
                     type="button"
@@ -840,13 +1047,6 @@ function WalletShell({
                 </div>
                 <span className="glass-pill glass-pill--trust">0 Server Keys</span>
               </div>
-            )}
-
-            {intentRoute !== null && vaultStatus === "uninitialized" && (
-              <IosBrowserGuard
-                isIntentRoute={intentRoute !== null}
-                uninitialized={vaultStatus === "uninitialized"}
-              />
             )}
 
             {intentRoute && (
@@ -1475,15 +1675,24 @@ function WalletShell({
                           </div>
                         </div>
 
-                        <button
-                          type="button"
-                          className="aw-btn-primary"
-                          disabled={tgSyncBusy || !sessionToken || accounts.length === 0}
-                          onClick={() => void handleSyncWalletWithTelegram()}
-                        >
-                          <IconTelegram size={15} />
-                          <span>{tgSyncBusy ? "Signing & Syncing..." : "Sync Wallet with Telegram"}</span>
-                        </button>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <span
+                            className={`glass-pill ${
+                              linkedAccounts.length > 0 ? "glass-pill--trust" : "glass-pill--gold"
+                            }`}
+                          >
+                            {linkedAccounts.length > 0 ? "Auto-Linked ✓" : "Sync Pending"}
+                          </span>
+                          <button
+                            type="button"
+                            className="aw-btn-primary"
+                            disabled={tgSyncBusy || !sessionToken || accounts.length === 0}
+                            onClick={() => void handleSyncWalletWithTelegram()}
+                          >
+                            <IconTelegram size={15} />
+                            <span>{tgSyncBusy ? "Signing & Syncing..." : "Re-Sync Addresses"}</span>
+                          </button>
+                        </div>
                       </div>
 
                       {!sessionToken && (
@@ -1584,12 +1793,19 @@ function WalletShell({
                                     </div>
                                   )}
                                   <div style={{ display: "flex", gap: 8 }}>
-                                    <button type="submit" className="aw-btn-primary">
-                                      Save Label
+                                    <button
+                                      type="submit"
+                                      className="aw-btn-primary"
+                                      disabled={
+                                        renameBusy || !renameLabel.trim() || renamePin.length < 6
+                                      }
+                                    >
+                                      {renameBusy ? "Saving..." : "Save Label"}
                                     </button>
                                     <button
                                       type="button"
                                       className="aw-btn-secondary"
+                                      disabled={renameBusy}
                                       onClick={() => setRenamingIndex(null)}
                                     >
                                       Cancel
@@ -1638,9 +1854,10 @@ function WalletShell({
                             <button
                               type="button"
                               className="aw-btn-secondary"
+                              disabled={fpBusy || fpPin.length < 6}
                               onClick={() => void handleEnrollFingerprint()}
                             >
-                              Enroll
+                              {fpBusy ? "Enrolling..." : "Enroll"}
                             </button>
                           </div>
                         )}
@@ -1670,6 +1887,11 @@ function WalletShell({
                             <span>Export .agvault Backup</span>
                           </button>
                         </div>
+                        {exportError && (
+                          <div className="aw-banner aw-banner--danger" style={{ fontSize: 12 }}>
+                            {exportError}
+                          </div>
+                        )}
                         {exportedVault && (
                           <div style={{ display: "grid", gap: 8 }}>
                             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -1703,6 +1925,187 @@ function WalletShell({
                               rows={4}
                               value={exportedVault}
                             />
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Telegram Zero-Knowledge Cloud Recovery Sync */}
+                      <div className="aw-vault-divider">
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <div style={{ fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+                            <IconTelegram size={15} />
+                            <span>Telegram Zero-Knowledge Recovery Sync</span>
+                          </div>
+                          <span
+                            className={`glass-pill ${
+                              hasEncryptedBackup ? "glass-pill--trust" : "glass-pill--gold"
+                            }`}
+                          >
+                            {hasEncryptedBackup ? "✓ Synced to Telegram" : "Device-Only Vault"}
+                          </span>
+                        </div>
+
+                        {hasEncryptedBackup ? (
+                          <div style={{ display: "grid", gap: 8 }}>
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                              Your encrypted <code>AGVAULT</code> ciphertext is linked to your
+                              Telegram account so switching phones or clearing cache restores
+                              smoothly with your Recovery Password.
+                              {backupUpdatedAt
+                                ? ` Last synced: ${new Date(backupUpdatedAt * 1000).toLocaleString()}.`
+                                : ""}
+                            </div>
+
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                              <button
+                                type="button"
+                                className="aw-btn-secondary"
+                                disabled={cloudSyncBusy}
+                                onClick={() => void handleReSyncCloudBackup()}
+                              >
+                                <IconRefresh size={14} />
+                                <span>{cloudSyncBusy ? "Syncing..." : "Re-Sync Cloud Copy"}</span>
+                              </button>
+
+                              {!cloudDeleteArmed ? (
+                                <button
+                                  type="button"
+                                  className="aw-chip-btn"
+                                  disabled={cloudSyncBusy}
+                                  onClick={() => setCloudDeleteArmed(true)}
+                                >
+                                  <IconTrash size={13} />
+                                  <span>Remove Cloud Copy</span>
+                                </button>
+                              ) : (
+                                <>
+                                  <button
+                                    type="button"
+                                    className="aw-btn-danger"
+                                    disabled={cloudSyncBusy}
+                                    onClick={() => void handleDeleteCloudBackup()}
+                                  >
+                                    Confirm Delete Cloud Copy
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="aw-btn-secondary"
+                                    onClick={() => setCloudDeleteArmed(false)}
+                                  >
+                                    Cancel
+                                  </button>
+                                </>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <div style={{ display: "grid", gap: 8 }}>
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                              Currently stored only on this device. Protect with a ≥10 char Recovery
+                              Password to sync an Argon2id ciphertext copy under your Telegram ID.
+                            </div>
+                            <button
+                              type="button"
+                              className="aw-btn-secondary"
+                              style={{ width: "fit-content" }}
+                              onClick={() => {
+                                setCloudUpgradeOpen((v) => !v);
+                                setCloudSyncError(null);
+                              }}
+                            >
+                              <IconTelegram size={15} />
+                              <span>
+                                {cloudUpgradeOpen ? "Hide Sync Setup" : "Enable Telegram Encrypted Sync"}
+                              </span>
+                            </button>
+
+                            {cloudUpgradeOpen && (
+                              <form
+                                onSubmit={(e) => void handleEnableCloudSyncSubmit(e)}
+                                className="aw-banner"
+                                style={{ display: "grid", gap: 8 }}
+                              >
+                                <input
+                                  type="password"
+                                  className="aw-input"
+                                  autoComplete="current-password"
+                                  placeholder="Current device PIN / password"
+                                  value={cloudCurrentPin}
+                                  onChange={(e) => setCloudCurrentPin(e.target.value)}
+                                />
+                                <div className="aw-two-col-inputs">
+                                  <input
+                                    type="password"
+                                    className="aw-input"
+                                    autoComplete="new-password"
+                                    placeholder="New Recovery Password (min 10 chars)"
+                                    value={cloudNewPassword}
+                                    onChange={(e) => {
+                                      setCloudNewPassword(e.target.value);
+                                      setPendingSyncEnvelopeJson(null);
+                                    }}
+                                  />
+                                  <input
+                                    type="password"
+                                    className="aw-input"
+                                    autoComplete="new-password"
+                                    placeholder="Confirm Recovery Password"
+                                    value={cloudConfirmPassword}
+                                    onChange={(e) => setCloudConfirmPassword(e.target.value)}
+                                  />
+                                </div>
+                                {cloudNewPassword.length > 0 && !cloudPasswordStrength.acceptable && (
+                                  <div style={{ fontSize: 11, color: "var(--aw-stellar-gold)" }}>
+                                    {cloudPasswordStrength.reasons[0]}
+                                  </div>
+                                )}
+                                {cloudConfirmPassword.length > 0 &&
+                                  cloudNewPassword !== cloudConfirmPassword && (
+                                    <div style={{ fontSize: 11, color: "var(--aw-stellar-gold)" }}>
+                                      Recovery Password confirmation does not match yet.
+                                    </div>
+                                  )}
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                  {pendingSyncEnvelopeJson ? (
+                                    <button
+                                      type="button"
+                                      className="aw-btn-primary"
+                                      disabled={cloudSyncBusy}
+                                      onClick={() => void handleRetryPendingCloudUpload()}
+                                    >
+                                      <IconRefresh size={15} />
+                                      <span>
+                                        {cloudSyncBusy ? "Retrying Upload..." : "Retry Upload to Telegram"}
+                                      </span>
+                                    </button>
+                                  ) : (
+                                    <button
+                                      type="submit"
+                                      className="aw-btn-primary"
+                                      disabled={
+                                        cloudSyncBusy ||
+                                        cloudCurrentPin.length < 6 ||
+                                        !cloudPasswordStrength.acceptable ||
+                                        cloudNewPassword !== cloudConfirmPassword
+                                      }
+                                    >
+                                      <IconLock size={15} />
+                                      <span>
+                                        {cloudSyncBusy
+                                          ? "Encrypting & Uploading..."
+                                          : "Encrypt & Sync Now"}
+                                      </span>
+                                    </button>
+                                  )}
+                                </div>
+                              </form>
+                            )}
+                          </div>
+                        )}
+
+                        {cloudSyncError && (
+                          <div className="aw-banner aw-banner--danger" style={{ fontSize: 12 }}>
+                            {cloudSyncError}
                           </div>
                         )}
                       </div>
@@ -1821,7 +2224,12 @@ function WalletShell({
                                 <button
                                   type="button"
                                   className="aw-mini-chip"
-                                  onClick={() => openSendWith({ destination: c.address })}
+                                  onClick={() =>
+                                    openSendWith({
+                                      destination: c.address,
+                                      memo: c.defaultMemo,
+                                    })
+                                  }
                                 >
                                   Send
                                 </button>
@@ -1890,8 +2298,10 @@ function WalletShell({
                         Danger Zone · Local Device Reset
                       </div>
                       <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                        Removes encrypted vault and biometric wrapping keys from this browser&apos;s
-                        IndexedDB. Make sure you backed up your 12-word recovery phrase first.
+                        Removes the local encrypted vault and biometric wrapping keys from this
+                        device&apos;s IndexedDB (leaves any Telegram Encrypted Backup intact). Make
+                        sure you backed up your 12/24-word recovery phrase or Recovery Password
+                        first.
                       </div>
                       {!wipeConfirmArmed ? (
                         <button
@@ -1991,6 +2401,7 @@ function WalletShell({
               initialAssetCode={sendPrefill.assetCode}
               initialAssetIssuer={sendPrefill.assetIssuer}
               initialDestination={sendPrefill.destination}
+              initialMemo={sendPrefill.memo}
               onClose={() => setActiveDrawer(null)}
             />
           )}
@@ -2160,7 +2571,7 @@ function RoutedExperience() {
 }
 
 function MiniAppGate({ config }: { config: PwaConfig }) {
-  const { allowed, authStatus, authError, refreshTelegramAuth } = useTelegram();
+  const { allowed, authStatus, authError, tgUser, refreshTelegramAuth } = useTelegram();
 
   if (!allowed) {
     return (
@@ -2174,7 +2585,7 @@ function MiniAppGate({ config }: { config: PwaConfig }) {
   }
 
   return (
-    <WalletProvider config={config}>
+    <WalletProvider key={tgUser?.id ?? "dev"} storageScopeId={tgUser?.id} config={config}>
       <RoutedExperience />
     </WalletProvider>
   );

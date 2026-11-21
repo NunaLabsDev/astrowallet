@@ -87,6 +87,7 @@ export async function enrollFingerprintUnlock(
   pinOrPassphrase: string,
   accountLabel = "AstroWallet",
   rpId?: string,
+  scopeId?: string,
 ): Promise<{ enrolled: true } | { enrolled: false; reason: string }> {
   const supported = await isFingerprintSupported();
   if (!supported) {
@@ -156,13 +157,16 @@ export async function enrollFingerprintUnlock(
     const aesKey = await deriveAesKeyFromPrf(prfKeyBytes, prfSalt, "encrypt");
     const wrapped = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aesKey, pinCopy);
 
-    await saveBiometricRecord({
-      credentialIdB64: toB64(new Uint8Array(credential.rawId)),
-      prfSaltB64: toB64(prfSalt),
-      ivB64: toB64(iv),
-      wrappedPinCiphertextB64: toB64(new Uint8Array(wrapped)),
-      createdAt: Math.floor(Date.now() / 1000),
-    });
+    await saveBiometricRecord(
+      {
+        credentialIdB64: toB64(new Uint8Array(credential.rawId)),
+        prfSaltB64: toB64(prfSalt),
+        ivB64: toB64(iv),
+        wrappedPinCiphertextB64: toB64(new Uint8Array(wrapped)),
+        createdAt: Math.floor(Date.now() / 1000),
+      },
+      scopeId,
+    );
 
     return { enrolled: true };
   } finally {
@@ -174,8 +178,8 @@ export async function enrollFingerprintUnlock(
 /**
  * Unlocks the wrapped vault PIN using platform Fingerprint / Biometrics.
  */
-export async function unlockWithFingerprint(rpId?: string): Promise<string> {
-  const record = await loadBiometricRecord();
+export async function unlockWithFingerprint(rpId?: string, scopeId?: string): Promise<string> {
+  const record = await loadBiometricRecord(scopeId);
   if (!record) {
     throw new Error("Fingerprint quick-unlock is not enrolled on this device");
   }
@@ -226,6 +230,6 @@ export async function unlockWithFingerprint(rpId?: string): Promise<string> {
   }
 }
 
-export async function disableFingerprintUnlock(): Promise<void> {
-  await clearBiometricRecord();
+export async function disableFingerprintUnlock(scopeId?: string): Promise<void> {
+  await clearBiometricRecord(scopeId);
 }

@@ -14,7 +14,7 @@ import {
 import { signIntentToken } from "@astrowallet/tg-protocol";
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
-import type { ServerRepository, TelegramUserRecord } from "./db/repository.js";
+import type { ServerRepository, StoredEncryptedVaultBackup, TelegramUserRecord } from "./db/repository.js";
 import { fetchLiveAccountBalances } from "./stellar-verifier.js";
 
 const SAMPLE_SRC_G = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
@@ -210,6 +210,15 @@ function createPhase4MemoryRepo(): ServerRepository {
       return true;
     },
     async purgeExpiredRecords() {},
+    async upsertEncryptedVaultBackup(): Promise<StoredEncryptedVaultBackup> {
+      throw new Error("Not used in phase4 harness");
+    },
+    async getEncryptedVaultBackup() {
+      return null;
+    },
+    async deleteEncryptedVaultBackup() {
+      return false;
+    },
   };
 }
 

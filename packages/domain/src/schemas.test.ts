@@ -7,6 +7,7 @@ import {
   defaultCapabilitiesForKind,
 } from "./accounts.js";
 import { SignedIntentSchema, TelegramUserBindingSchema } from "./intents.js";
+import { EncryptedVaultBackupEnvelopeSchema } from "./vault.js";
 
 const SAMPLE_G = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
 const SAMPLE_C = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
@@ -114,5 +115,48 @@ describe("Telegram binding & signed intent schemas", () => {
     expect(exactBigIntSummary.minReserveXlm).toBe("3.5");
     expect(exactBigIntSummary.spendableXlm).toBe("99999996.5000000");
     expect(exactBigIntSummary.reclaimableTrustlines).toHaveLength(0);
+  });
+});
+
+describe("EncryptedVaultBackupEnvelopeSchema", () => {
+  it("accepts valid AGVAULT v1 ciphertext envelopes and rejects plaintext fields or weak KDFs", () => {
+    const valid = {
+      version: 1,
+      format: "AGVAULT",
+      kdf: {
+        algorithm: "argon2id",
+        memoryKiB: 65536,
+        iterations: 3,
+        parallelism: 1,
+        hashLength: 32,
+      },
+      saltB64: "AAAAAAAAAAAAAAAAAAAAAA==",
+      ivB64: "AAAAAAAAAAAAAAAA",
+      ciphertextB64: "BBBBBBBBBBBBBBBBBBBBBBBB",
+      createdAt: 1_900_000_000,
+      updatedAt: 1_900_000_100,
+    };
+    expect(EncryptedVaultBackupEnvelopeSchema.parse(valid).format).toBe("AGVAULT");
+
+    expect(() =>
+      EncryptedVaultBackupEnvelopeSchema.parse({
+        ...valid,
+        mnemonic: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+      }),
+    ).toThrow();
+
+    expect(() =>
+      EncryptedVaultBackupEnvelopeSchema.parse({
+        ...valid,
+        kdf: { ...valid.kdf, memoryKiB: 1024 },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      EncryptedVaultBackupEnvelopeSchema.parse({
+        ...valid,
+        kdf: { ...valid.kdf, iterations: 1 },
+      }),
+    ).toThrow();
   });
 });

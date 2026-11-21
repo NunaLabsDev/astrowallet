@@ -52,6 +52,9 @@ const COMMON_WEAK_SECRETS = new Set([
   "passphrase",
   "qwerty",
   "astrowallet",
+  "0123456789",
+  "1234567890",
+  "9876543210",
 ]);
 
 function isStrictlySequentialDigits(secret: string): boolean {
@@ -111,6 +114,30 @@ export function evaluateSecretStrength(secret: string): SecretStrengthResult {
 
   const level = score === 4 ? "strong" : score === 3 ? "good" : "fair";
   return { score, level, acceptable: true, reasons: [] };
+}
+
+/**
+ * Stricter passphrase policy for Zero-Knowledge Telegram cloud-synced ciphertext backups
+ * (>= 10 characters and non-trivial complexity so offline guessing resists brute force).
+ */
+export function evaluateCloudBackupSecretStrength(secret: string): SecretStrengthResult {
+  const base = evaluateSecretStrength(secret);
+  if (secret.length < 10 || !base.acceptable || base.score < 3) {
+    return {
+      score: base.score,
+      level: base.level === "strong" ? "fair" : base.level,
+      acceptable: false,
+      reasons: [
+        base.reasons[0] ??
+          "Telegram Encrypted Sync requires a Recovery Password of at least 10 characters (e.g. a passphrase or letters + numbers).",
+      ],
+    };
+  }
+  return {
+    ...base,
+    acceptable: true,
+    reasons: [],
+  };
 }
 
 export interface VaultAccountMetadata {

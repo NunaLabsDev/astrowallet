@@ -1,13 +1,14 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   formatNanoTon,
   isValidTonAddress,
   parseTonToNano,
 } from "@astrowallet/ton-core";
+import QRCode from "qrcode";
 import { useWallet } from "../state/wallet-context.js";
-import { triggerTelegramHaptic } from "../telegram/webapp.js";
+import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
-import { IconCheck, IconCopy, IconExternalLink, IconRefresh, IconSend } from "./Icons.js";
+import { IconCheck, IconCopy, IconExternalLink, IconQr, IconRefresh, IconSend } from "./Icons.js";
 
 interface PendingTonReview {
   destination: string;
@@ -25,6 +26,7 @@ export function TonWalletSheet() {
     tonChainError,
     refreshTonState,
     sendTonPayment,
+    showToast,
   } = useWallet();
 
   const [destination, setDestination] = useState("");
@@ -33,22 +35,68 @@ export function TonWalletSheet() {
   const [reviewPending, setReviewPending] = useState<PendingTonReview | null>(null);
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [copiedHash, setCopiedHash] = useState(false);
+  const [showQr, setShowQr] = useState(false);
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!showQr || !tonAccount) {
+      setQrDataUrl(null);
+      return undefined;
+    }
+    QRCode.toDataURL(tonAccount.friendlyAddress, {
+      width: 200,
+      margin: 1,
+      color: { dark: "#172C69", light: "#F8FAFF" },
+    })
+      .then((url) => {
+        if (!cancelled) setQrDataUrl(url);
+      })
+      .catch(() => {
+        if (!cancelled) setQrDataUrl(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [showQr, tonAccount]);
 
   if (!tonAccount) return null;
 
   const formattedBalance = tonState ? formatNanoTon(tonState.balanceNano) : "0.0";
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(tonAccount.friendlyAddress);
+    const ok = await copyTextToClipboard(tonAccount.friendlyAddress);
+    if (ok) {
       setCopied(true);
       triggerTelegramHaptic("selection");
       setTimeout(() => setCopied(false), 1800);
-    } catch {
-      // Clipboard blocked
+    } else {
+      showToast("Clipboard copy blocked by WebView", "error");
     }
+  };
+
+  const handleCopyHash = async () => {
+    if (!txHash) return;
+    const ok = await copyTextToClipboard(txHash);
+    if (ok) {
+      setCopiedHash(true);
+      setTimeout(() => setCopiedHash(false), 1800);
+    } else {
+      showToast("Clipboard copy blocked by WebView", "error");
+    }
+  };
+
+  const applyTonPercentage = (ratio: number) => {
+    if (!tonState) return;
+    const bal = BigInt(tonState.balanceNano);
+    const reserve = ratio === 1 ? 20_000_000n : 0n;
+    const spendable = bal > reserve ? bal - reserve : 0n;
+    const target =
+      ratio === 1 ? spendable : (spendable * BigInt(Math.round(ratio * 100))) / 100n;
+    setAmountTon(formatNanoTon(target));
   };
 
   const handlePrepareReview = (e: FormEvent) => {
@@ -70,9 +118,10 @@ export function TonWalletSheet() {
       return;
     }
 
-    if (tonState && nano > BigInt(tonState.balanceNano)) {
+    const estimatedGasNano = 15_000_000n;
+    if (tonState && nano + estimatedGasNano > BigInt(tonState.balanceNano)) {
       setErrorMsg(
-        `Insufficient TON balance (${formatNanoTon(tonState.balanceNano)} TON available).`,
+        `Insufficient TON for amount + ~0.015 TON gas (${formatNanoTon(tonState.balanceNano)} TON available).`,
       );
       return;
     }
@@ -163,6 +212,15 @@ export function TonWalletSheet() {
           <button
             type="button"
             className="aw-chip-btn"
+            aria-pressed={showQr}
+            onClick={() => setShowQr((v) => !v)}
+          >
+            <IconQr size={13} />
+            <span>{showQr ? "Hide TON QR" : "Receive TON QR"}</span>
+          </button>
+          <button
+            type="button"
+            className="aw-chip-btn"
             disabled={loadingTonChain}
             onClick={() => void refreshTonState()}
           >
@@ -182,6 +240,28 @@ export function TonWalletSheet() {
             </a>
           )}
         </div>
+
+        {showQr && (
+          <div
+            className="aw-banner"
+            style={{ display: "grid", gap: 10, justifyItems: "center", marginTop: 8 }}
+          >
+            {qrDataUrl && (
+              <div className="aw-qr-frame">
+                <img
+                  src={qrDataUrl}
+                  width={168}
+                  height={168}
+                  alt="TON wallet QR code"
+                  style={{ display: "block", borderRadius: 12 }}
+                />
+              </div>
+            )}
+            <code style={{ fontSize: 11, wordBreak: "break-all", textAlign: "center" }}>
+              {tonAccount.friendlyAddress}
+            </code>
+          </div>
+        )}
       </section>
 
       {tonChainError && (
@@ -304,10 +384,44 @@ export function TonWalletSheet() {
                 </div>
               </div>
 
+              {tonState && BigInt(tonState.balanceNano) > 0n && (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  <button type="button" className="aw-chip-btn" onClick={() => applyTonPercentage(0.25)}>
+                    25%
+                  </button>
+                  <button type="button" className="aw-chip-btn" onClick={() => applyTonPercentage(0.5)}>
+                    50%
+                  </button>
+                  <button type="button" className="aw-chip-btn" onClick={() => applyTonPercentage(1)}>
+                    MAX
+                  </button>
+                </div>
+              )}
+
               {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
               {txHash && (
-                <div className="aw-banner" style={{ fontSize: 12 }}>
-                  Broadcasted TON transfer: <code>{txHash}</code>
+                <div className="aw-banner" style={{ display: "grid", gap: 8, fontSize: 12 }}>
+                  <div>
+                    Broadcasted TON transfer: <code style={{ wordBreak: "break-all" }}>{txHash}</code>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button type="button" className="aw-chip-btn" onClick={() => void handleCopyHash()}>
+                      {copiedHash ? <IconCheck size={12} /> : <IconCopy size={12} />}
+                      <span>{copiedHash ? "Copied Hash" : "Copy Tx Hash"}</span>
+                    </button>
+                    {config.tonExplorerBaseUrl && (
+                      <a
+                        href={`${config.tonExplorerBaseUrl.replace(/\/+$/, "")}/transaction/${txHash}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="aw-chip-btn"
+                        style={{ textDecoration: "none" }}
+                      >
+                        <span>Explorer</span>
+                        <IconExternalLink size={12} />
+                      </a>
+                    )}
+                  </div>
                 </div>
               )}
 

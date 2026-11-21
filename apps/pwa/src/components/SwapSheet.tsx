@@ -10,6 +10,7 @@ import {
 } from "@astrowallet/defi";
 import type { ClassicAddress, SwapQuote } from "@astrowallet/domain";
 import { useWallet } from "../state/wallet-context.js";
+import { copyTextToClipboard } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import {
   IconCheck,
@@ -41,8 +42,10 @@ export function SwapSheet({
     config,
     activeAccount,
     accountState,
+    verifiedAssets,
     executePathSwap,
     signAndSubmitRawXdrWithShield,
+    showToast,
   } = useWallet();
 
   const heldIdentifiers = useMemo(() => {
@@ -104,7 +107,18 @@ export function SwapSheet({
 
   const handleGetQuote = async (e: FormEvent) => {
     e.preventDefault();
-    if (!amount.trim() || !toAsset.trim()) return;
+    const cleanAmount = amount.trim();
+    const cleanFrom = fromAsset.trim();
+    const cleanTo = toAsset.trim();
+    if (!cleanAmount || !cleanTo) return;
+    if (!/^\d+(\.\d{1,7})?$/.test(cleanAmount) || Number(cleanAmount) <= 0) {
+      setError("Enter a valid positive swap amount (up to 7 decimals).");
+      return;
+    }
+    if (cleanFrom.toUpperCase() === cleanTo.toUpperCase()) {
+      setError("Source and destination assets must be different.");
+      return;
+    }
 
     setQuoting(true);
     setError(null);
@@ -122,9 +136,9 @@ export function SwapSheet({
       });
 
       const res = await engine.getQuote({
-        fromAsset: fromAsset.trim(),
-        toAsset: toAsset.trim(),
-        amount: amount.trim(),
+        fromAsset: cleanFrom,
+        toAsset: cleanTo,
+        amount: cleanAmount,
         slippageBps,
         sourceAddress: activeAccount?.address,
       });
@@ -193,12 +207,12 @@ export function SwapSheet({
 
   const handleCopyHash = async () => {
     if (!txHash) return;
-    try {
-      await navigator.clipboard.writeText(txHash);
+    const ok = await copyTextToClipboard(txHash);
+    if (ok) {
       setCopiedHash(true);
       setTimeout(() => setCopiedHash(false), 1800);
-    } catch {
-      // Clipboard unavailable
+    } else {
+      showToast("Clipboard copy blocked by WebView", "error");
     }
   };
 
@@ -347,6 +361,29 @@ export function SwapSheet({
                     Target: {h.label}
                   </button>
                 ))}
+            </div>
+          )}
+          {verifiedAssets.length > 0 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginTop: 6 }}>
+              {verifiedAssets
+                .filter((v) => assetIdentifier(v.code, v.issuer) !== fromAsset)
+                .slice(0, 6)
+                .map((v) => {
+                  const id = assetIdentifier(v.code, v.issuer);
+                  return (
+                    <button
+                      key={id}
+                      type="button"
+                      className="aw-mini-chip"
+                      onClick={() => {
+                        setToAsset(id);
+                        setQuote(null);
+                      }}
+                    >
+                      + {v.code}
+                    </button>
+                  );
+                })}
             </div>
           )}
         </div>

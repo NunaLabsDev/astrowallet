@@ -6,13 +6,14 @@ import {
   type FormEvent,
 } from "react";
 import {
+  evaluateCloudBackupSecretStrength,
   evaluateSecretStrength,
   generateMnemonicPhrase,
   validateMnemonicPhrase,
 } from "@astrowallet/stellar-core";
 import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
-import { triggerTelegramHaptic } from "../telegram/webapp.js";
+import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import {
   IconCheck,
@@ -24,6 +25,7 @@ import {
   IconRefresh,
   IconShield,
   IconSparkles,
+  IconTelegram,
   IconZap,
 } from "./Icons.js";
 import {
@@ -34,6 +36,7 @@ import {
 
 type OnboardingView =
   | "welcome"
+  | "cloud_restore"
   | "create_primer"
   | "create_reveal"
   | "create_verify"
@@ -54,17 +57,25 @@ const CREATE_STEP_META: ReadonlyArray<{
   { view: "create_primer", step: 1, shortLabel: "Safety" },
   { view: "create_reveal", step: 2, shortLabel: "Phrase" },
   { view: "create_verify", step: 3, shortLabel: "Verify" },
-  { view: "create_pin", step: 4, shortLabel: "PIN" },
+  { view: "create_pin", step: 4, shortLabel: "Protect" },
 ];
 
-function StrengthMeter({ secret }: { secret: string }) {
-  const strength = evaluateSecretStrength(secret);
+function StrengthMeter({
+  secret,
+  cloudSync,
+}: {
+  secret: string;
+  cloudSync: boolean;
+}) {
+  const strength = cloudSync
+    ? evaluateCloudBackupSecretStrength(secret)
+    : evaluateSecretStrength(secret);
   const levelClass = `is-${strength.level}`;
   return (
     <div className="aw-strength-meter" aria-live="polite">
       <div className="aw-strength-head">
         <span>
-          PIN / Passphrase Strength:{" "}
+          {cloudSync ? "Recovery Password Strength: " : "PIN / Passphrase Strength: "}
           <strong className={`aw-strength-label ${levelClass}`}>
             {strength.level.toUpperCase()}
           </strong>
@@ -73,7 +84,8 @@ function StrengthMeter({ secret }: { secret: string }) {
       <div className="aw-strength-track" aria-hidden="true">
         {[1, 2, 3, 4].map((segment) => {
           const active =
-            secret.length > 0 && (strength.score >= segment || (strength.score === 0 && segment === 1));
+            secret.length > 0 &&
+            (strength.score >= segment || (strength.score === 0 && segment === 1));
           return (
             <span
               key={segment}
@@ -90,10 +102,25 @@ function StrengthMeter({ secret }: { secret: string }) {
 }
 
 export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps) {
-  const { tgUser } = useTelegram();
+  const {
+    tgUser,
+    inTelegram,
+    sessionToken,
+    hasEncryptedBackup,
+    cloudBackupJson,
+    cloudBackupError,
+    backupUpdatedAt,
+    checkingCloudBackup,
+    refreshCloudBackup,
+    uploadEncryptedBackup,
+  } = useTelegram();
   const { config, createOrImportVault, restoreAgVaultJson, showToast } = useWallet();
 
   const [view, setView] = useState<OnboardingView>("welcome");
+  const [dismissedCloudRestore, setDismissedCloudRestore] = useState(false);
+  const [enableCloudSync, setEnableCloudSync] = useState<boolean>(() =>
+    Boolean(sessionToken || inTelegram),
+  );
   const [wordStrength, setWordStrength] = useState<128 | 256>(128);
   const [ackMasterKey, setAckMasterKey] = useState(false);
   const [ackLocalOnly, setAckLocalOnly] = useState(false);
@@ -136,6 +163,19 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
     setError(null);
   }, []);
 
+  useEffect(() => {
+    if (view === "welcome" && !dismissedCloudRestore && cloudBackupJson) {
+      resetPinInputs();
+      setView("cloud_restore");
+    }
+  }, [view, dismissedCloudRestore, cloudBackupJson, resetPinInputs]);
+
+  useEffect(() => {
+    if ((sessionToken || inTelegram) && view === "welcome") {
+      setEnableCloudSync(true);
+    }
+  }, [sessionToken, inTelegram, view]);
+
   const handleStepBack = useCallback(() => {
     triggerTelegramHaptic("selection");
     setError(null);
@@ -169,6 +209,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
         resetPinInputs();
         setView("welcome");
         break;
+      case "cloud_restore":
       case "welcome":
         break;
     }
@@ -176,11 +217,14 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
   useEffect(() => {
     if (!onRegisterBackHandler) return undefined;
-    onRegisterBackHandler(view === "welcome" ? null : handleStepBack);
+    const hasBack = view !== "welcome" && view !== "cloud_restore";
+    onRegisterBackHandler(hasBack ? handleStepBack : null);
     return () => onRegisterBackHandler(null);
   }, [onRegisterBackHandler, view, handleStepBack]);
 
-  const pinStrength = evaluateSecretStrength(pin);
+  const pinStrength = enableCloudSync
+    ? evaluateCloudBackupSecretStrength(pin)
+    : evaluateSecretStrength(pin);
   const allAcknowledged = ackMasterKey && ackLocalOnly && ackNeverShare;
   const generatedWords = generatedMnemonic ? generatedMnemonic.split(" ") : [];
   const allQuizSolved =
@@ -230,14 +274,15 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
   const handleCopySeed = async () => {
     if (!generatedMnemonic || !phraseRevealed) return;
-    try {
-      await navigator.clipboard.writeText(generatedMnemonic);
+    const ok = await copyTextToClipboard(generatedMnemonic);
+    if (ok) {
       setCopiedSeed(true);
       triggerTelegramHaptic("selection");
       showToast("Recovery phrase copied — clear your clipboard once written down", "info");
       setTimeout(() => setCopiedSeed(false), 2200);
-    } catch {
-      // Clipboard blocked
+    } else {
+      triggerTelegramHaptic("error");
+      showToast("Clipboard copy blocked by WebView — write words down manually", "error");
     }
   };
 
@@ -275,6 +320,32 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
     }
   };
 
+  const handleCloudRestoreSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    if (!cloudBackupJson) {
+      setError("No synced Telegram encrypted backup found yet.");
+      return;
+    }
+    if (pin.length < 6) {
+      setError("Enter your Recovery Password.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await restoreAgVaultJson(cloudBackupJson, pin);
+      resetPinInputs();
+      triggerTelegramHaptic("success");
+    } catch (err) {
+      triggerTelegramHaptic("error");
+      setError(
+        err instanceof Error ? err.message : "Wrong Recovery Password for Telegram backup",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleCreateWalletSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -283,21 +354,29 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
       return;
     }
     if (!pinStrength.acceptable) {
-      setError(pinStrength.reasons[0] ?? "Choose a stronger PIN or passphrase.");
+      setError(pinStrength.reasons[0] ?? "Choose a stronger password or PIN.");
       return;
     }
     if (pin !== confirmPin) {
-      setError("PIN confirmation does not match.");
+      setError("Confirmation does not match.");
       return;
     }
 
     setBusy(true);
     try {
-      await createOrImportVault(
+      const { envelopeJson } = await createOrImportVault(
         generatedMnemonic,
         pin,
         accountLabel.trim() || "Primary",
       );
+      if (enableCloudSync) {
+        await uploadEncryptedBackup(envelopeJson).catch(() => {
+          showToast(
+            "Vault opened locally — Telegram encrypted sync can be retried in Vault tab",
+            "info",
+          );
+        });
+      }
       resetEntropyState();
       resetPinInputs();
       triggerTelegramHaptic("success");
@@ -317,21 +396,29 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
       return;
     }
     if (!pinStrength.acceptable) {
-      setError(pinStrength.reasons[0] ?? "Choose a stronger PIN or passphrase.");
+      setError(pinStrength.reasons[0] ?? "Choose a stronger password or PIN.");
       return;
     }
     if (pin !== confirmPin) {
-      setError("PIN confirmation does not match.");
+      setError("Confirmation does not match.");
       return;
     }
 
     setBusy(true);
     try {
-      await createOrImportVault(
+      const { envelopeJson } = await createOrImportVault(
         importMnemonic,
         pin,
         accountLabel.trim() || "Primary",
       );
+      if (enableCloudSync) {
+        await uploadEncryptedBackup(envelopeJson).catch(() => {
+          showToast(
+            "Vault imported locally — Telegram encrypted sync can be retried in Vault tab",
+            "info",
+          );
+        });
+      }
       setImportMnemonic("");
       resetPinInputs();
       triggerTelegramHaptic("success");
@@ -371,13 +458,146 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
   };
 
   const activeCreateStep = CREATE_STEP_META.find((item) => item.view === view)?.step ?? null;
+  const syncToggleAvailable = Boolean(sessionToken || inTelegram);
 
   return (
     <section
       className="glass-sheet glass-card--vault aw-onboarding-card"
       aria-label="AstroWallet onboarding"
     >
-      {view === "welcome" && (
+      {view === "cloud_restore" && cloudBackupJson && (
+        <form onSubmit={(e) => void handleCloudRestoreSubmit(e)} style={{ display: "grid", gap: 16 }}>
+          <div className="aw-welcome-hero">
+            <div className="aw-pixel-frame">
+              <AstroNavigatorAvatar
+                seedKey={tgUser?.id ?? "astrowallet-cloud-restore"}
+                kind="classic"
+                state="vault"
+                size={84}
+              />
+            </div>
+
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "center" }}>
+              <span className="glass-pill glass-pill--trust">
+                <IconTelegram size={12} />
+                <span>Telegram Zero-Knowledge Sync</span>
+              </span>
+              <span
+                className={
+                  config.network === "testnet"
+                    ? "glass-pill glass-pill--gold"
+                    : "glass-pill glass-pill--trust"
+                }
+              >
+                {config.network.toUpperCase()}
+              </span>
+            </div>
+
+            <div className="aw-welcome-copy">
+              <div className="aw-welcome-kicker">Welcome Back, {displayName}</div>
+              <h1 className="aw-welcome-title">Encrypted Vault Found on Your Telegram</h1>
+              <p className="aw-welcome-lead">
+                Enter your Recovery Password to decrypt your Stellar &amp; TON wallet locally on this
+                device. Keys are never decrypted on any server.
+              </p>
+              {backupUpdatedAt && (
+                <div style={{ fontSize: 11, color: "var(--aw-ink-muted)" }}>
+                  Last synced: {new Date(backupUpdatedAt * 1000).toLocaleString()}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div>
+            <label className="aw-label" htmlFor="cloud-restore-password">
+              Recovery Password
+            </label>
+            <div className="aw-input-row">
+              <input
+                id="cloud-restore-password"
+                type={showPin ? "text" : "password"}
+                className="aw-input"
+                autoComplete="current-password"
+                placeholder="Enter your Recovery Password"
+                value={pin}
+                onChange={(e) => setPin(e.target.value)}
+              />
+              <button
+                type="button"
+                className="aw-chip-btn"
+                onClick={() => setShowPin((v) => !v)}
+              >
+                {showPin ? "Hide" : "Show"}
+              </button>
+            </div>
+          </div>
+
+          {error && (
+            <div className="aw-banner aw-banner--danger" role="alert">
+              {error}
+            </div>
+          )}
+
+          <button type="submit" className="aw-btn-primary aw-cta-lg" disabled={busy || pin.length < 6}>
+            <IconLock size={16} />
+            <span>{busy ? "Decrypting Vault..." : "Decrypt & Open Wallet"}</span>
+          </button>
+
+          <div style={{ display: "grid", gap: 8 }}>
+            <button
+              type="button"
+              className="aw-btn-secondary"
+              disabled={busy}
+              onClick={() => {
+                triggerTelegramHaptic("selection");
+                setDismissedCloudRestore(true);
+                resetPinInputs();
+                setView("import_seed");
+              }}
+            >
+              <IconKey size={15} />
+              <span>Restore with 12/24-Word Phrase</span>
+            </button>
+            <button
+              type="button"
+              className="aw-chip-btn"
+              disabled={busy}
+              onClick={() => {
+                triggerTelegramHaptic("selection");
+                setDismissedCloudRestore(true);
+                resetPinInputs();
+                setView("welcome");
+              }}
+            >
+              Set Up a Different Wallet
+            </button>
+          </div>
+        </form>
+      )}
+
+      {view === "welcome" && !dismissedCloudRestore && checkingCloudBackup && hasEncryptedBackup && (
+        <div className="aw-welcome-hero" style={{ padding: "12px 0" }}>
+          <div className="aw-pixel-frame">
+            <AstroNavigatorAvatar
+              seedKey={tgUser?.id ?? "astrowallet-syncing"}
+              kind="classic"
+              state="warp"
+              size={84}
+            />
+          </div>
+          <div className="aw-welcome-copy">
+            <div className="aw-welcome-kicker">Welcome Back, {displayName}</div>
+            <h1 className="aw-welcome-title">Syncing Your Encrypted Telegram Vault...</h1>
+            <p className="aw-welcome-lead">
+              Fetching your Argon2id encrypted backup envelope from Telegram before showing setup
+              options.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {view === "welcome" &&
+        !(checkingCloudBackup && hasEncryptedBackup && !dismissedCloudRestore) && (
         <div className="aw-welcome-hero">
           <div className="aw-pixel-frame">
             <AstroNavigatorAvatar
@@ -402,24 +622,70 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
             </span>
           </div>
 
+          {checkingCloudBackup && !hasEncryptedBackup && (
+            <div className="glass-pill">Checking Telegram encrypted backup...</div>
+          )}
+
+          {hasEncryptedBackup && !cloudBackupJson && cloudBackupError && (
+            <div className="aw-banner aw-banner--warn" style={{ display: "grid", gap: 8, width: "100%", textAlign: "left" }}>
+              <div>
+                <strong>Existing Telegram Encrypted Backup Detected</strong>
+                <div style={{ fontSize: 12, marginTop: 2 }}>{cloudBackupError}</div>
+              </div>
+              <button
+                type="button"
+                className="aw-btn-secondary"
+                onClick={() => {
+                  setDismissedCloudRestore(false);
+                  void refreshCloudBackup();
+                }}
+              >
+                <IconRefresh size={14} />
+                <span>Retry Loading Telegram Backup</span>
+              </button>
+            </div>
+          )}
+
+          {dismissedCloudRestore && hasEncryptedBackup && (
+            <button
+              type="button"
+              className="aw-btn-gold"
+              style={{ width: "100%" }}
+              onClick={() => {
+                triggerTelegramHaptic("selection");
+                setDismissedCloudRestore(false);
+                resetPinInputs();
+                if (cloudBackupJson) {
+                  setView("cloud_restore");
+                } else {
+                  void refreshCloudBackup();
+                }
+              }}
+            >
+              <IconLock size={15} />
+              <span>Restore Your Existing Telegram Backup</span>
+            </button>
+          )}
+
           <div className="aw-welcome-copy">
             <div className="aw-welcome-kicker">Welcome, {displayName}</div>
             <h1 className="aw-welcome-title">Your Self-Custodial Stellar &amp; TON Wallet</h1>
             <p className="aw-welcome-lead">
-              Generate fresh keys right on your phone, manage Stellar &amp; TON from one
-              phrase, and inspect transactions before you sign.
+              Generate fresh keys right on your phone, sync an encrypted Zero-Knowledge backup to your
+              Telegram identity, and inspect transactions before signing.
             </p>
           </div>
 
           <div className="aw-welcome-features" aria-label="Wallet guarantees">
             <div className="aw-welcome-feature">
               <span className="aw-welcome-feature-icon aw-welcome-feature-icon--emerald">
-                <IconLock size={16} />
+                <IconTelegram size={16} />
               </span>
               <div>
-                <div className="aw-welcome-feature-title">100% Device-Encrypted Custody</div>
+                <div className="aw-welcome-feature-title">Telegram-Linked Zero-Knowledge Recovery</div>
                 <div className="aw-welcome-feature-sub">
-                  Argon2id + AES-GCM-256 in local IndexedDB — never sent to Telegram or servers.
+                  Only an Argon2id + AES-GCM-256 encrypted vault blob syncs to your Telegram ID — you
+                  hold the Recovery Password &amp; seed.
                 </div>
               </div>
             </div>
@@ -431,7 +697,8 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
               <div>
                 <div className="aw-welcome-feature-title">Multichain Stellar + TON</div>
                 <div className="aw-welcome-feature-sub">
-                  SEP-0005 Stellar Classic &amp; Soroban accounts paired with native TON &amp; TON Connect v2.
+                  SEP-0005 Stellar Classic &amp; Soroban accounts paired with native TON &amp; TON
+                  Connect v2.
                 </div>
               </div>
             </div>
@@ -533,7 +800,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
               />
               <span>
                 <strong>Sole master key:</strong> These recovery words unlock both my Stellar and
-                TON accounts. Nobody at AstroWallet or Telegram can recover them for me.
+                TON accounts. Nobody at AstroWallet or Telegram can see plaintext seeds.
               </span>
             </label>
 
@@ -547,9 +814,9 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
                 }}
               />
               <span>
-                <strong>Device-only encryption:</strong> Clearing Telegram&apos;s app cache wipes
-                local storage, so an offline written backup or <code>.agvault.json</code> is
-                essential.
+                <strong>Zero-Knowledge Telegram recovery:</strong> Enable Telegram Encrypted Sync in
+                Step 4 with a strong Recovery Password so clearing cache or changing phones never
+                loses access, while keeping your written phrase as ultimate backup.
               </span>
             </label>
 
@@ -563,8 +830,8 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
                 }}
               />
               <span>
-                <strong>Offline storage:</strong> I will write down my words on paper in private and
-                avoid screenshots or cloud notes.
+                <strong>Offline backup:</strong> I will write down my words on paper in private and
+                never share them or take screenshots.
               </span>
             </label>
           </div>
@@ -766,7 +1033,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
                 setView("create_pin");
               }}
             >
-              <span>Continue to PIN Setup →</span>
+              <span>Continue to Protection Setup →</span>
             </button>
             <button
               type="button"
@@ -792,12 +1059,38 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
           </div>
 
           <div>
-            <h2 className="aw-step-title">Protect Your Local Vault</h2>
+            <h2 className="aw-step-title">Protect &amp; Sync Your Wallet</h2>
             <p className="aw-step-sub">
-              Set a local PIN or passphrase to encrypt your seed with Argon2id + AES-GCM-256. You
-              can enable Fingerprint quick-unlock later in Vault settings.
+              Your wallet is encrypted locally with Argon2id + AES-GCM-256. Keep Telegram Encrypted
+              Sync on so you never lose access on cache clears or a new phone.
             </p>
           </div>
+
+          {syncToggleAvailable && (
+            <label className={`aw-primer-check ${enableCloudSync ? "is-checked" : ""}`}>
+              <input
+                type="checkbox"
+                checked={enableCloudSync}
+                onChange={(e) => {
+                  setEnableCloudSync(e.target.checked);
+                  setError(null);
+                }}
+              />
+              <span>
+                <strong>Sync Encrypted Backup with Telegram (Recommended)</strong>
+                <br />
+                Uploads only the ciphertext envelope under your Telegram ID (requires a strong
+                Recovery Password ≥10 chars). Uncheck for device-only 6-digit PIN.
+              </span>
+            </label>
+          )}
+
+          {enableCloudSync && hasEncryptedBackup && (
+            <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+              Your Telegram ID already has an encrypted backup. Continuing with sync enabled will
+              replace that cloud copy.
+            </div>
+          )}
 
           <div>
             <label className="aw-label" htmlFor="account-label-input">
@@ -816,7 +1109,9 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
           <div className="aw-two-col-inputs">
             <div>
               <label className="aw-label" htmlFor="vault-pin-input">
-                Vault PIN / Passphrase (min 6 chars)
+                {enableCloudSync
+                  ? "Recovery Password (min 10 chars)"
+                  : "Vault PIN / Passphrase (min 6 chars)"}
               </label>
               <div className="aw-input-row">
                 <input
@@ -824,7 +1119,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
                   type={showPin ? "text" : "password"}
                   className="aw-input"
                   autoComplete="new-password"
-                  placeholder="Enter PIN or passphrase"
+                  placeholder={enableCloudSync ? "e.g. OrbitSky#2026" : "Enter PIN or passphrase"}
                   value={pin}
                   onChange={(e) => setPin(e.target.value)}
                 />
@@ -840,25 +1135,25 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
             <div>
               <label className="aw-label" htmlFor="vault-pin-confirm">
-                Confirm PIN / Passphrase
+                {enableCloudSync ? "Confirm Recovery Password" : "Confirm PIN / Passphrase"}
               </label>
               <input
                 id="vault-pin-confirm"
                 type={showPin ? "text" : "password"}
                 className="aw-input"
                 autoComplete="new-password"
-                placeholder="Re-enter PIN or passphrase"
+                placeholder="Re-enter password"
                 value={confirmPin}
                 onChange={(e) => setConfirmPin(e.target.value)}
               />
             </div>
           </div>
 
-          <StrengthMeter secret={pin} />
+          <StrengthMeter secret={pin} cloudSync={enableCloudSync} />
 
           {confirmPin.length > 0 && pin !== confirmPin && (
             <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
-              PIN confirmation does not match yet.
+              Confirmation does not match yet.
             </div>
           )}
 
@@ -874,7 +1169,13 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
             disabled={busy || !pinStrength.acceptable || pin !== confirmPin}
           >
             <IconLock size={16} />
-            <span>{busy ? "Encrypting Vault..." : "Encrypt & Open Wallet"}</span>
+            <span>
+              {busy
+                ? "Encrypting & Syncing Vault..."
+                : enableCloudSync
+                  ? "Encrypt, Sync & Open Wallet"
+                  : "Encrypt & Open Wallet"}
+            </span>
           </button>
         </form>
       )}
@@ -893,8 +1194,8 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
           <div>
             <h2 className="aw-step-title">Choose Restore Method</h2>
             <p className="aw-step-sub">
-              Import a standard Stellar/BIP-39 phrase or decrypt an exported <code>.agvault.json</code>{" "}
-              file.
+              Import a standard Stellar/BIP-39 phrase or decrypt an exported{" "}
+              <code>.agvault.json</code> file.
             </p>
           </div>
 
@@ -957,9 +1258,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
               <label className="aw-label" htmlFor="import-seed-input" style={{ marginBottom: 0 }}>
                 12 or 24-Word SEP-0005 Recovery Phrase
               </label>
-              <span
-                className={`glass-pill ${importSeedValid ? "glass-pill--trust" : ""}`}
-              >
+              <span className={`glass-pill ${importSeedValid ? "glass-pill--trust" : ""}`}>
                 {importSeedValid
                   ? `✓ Valid ${importWordCount}-word phrase`
                   : `${importWordCount} word${importWordCount === 1 ? "" : "s"}`}
@@ -978,6 +1277,31 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
             />
           </div>
 
+          {syncToggleAvailable && (
+            <label className={`aw-primer-check ${enableCloudSync ? "is-checked" : ""}`}>
+              <input
+                type="checkbox"
+                checked={enableCloudSync}
+                onChange={(e) => {
+                  setEnableCloudSync(e.target.checked);
+                  setError(null);
+                }}
+              />
+              <span>
+                <strong>Sync Encrypted Backup with Telegram (Recommended)</strong>
+                <br />
+                Requires a ≥10 char Recovery Password. Uncheck for device-only 6-digit PIN.
+              </span>
+            </label>
+          )}
+
+          {enableCloudSync && hasEncryptedBackup && (
+            <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+              Your Telegram ID already has an encrypted backup. Continuing with sync enabled will
+              replace that cloud copy.
+            </div>
+          )}
+
           <div>
             <label className="aw-label" htmlFor="import-account-label-input">
               Account Label
@@ -995,7 +1319,9 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
           <div className="aw-two-col-inputs">
             <div>
               <label className="aw-label" htmlFor="import-pin-input">
-                Create Local PIN / Passphrase
+                {enableCloudSync
+                  ? "Create Recovery Password (min 10 chars)"
+                  : "Create Local PIN / Passphrase"}
               </label>
               <div className="aw-input-row">
                 <input
@@ -1003,7 +1329,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
                   type={showPin ? "text" : "password"}
                   className="aw-input"
                   autoComplete="new-password"
-                  placeholder="Min 6 characters"
+                  placeholder={enableCloudSync ? "Min 10 characters" : "Min 6 characters"}
                   value={pin}
                   onChange={(e) => setPin(e.target.value)}
                 />
@@ -1018,21 +1344,27 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
             </div>
             <div>
               <label className="aw-label" htmlFor="import-pin-confirm">
-                Confirm PIN / Passphrase
+                Confirm Password / PIN
               </label>
               <input
                 id="import-pin-confirm"
                 type={showPin ? "text" : "password"}
                 className="aw-input"
                 autoComplete="new-password"
-                placeholder="Re-enter PIN"
+                placeholder="Re-enter password"
                 value={confirmPin}
                 onChange={(e) => setConfirmPin(e.target.value)}
               />
             </div>
           </div>
 
-          <StrengthMeter secret={pin} />
+          <StrengthMeter secret={pin} cloudSync={enableCloudSync} />
+
+          {confirmPin.length > 0 && pin !== confirmPin && (
+            <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+              Confirmation does not match yet.
+            </div>
+          )}
 
           {error && (
             <div className="aw-banner aw-banner--danger" role="alert">
@@ -1085,7 +1417,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
           <div>
             <label className="aw-label" htmlFor="restore-pin-input">
-              Backup PIN / Passphrase
+              Backup PIN / Recovery Password
             </label>
             <div className="aw-input-row">
               <input
@@ -1093,7 +1425,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
                 type={showPin ? "text" : "password"}
                 className="aw-input"
                 autoComplete="current-password"
-                placeholder="Enter backup PIN"
+                placeholder="Enter backup PIN or Recovery Password"
                 value={pin}
                 onChange={(e) => setPin(e.target.value)}
               />
@@ -1113,7 +1445,11 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
             </div>
           )}
 
-          <button type="submit" className="aw-btn-primary aw-cta-lg" disabled={busy}>
+          <button
+            type="submit"
+            className="aw-btn-primary aw-cta-lg"
+            disabled={busy || !agVaultJson.trim() || pin.length < 6}
+          >
             <IconShield size={16} />
             <span>{busy ? "Decrypting Backup..." : "Decrypt & Restore Vault"}</span>
           </button>

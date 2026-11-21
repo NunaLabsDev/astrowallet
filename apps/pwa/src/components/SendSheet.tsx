@@ -11,8 +11,12 @@ import {
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { mapSep7MemoKind } from "../state/session-vault.js";
-import { triggerTelegramHaptic } from "../telegram/webapp.js";
+import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import {
+  validateStellarMemoInput,
+  validateTransferAmount,
+} from "./flow-validators.js";
 import {
   IconCheck,
   IconClose,
@@ -51,6 +55,7 @@ export interface SendSheetProps {
   initialAssetCode?: string | undefined;
   initialAssetIssuer?: string | undefined;
   initialDestination?: string | undefined;
+  initialMemo?: string | undefined;
   initialAmount?: string | undefined;
 }
 
@@ -70,6 +75,7 @@ export function SendSheet({
   initialAssetCode,
   initialAssetIssuer,
   initialDestination,
+  initialMemo,
   initialAmount,
 }: SendSheetProps) {
   const {
@@ -79,6 +85,7 @@ export function SendSheet({
     contacts,
     sendPayment,
     saveContact,
+    showToast,
     config,
   } = useWallet();
 
@@ -94,7 +101,7 @@ export function SendSheet({
   const [destination, setDestination] = useState(initialDestination ?? "");
   const [amount, setAmount] = useState(initialAmount ?? "");
   const [memoKind, setMemoKind] = useState<MemoKind>("text");
-  const [memoValue, setMemoValue] = useState("");
+  const [memoValue, setMemoValue] = useState(initialMemo ?? "");
   const [saveAsContact, setSaveAsContact] = useState(false);
   const [contactLabel, setContactLabel] = useState("");
 
@@ -325,8 +332,22 @@ export function SendSheet({
       return;
     }
 
-    if (!/^\d+(\.\d{1,7})?$/.test(amount.trim()) || Number(amount) <= 0) {
-      setError("Enter a valid positive amount (up to 7 decimals).");
+    const amountError = validateTransferAmount(
+      amount,
+      accountState ? maxSpendableNumber : Number.POSITIVE_INFINITY,
+      {
+        assetCode: selectedBalance.assetCode,
+        funded: accountState?.funded,
+      },
+    );
+    if (amountError) {
+      setError(amountError);
+      return;
+    }
+
+    const memoError = validateStellarMemoInput(memoKind, memoValue);
+    if (memoError) {
+      setError(memoError);
       return;
     }
 
@@ -403,12 +424,12 @@ export function SendSheet({
 
   const handleCopyHash = async () => {
     if (!confirmedTxHash) return;
-    try {
-      await navigator.clipboard.writeText(confirmedTxHash);
+    const ok = await copyTextToClipboard(confirmedTxHash);
+    if (ok) {
       setCopiedHash(true);
       setTimeout(() => setCopiedHash(false), 1800);
-    } catch {
-      // Clipboard unavailable
+    } else {
+      showToast("Clipboard copy blocked by WebView", "error");
     }
   };
 
@@ -562,6 +583,13 @@ export function SendSheet({
         </div>
       ) : (
         <form onSubmit={handleSubmit} style={{ display: "grid", gap: 12 }}>
+          {accountState && !accountState.funded && (
+            <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+              This account is not activated on the {config.network.toUpperCase()} ledger yet (needs
+              at least 1 XLM) before sending payments.
+            </div>
+          )}
+
           {/* Contacts & Own Accounts Quick Pickers */}
           {(contacts.length > 0 || otherOwnAccounts.length > 0) && (
             <div style={{ display: "grid", gap: 6 }}>
@@ -633,6 +661,12 @@ export function SendSheet({
               value={destination}
               onChange={(e) => applyIncomingUriOrAddress(e.target.value)}
             />
+
+            {destination.trim() === activeAccount.address && (
+              <div className="aw-banner" style={{ marginTop: 6, padding: "8px 12px", fontSize: 12 }}>
+                Self-transfer: destination matches your currently active account.
+              </div>
+            )}
 
             {destination.includes("*") && (
               <button

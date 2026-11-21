@@ -4,9 +4,15 @@ const DB_NAME = "astrowallet_vault_v1";
 const DB_VERSION = 1;
 const STORE_NAME = "vault";
 const PRIMARY_VAULT_KEY = "primary_vault";
+const LEGACY_VAULT_CLAIMED_BY_KEY = "legacy_vault_claimed_by";
 const BIOMETRIC_WRAP_KEY = "biometric_wrap";
 const CONTACTS_KEY = "contacts_v1";
 const PIN_LOCKOUT_KEY = "pin_lockout_v1";
+
+function scopedKey(base: string, scopeId?: string): string {
+  const clean = scopeId?.trim();
+  return clean ? `${base}:${clean}` : base;
+}
 
 const MAX_PIN_ATTEMPTS_BEFORE_LOCK = 5;
 const BASE_PIN_LOCKOUT_MS = 30_000;
@@ -106,48 +112,76 @@ async function idbDelete(key: string): Promise<void> {
   }
 }
 
-export async function saveEncryptedVault(envelope: EncryptedVaultEnvelope): Promise<void> {
-  await idbPut(PRIMARY_VAULT_KEY, envelope);
+export async function saveEncryptedVault(
+  envelope: EncryptedVaultEnvelope,
+  scopeId?: string,
+): Promise<void> {
+  await idbPut(scopedKey(PRIMARY_VAULT_KEY, scopeId), envelope);
 }
 
-export async function loadEncryptedVault(): Promise<EncryptedVaultEnvelope | null> {
-  return idbGet<EncryptedVaultEnvelope>(PRIMARY_VAULT_KEY);
+export async function loadEncryptedVault(
+  scopeId?: string,
+): Promise<EncryptedVaultEnvelope | null> {
+  const key = scopedKey(PRIMARY_VAULT_KEY, scopeId);
+  const existing = await idbGet<EncryptedVaultEnvelope>(key);
+  if (existing || !scopeId?.trim()) {
+    return existing;
+  }
+  // One-time safe migration for single-user vaults created before Telegram ID scoping
+  const legacy = await idbGet<EncryptedVaultEnvelope>(PRIMARY_VAULT_KEY);
+  const claimedBy = await idbGet<string>(LEGACY_VAULT_CLAIMED_BY_KEY);
+  if (legacy && (!claimedBy || claimedBy === scopeId.trim())) {
+    await idbPut(key, legacy);
+    await idbPut(LEGACY_VAULT_CLAIMED_BY_KEY, scopeId.trim());
+    return legacy;
+  }
+  return null;
 }
 
-export async function hasEncryptedVault(): Promise<boolean> {
-  const vault = await loadEncryptedVault();
+export async function hasEncryptedVault(scopeId?: string): Promise<boolean> {
+  const vault = await loadEncryptedVault(scopeId);
   return vault !== null;
 }
 
-export async function deleteEncryptedVault(): Promise<void> {
-  await idbDelete(PRIMARY_VAULT_KEY);
-  await idbDelete(BIOMETRIC_WRAP_KEY);
+export async function deleteEncryptedVault(scopeId?: string): Promise<void> {
+  await idbDelete(scopedKey(PRIMARY_VAULT_KEY, scopeId));
+  await idbDelete(scopedKey(BIOMETRIC_WRAP_KEY, scopeId));
+  await idbDelete(scopedKey(PIN_LOCKOUT_KEY, scopeId));
+  if (!scopeId?.trim()) {
+    await idbDelete(LEGACY_VAULT_CLAIMED_BY_KEY);
+  }
 }
 
-export async function saveBiometricRecord(record: BiometricWrapRecord): Promise<void> {
-  await idbPut(BIOMETRIC_WRAP_KEY, record);
+export async function saveBiometricRecord(
+  record: BiometricWrapRecord,
+  scopeId?: string,
+): Promise<void> {
+  await idbPut(scopedKey(BIOMETRIC_WRAP_KEY, scopeId), record);
 }
 
-export async function loadBiometricRecord(): Promise<BiometricWrapRecord | null> {
-  return idbGet<BiometricWrapRecord>(BIOMETRIC_WRAP_KEY);
+export async function loadBiometricRecord(scopeId?: string): Promise<BiometricWrapRecord | null> {
+  return idbGet<BiometricWrapRecord>(scopedKey(BIOMETRIC_WRAP_KEY, scopeId));
 }
 
-export async function clearBiometricRecord(): Promise<void> {
-  await idbDelete(BIOMETRIC_WRAP_KEY);
+export async function clearBiometricRecord(scopeId?: string): Promise<void> {
+  await idbDelete(scopedKey(BIOMETRIC_WRAP_KEY, scopeId));
 }
 
-export async function loadContacts(): Promise<ContactEntry[]> {
-  const list = await idbGet<ContactEntry[]>(CONTACTS_KEY);
+export async function loadContacts(scopeId?: string): Promise<ContactEntry[]> {
+  const list = await idbGet<ContactEntry[]>(scopedKey(CONTACTS_KEY, scopeId));
   return Array.isArray(list) ? list : [];
 }
 
-export async function saveContacts(contacts: readonly ContactEntry[]): Promise<void> {
-  await idbPut(CONTACTS_KEY, [...contacts]);
+export async function saveContacts(
+  contacts: readonly ContactEntry[],
+  scopeId?: string,
+): Promise<void> {
+  await idbPut(scopedKey(CONTACTS_KEY, scopeId), [...contacts]);
 }
 
-export async function getPinLockoutState(): Promise<PinLockoutState> {
+export async function getPinLockoutState(scopeId?: string): Promise<PinLockoutState> {
   try {
-    const state = await idbGet<PinLockoutState>(PIN_LOCKOUT_KEY);
+    const state = await idbGet<PinLockoutState>(scopedKey(PIN_LOCKOUT_KEY, scopeId));
     if (
       state &&
       typeof state.failedAttempts === "number" &&
@@ -163,8 +197,11 @@ export async function getPinLockoutState(): Promise<PinLockoutState> {
   return { failedAttempts: 0, lockedUntilMs: 0 };
 }
 
-export async function recordFailedPinAttempt(nowMs: number = Date.now()): Promise<PinLockoutState> {
-  const prev = await getPinLockoutState();
+export async function recordFailedPinAttempt(
+  nowMs: number = Date.now(),
+  scopeId?: string,
+): Promise<PinLockoutState> {
+  const prev = await getPinLockoutState(scopeId);
   const failedAttempts = prev.failedAttempts + 1;
   let lockedUntilMs = prev.lockedUntilMs;
   if (failedAttempts >= MAX_PIN_ATTEMPTS_BEFORE_LOCK) {
@@ -174,16 +211,16 @@ export async function recordFailedPinAttempt(nowMs: number = Date.now()): Promis
   }
   const next: PinLockoutState = { failedAttempts, lockedUntilMs };
   try {
-    await idbPut(PIN_LOCKOUT_KEY, next);
+    await idbPut(scopedKey(PIN_LOCKOUT_KEY, scopeId), next);
   } catch {
     // Ignore IDB errors in restricted contexts while returning computed state
   }
   return next;
 }
 
-export async function clearPinLockoutState(): Promise<void> {
+export async function clearPinLockoutState(scopeId?: string): Promise<void> {
   try {
-    await idbDelete(PIN_LOCKOUT_KEY);
+    await idbDelete(scopedKey(PIN_LOCKOUT_KEY, scopeId));
   } catch {
     // Ignore when IDB is unavailable
   }

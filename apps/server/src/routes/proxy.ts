@@ -208,17 +208,38 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       }
     }
 
-    let res: Response;
+    let res: Response | null = null;
+    let currentUrl = `https://${domain}/.well-known/stellar.toml`;
     try {
-      res = await fetchFn(`https://${domain}/.well-known/stellar.toml`, {
-        headers: { Accept: "text/plain" },
-        redirect: "error",
-        signal: AbortSignal.timeout(5000),
-      });
+      for (let hop = 0; hop < 3; hop += 1) {
+        const candidate = await fetchFn(currentUrl, {
+          headers: {
+            Accept: "text/plain, */*",
+            "User-Agent": "AstroWallet-SEP1-Scanner/1.0",
+          },
+          redirect: "manual",
+          signal: AbortSignal.timeout(5000),
+        });
+        if (candidate.status >= 300 && candidate.status < 400) {
+          const location = candidate.headers.get("Location");
+          if (!location) break;
+          const nextUrl = new URL(location, currentUrl);
+          if (
+            nextUrl.protocol !== "https:" ||
+            !isSafePublicDomain(nextUrl.hostname.toLowerCase())
+          ) {
+            return c.json({ error: "Unsafe stellar.toml redirect blocked" }, 502);
+          }
+          currentUrl = nextUrl.toString();
+          continue;
+        }
+        res = candidate;
+        break;
+      }
     } catch {
       return c.json({ error: `Unable to fetch stellar.toml from ${domain}` }, 502);
     }
-    if (!res.ok) {
+    if (!res || !res.ok) {
       return c.json({ error: `Unable to fetch stellar.toml from ${domain}` }, 502);
     }
 

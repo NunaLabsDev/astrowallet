@@ -1170,7 +1170,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(limitedRes.status).toBe(429);
   });
 
-  it("blocks SSRF private/local domains on /v1/proxy/stellar-toml", async () => {
+  it("blocks SSRF private/local domains and unsafe redirects on /v1/proxy/stellar-toml while following safe HTTPS redirects", async () => {
     const app = createApp();
     for (const domain of ["localhost", "127.0.0.1", "169.254.169.254", "internal.local"]) {
       const res = await app.request(
@@ -1180,6 +1180,43 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       );
       expect(res.status).toBe(400);
     }
+
+    const redirectApp = createApp({
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url === "https://redirect.example/.well-known/stellar.toml") {
+          return new Response(null, {
+            status: 301,
+            headers: { Location: "https://www.circle.com/.well-known/stellar.toml" },
+          });
+        }
+        if (url === "https://www.circle.com/.well-known/stellar.toml") {
+          return new Response('VERSION="2.0.0"\n', { status: 200 });
+        }
+        if (url === "https://evil-redir.example/.well-known/stellar.toml") {
+          return new Response(null, {
+            status: 302,
+            headers: { Location: "http://127.0.0.1/.well-known/stellar.toml" },
+          });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    const okRedirect = await redirectApp.request(
+      "/v1/proxy/stellar-toml?domain=redirect.example",
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(okRedirect.status).toBe(200);
+    expect(await okRedirect.text()).toContain('VERSION="2.0.0"');
+
+    const unsafeRedirect = await redirectApp.request(
+      "/v1/proxy/stellar-toml?domain=evil-redir.example",
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(unsafeRedirect.status).toBe(502);
   });
 
   it("enforces anti-replay txHash checks and Horizon op-level intent matching", async () => {

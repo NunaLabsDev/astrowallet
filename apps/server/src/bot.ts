@@ -245,12 +245,28 @@ export function createTelegramBot(
     );
   });
 
+  function isExplicitBotMentionInGroup(ctx: {
+    chat?: { type?: string } | undefined;
+    message?: { text?: string | undefined } | undefined;
+    me?: { username?: string | undefined } | undefined;
+  }): boolean {
+    if (ctx.chat?.type === "private") return true;
+    const raw = (ctx.message?.text ?? "").toLowerCase();
+    const botUsername = (ctx.me?.username ?? config.tgBotUsername ?? "AstroWalletAppBot").toLowerCase();
+    return raw.includes(`@${botUsername}`);
+  }
+
   async function requirePrivateChat(ctx: {
     chat?: { type?: string } | undefined;
+    message?: { text?: string | undefined } | undefined;
+    me?: { username?: string | undefined } | undefined;
     reply: (text: string) => Promise<unknown>;
   }): Promise<boolean> {
     if (ctx.chat?.type !== "private") {
-      await ctx.reply("Please run this command in a private DM with the bot for security.");
+      if (isExplicitBotMentionInGroup(ctx)) {
+        const botHandle = ctx.me?.username ?? config.tgBotUsername ?? "AstroWalletAppBot";
+        await ctx.reply(`Please run this command in a private DM with @${botHandle} for security.`);
+      }
       return false;
     }
     return true;
@@ -342,38 +358,50 @@ export function createTelegramBot(
   bot.command("start", async (ctx) => {
     const keyboard = appendMiniAppButton(
       new InlineKeyboard(),
-      "Open AstroWallet Mini App",
+      "🛡️ Open AstroWallet Mini App",
       {
         isPrivateChat: ctx.chat?.type === "private",
         config,
         botUsername: ctx.me?.username,
       },
-    );
+    )
+      .row()
+      .url("⚡ Open AstroDex", "https://t.me/AstroDexBot/dex")
+      .url("🚀 Open AstroGate", "https://t.me/AstroGateSorobanBot/app")
+      .row()
+      .url("💬 @AstroSoroban", "https://t.me/AstroSoroban")
+      .url("📡 @AstroGateFeed", "https://t.me/AstroGateFeed");
 
-    await ctx.reply(
-      [
-        `<b>AstroWallet [${networkBadge}] — Telegram Multichain Wallet</b>`,
-        "Non-custodial Stellar (G.../C...) &amp; TON wallet running exclusively inside Telegram.",
-        "",
-        "• Tap the button below to launch your encrypted Mini App vault (auto-links your public addresses &amp; offers Zero-Knowledge encrypted recovery)",
-        "• /connect — Manually link or re-verify your SEP-0005 accounts",
-        "• /unlink — Unlink connected accounts from Telegram",
-        "• /accounts — Switch default receiving account",
-        "• /balance — Live balances across linked accounts",
-        "• /pay &lt;amount&gt; &lt;asset&gt; &lt;@user|address&gt; [memo]",
-        "• /request &lt;amount&gt; &lt;asset&gt; [note]",
-        "• /split &lt;amount&gt; &lt;asset&gt; &lt;count&gt;",
-        "• /scan &lt;address|xdr&gt; — Pre-sign Scan &amp; Shield analyzer",
-        "• /swap &lt;amount&gt; &lt;from&gt; &lt;to&gt; — Soroswap / Path quote",
-        "• /reserve — Classic XLM reserve &amp; LumenWipe reclaimer",
-        "• /alerts [on|off] — Toggle real-time payment alerts",
-        "• /help — Full command guide",
-      ].join("\n"),
-      { parse_mode: "HTML", reply_markup: keyboard },
-    );
+    const caption = [
+      `<b>AstroWallet [${networkBadge}] — Telegram Multichain Wallet</b>`,
+      "Non-custodial Stellar (G.../C...) &amp; TON wallet running inside Telegram.",
+      "",
+      "• /connect — Link or verify your SEP-0005 accounts",
+      "• /accounts · /unlink — Switch default or unlink accounts",
+      "• /balance — Live balances across linked accounts",
+      "• /pay &lt;amount&gt; &lt;asset&gt; &lt;@user|address&gt; [memo]",
+      "• /request &lt;amount&gt; &lt;asset&gt; [note]",
+      "• /split &lt;amount&gt; &lt;asset&gt; &lt;count&gt;",
+      "• /scan &lt;address|xdr&gt; — Pre-sign Scan &amp; Shield analyzer",
+      "• /swap &lt;amount&gt; &lt;from&gt; &lt;to&gt; — Soroswap / Path quote",
+      "• /reserve — Classic XLM reserve &amp; LumenWipe reclaimer",
+      "• /alerts [on|off] · /help — Alerts &amp; command guide",
+    ].join("\n");
+
+    const bannerUrl = `${config.pwaOrigin.replace(/\/+$/, "")}/telegram/astrowallet-bot-banner.png`;
+    try {
+      await ctx.replyWithPhoto(bannerUrl, {
+        caption,
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+    } catch {
+      await ctx.reply(caption, { parse_mode: "HTML", reply_markup: keyboard });
+    }
   });
 
   bot.command("help", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     const botHandle = ctx.me?.username ? `@${ctx.me.username}` : "the bot";
     await ctx.reply(
       [
@@ -831,6 +859,7 @@ export function createTelegramBot(
   });
 
   bot.command("alerts", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     if (!ctx.from) return;
     const tgId = String(ctx.from.id);
     await repo.upsertTelegramUser({
@@ -931,6 +960,7 @@ export function createTelegramBot(
   });
 
   bot.command("scan", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     const target = (ctx.match ?? "").trim();
     if (!target) {
       await ctx.reply(
@@ -978,6 +1008,7 @@ export function createTelegramBot(
   });
 
   bot.command("swap", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     if (!ctx.from) return;
     const tgId = String(ctx.from.id);
     const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);

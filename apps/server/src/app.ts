@@ -18,10 +18,16 @@ import { createRelayRoutes } from "./routes/relay.js";
 import { createTgAuthRoutes } from "./routes/tg-auth.js";
 import type { FetchLike } from "./stellar-verifier.js";
 
+export interface ServiceFetcher {
+  fetch: (request: Request | string, init?: RequestInit) => Promise<Response>;
+}
+
 export interface WorkerBindings {
   DB?: D1Database;
   CACHE?: KVNamespace;
   CHAIN_WATCHER?: DurableObjectNamespace;
+  ASTRODEX?: ServiceFetcher;
+  ASTROGATE?: ServiceFetcher;
   [key: string]: unknown;
 }
 

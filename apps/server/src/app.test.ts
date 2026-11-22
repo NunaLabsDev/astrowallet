@@ -237,6 +237,20 @@ function createMemoryRepo(): ServerRepository {
       }
       return false;
     },
+    async getUserByLinkedAddress(address) {
+      for (const [tgId, list] of bindings.entries()) {
+        const hit = list.find((item) => item.address === address);
+        if (hit) {
+          const user = users.get(tgId);
+          return {
+            telegramUserId: tgId,
+            usernameLower: user?.usernameLower,
+            label: hit.label,
+          };
+        }
+      }
+      return null;
+    },
     async listWatchedAccounts() {
       const out = [];
       for (const [tgId, list] of bindings.entries()) {
@@ -2632,5 +2646,119 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(confirmRes.status).toBe(200);
     expect(((await confirmRes.json()) as { status: string }).status).toBe("confirmed");
+  });
+
+  it("dispatches Boomerang callback to ASTRODEX binding and resolves AstroID via O(1) linked address lookup", async () => {
+    const repo = createMemoryRepo();
+    const callbacks: Array<{ url: string; secret: string | null; body: unknown }> = [];
+    const envWithBindings = {
+      ...TEST_ENV,
+      TG_BOT_USERNAME: "AstroWalletAppBot",
+      TG_MINI_APP_SHORT_NAME: "wallet",
+      ECOSYSTEM_SHARED_INTENT_SECRET: "eco_secret_boomerang_1234567890_ok",
+      ASTRODEX_API_BASE_URL: "https://astrodex-testnet.pages.dev",
+      ASTRODEX: {
+        fetch: async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url =
+            typeof input === "string"
+              ? input
+              : input instanceof Request
+                ? input.url
+                : input.toString();
+          const headers = new Headers(
+            input instanceof Request ? input.headers : init?.headers,
+          );
+          const rawBody =
+            input instanceof Request
+              ? await input.clone().text()
+              : typeof init?.body === "string"
+                ? init.body
+                : "{}";
+          callbacks.push({
+            url,
+            secret: headers.get("X-Ecosystem-Secret"),
+            body: JSON.parse(rawBody),
+          });
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        },
+      },
+    };
+    const app = createApp({
+      createRepo: () => repo,
+      verifyTxFn: async () => ({ confirmed: true, ledger: 551100 }),
+    });
+
+    const payerAddress = encodeClassicStrKey(new Uint8Array(32).fill(19));
+    await repo.linkVerifiedAddresses({
+      telegramUserId: "55112233",
+      usernameLower: "boomerang_trader",
+      accounts: [{ address: payerAddress, kind: "G", label: "Main", isDefault: true }],
+    });
+
+    const resolveRes = await app.request(`/v1/identity/resolve?q=${payerAddress}`, {}, envWithBindings);
+    expect(resolveRes.status).toBe(200);
+    const resolved = (await resolveRes.json()) as { found: boolean; telegramUserId?: string; username?: string };
+    expect(resolved.found).toBe(true);
+    expect(resolved.telegramUserId).toBe("55112233");
+    expect(resolved.username).toBe("boomerang_trader");
+
+    const xdrBytes = new TextEncoder().encode(BENIGN_PAYMENT_TX_XDR);
+    const xdrDigest = await crypto.subtle.digest("SHA-256", xdrBytes);
+    const xdrSha256 = Array.from(new Uint8Array(xdrDigest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    const extRes = await app.request(
+      "/v1/intents/external",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Ecosystem-Secret": envWithBindings.ECOSYSTEM_SHARED_INTENT_SECRET,
+        },
+        body: JSON.stringify({
+          intentId: "ad_boomerang_01",
+          telegramUserId: "55112233",
+          actionType: "sign_xdr",
+          envelope: {
+            version: 1,
+            originApp: "astrodex",
+            subAction: "sdex_limit_order_create",
+            humanSummary: "Swap 10 XLM -> USDC",
+            unsignedXdr: BENIGN_PAYMENT_TX_XDR,
+            xdrSha256,
+            callbackUrl: "https://astrodex-testnet.pages.dev/v1/intents/ad_boomerang_01/confirm",
+            sourceAddress: payerAddress,
+            originConfirmSig: "c".repeat(64),
+          },
+          expiresAt: Math.floor(Date.now() / 1000) + 300,
+        }),
+      },
+      envWithBindings,
+    );
+    expect(extRes.status).toBe(200);
+    const created = (await extRes.json()) as { sig: string };
+
+    const confirmRes = await app.request(
+      "/v1/intents/ad_boomerang_01/confirm",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: created.sig,
+          txHash: "2".repeat(64),
+          payerAddress,
+        }),
+      },
+      envWithBindings,
+    );
+    expect(confirmRes.status).toBe(200);
+    expect(callbacks).toHaveLength(1);
+    expect(callbacks[0]?.url).toBe("https://astrodex.internal/v1/intents/ad_boomerang_01/confirm");
+    expect(callbacks[0]?.secret).toBe(envWithBindings.ECOSYSTEM_SHARED_INTENT_SECRET);
+    expect(callbacks[0]?.body).toEqual({
+      sig: "c".repeat(64),
+      txHash: "2".repeat(64),
+    });
   });
 });

@@ -259,6 +259,7 @@ export interface WalletContextValue {
   signAndSubmitRawXdrWithShield(
     xdrBase64: string,
     allowWarning?: boolean,
+    intentAuth?: RelayIntentAuth,
   ): Promise<{
     hash: string;
     ledger: number;
@@ -357,59 +358,72 @@ export function WalletProvider({
 }) {
   const cleanScopeId = storageScopeId?.trim() || undefined;
   const securePinKey = cleanScopeId ? `${TG_SECURE_PIN_KEY}:${cleanScopeId}` : TG_SECURE_PIN_KEY;
+  const relaySubmitter = useMemo(
+    () =>
+      config.apiBaseUrl
+        ? async ({
+            signedTxXdrBase64,
+            sourceKeypair,
+            intentAuth,
+          }: {
+            signedTxXdrBase64: string;
+            sourceKeypair: ReturnType<ReturnType<typeof deriveStellarAccount>["toKeypair"]>;
+            intentAuth?: RelayIntentAuth | undefined;
+          }) => {
+            const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
+            const rawPayload = signedTxXdrBase64;
+            const digest = await crypto.subtle.digest(
+              "SHA-256",
+              new TextEncoder().encode(rawPayload),
+            );
+            const payloadHash = Array.from(new Uint8Array(digest), (b) =>
+              b.toString(16).padStart(2, "0"),
+            ).join("");
+            const timestamp = Math.floor(Date.now() / 1000);
+            const nonceBytes = new Uint8Array(12);
+            crypto.getRandomValues(nonceBytes);
+            const nonce = Array.from(nonceBytes, (b) =>
+              b.toString(16).padStart(2, "0"),
+            ).join("");
+            const challenge = `astrowallet-relay:v1:${config.network}:feebump:${payloadHash}:${timestamp}:${nonce}`;
+            const signatureBase64 = signChallengeMessage(sourceKeypair, challenge);
+            const res = await fetch(`${apiBase}/v1/relay/submit`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                mode: "feebump",
+                signedTxXdrBase64: rawPayload,
+                ...(intentAuth ? { intentAuth } : {}),
+                walletAuth: {
+                  address: sourceKeypair.publicKey() as ClassicAddress,
+                  timestamp,
+                  nonce,
+                  payloadHash,
+                  signatureBase64,
+                },
+              }),
+            });
+            if (!res.ok) {
+              return null;
+            }
+            const body = (await res.json()) as {
+              hash?: string;
+              txHash?: string;
+            };
+            const txHash = (body.hash ?? body.txHash ?? "").trim();
+            return txHash ? { hash: txHash } : null;
+          }
+        : undefined,
+    [config.apiBaseUrl, config.network],
+  );
   const stellarClient = useMemo(
     () =>
       createStellarClient({
         ...config,
         sorobanMaxResourceFeeStroops: config.sorobanMaxResourceFeeStroops,
-        relaySubmitter: config.apiBaseUrl
-          ? async ({ signedTxXdrBase64, sourceKeypair, intentAuth }) => {
-              const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
-              const rawPayload = signedTxXdrBase64;
-              const digest = await crypto.subtle.digest(
-                "SHA-256",
-                new TextEncoder().encode(rawPayload),
-              );
-              const payloadHash = Array.from(new Uint8Array(digest), (b) =>
-                b.toString(16).padStart(2, "0"),
-              ).join("");
-              const timestamp = Math.floor(Date.now() / 1000);
-              const nonceBytes = new Uint8Array(12);
-              crypto.getRandomValues(nonceBytes);
-              const nonce = Array.from(nonceBytes, (b) =>
-                b.toString(16).padStart(2, "0"),
-              ).join("");
-              const challenge = `astrowallet-relay:v1:${config.network}:feebump:${payloadHash}:${timestamp}:${nonce}`;
-              const signatureBase64 = signChallengeMessage(sourceKeypair, challenge);
-              const res = await fetch(`${apiBase}/v1/relay/submit`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  mode: "feebump",
-                  signedTxXdrBase64: rawPayload,
-                  ...(intentAuth ? { intentAuth } : {}),
-                  walletAuth: {
-                    address: sourceKeypair.publicKey() as ClassicAddress,
-                    timestamp,
-                    nonce,
-                    payloadHash,
-                    signatureBase64,
-                  },
-                }),
-              });
-              if (!res.ok) {
-                return null;
-              }
-              const body = (await res.json()) as {
-                hash?: string;
-                txHash?: string;
-              };
-              const txHash = (body.hash ?? body.txHash ?? "").trim();
-              return txHash ? { hash: txHash } : null;
-            }
-          : undefined,
+        relaySubmitter,
       }),
-    [config],
+    [config, relaySubmitter],
   );
   const sorobanDevClient = useMemo(
     () =>
@@ -418,12 +432,14 @@ export function WalletProvider({
         horizonUrls: config.horizonUrls,
         networkPassphrase: config.networkPassphrase,
         maxResourceFeeStroops: config.sorobanMaxResourceFeeStroops,
+        relaySubmitter,
       }),
     [
       config.rpcUrls,
       config.horizonUrls,
       config.networkPassphrase,
       config.sorobanMaxResourceFeeStroops,
+      relaySubmitter,
     ],
   );
 
@@ -1637,6 +1653,7 @@ export function WalletProvider({
     async (
       xdrBase64: string,
       allowWarning = false,
+      intentAuth?: RelayIntentAuth,
     ): Promise<{
       hash: string;
       ledger: number;
@@ -1644,7 +1661,12 @@ export function WalletProvider({
       channel: "soroban-rpc" | "horizon";
     }> => {
       const { signedXdr } = await signRawXdrWithShield(xdrBase64, allowWarning);
-      const submitted = await sorobanDevClient.submitRawSignedXdr(signedXdr);
+      const submitted = await withActiveKeypair((sourceKeypair) =>
+        sorobanDevClient.submitRawSignedXdr(signedXdr, {
+          sourceKeypair,
+          intentAuth,
+        }),
+      );
       await refreshChainState();
       showToast(`Submitted via ${submitted.channel}`);
       return {
@@ -1652,7 +1674,7 @@ export function WalletProvider({
         signedXdr,
       };
     },
-    [signRawXdrWithShield, sorobanDevClient, refreshChainState, showToast],
+    [signRawXdrWithShield, withActiveKeypair, sorobanDevClient, refreshChainState, showToast],
   );
 
   const fetchDevTelemetry = useCallback(

@@ -52,6 +52,7 @@ export interface ServerRepository {
   }): Promise<TelegramUserRecord>;
   getUserById(telegramUserId: string): Promise<TelegramUserRecord | null>;
   getUserByUsername(usernameLower: string): Promise<TelegramUserRecord | null>;
+  getUserByLinkedAddress?(address: string): Promise<TelegramUserRecord | null>;
   setUserAlertsEnabled(telegramUserId: string, enabled: boolean): Promise<void>;
 
   linkVerifiedAddresses(input: {
@@ -344,6 +345,21 @@ export function createD1Repository(db: D1Database): ServerRepository {
       const row = await db
         .prepare(
           "SELECT telegram_user_id, username_lower, alerts_enabled FROM tg_users WHERE username_lower = ?",
+        )
+        .bind(normalized)
+        .first<RawUserRow>();
+      return row ? mapUserRow(row) : null;
+    },
+
+    async getUserByLinkedAddress(address) {
+      const normalized = address.trim();
+      const row = await db
+        .prepare(
+          `SELECT u.telegram_user_id, u.username_lower, u.alerts_enabled
+           FROM linked_addresses la
+           JOIN tg_users u ON u.telegram_user_id = la.telegram_user_id
+           WHERE la.address = ?
+           LIMIT 1`,
         )
         .bind(normalized)
         .first<RawUserRow>();

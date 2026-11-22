@@ -1,4 +1,4 @@
-import { StrKey, xdr } from "@stellar/stellar-sdk";
+import { StrKey, TransactionBuilder, rpc, xdr } from "@stellar/stellar-sdk";
 import { StellarAddressSchema, type BalanceDiff, type StellarAddress } from "@astrowallet/domain";
 
 export interface SimulatedSorobanResult {
@@ -8,6 +8,7 @@ export interface SimulatedSorobanResult {
   requiresProtocol23Restore: boolean;
   eventsCount: number;
   balanceDiffs: BalanceDiff[];
+  assembledXdr?: string | undefined;
 }
 
 interface RawStateChange {
@@ -21,6 +22,7 @@ interface RpcSimulateResponse {
   result?: {
     error?: string;
     minResourceFee?: string;
+    transactionData?: string;
     events?: unknown[];
     stateChanges?: RawStateChange[];
     restorePreamble?: {
@@ -216,6 +218,7 @@ export async function simulateSorobanTransaction(
   rpcUrls: readonly string[],
   xdrBase64: string,
   fetchFn: typeof fetch = fetch,
+  networkPassphrase?: string,
 ): Promise<SimulatedSorobanResult> {
   let lastError: unknown;
 
@@ -264,12 +267,22 @@ export async function simulateSorobanTransaction(
       }
 
       const requiresRestore = Boolean(res.restorePreamble?.transactionData);
+      let assembledXdr: string | undefined;
+      if (networkPassphrase && typeof res.transactionData === "string") {
+        try {
+          const parsedTx = TransactionBuilder.fromXDR(xdrBase64, networkPassphrase);
+          assembledXdr = rpc.assembleTransaction(parsedTx, res as never).build().toXDR();
+        } catch {
+          assembledXdr = undefined;
+        }
+      }
       return {
         ok: true,
         minResourceFeeStroops: res.minResourceFee ?? "0",
         requiresProtocol23Restore: requiresRestore,
         eventsCount: res.events?.length ?? 0,
         balanceDiffs: parseStateChangeBalanceDiffs(res.stateChanges),
+        ...(assembledXdr ? { assembledXdr } : {}),
       };
     } catch (err) {
       lastError = err;

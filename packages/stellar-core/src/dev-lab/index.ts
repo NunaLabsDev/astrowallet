@@ -294,6 +294,13 @@ export function createSorobanDevClient(input: {
   horizonUrls?: readonly string[] | undefined;
   networkPassphrase: string;
   maxResourceFeeStroops?: string | bigint | undefined;
+  relaySubmitter?:
+    | ((input: {
+        signedTxXdrBase64: string;
+        sourceKeypair: Keypair;
+        intentAuth?: { intentId: string; sig: string } | undefined;
+      }) => Promise<{ hash: string; ledger?: number | undefined } | null>)
+    | undefined;
 }) {
   const rpcEndpoints = createFailoverEndpoints(input.rpcUrls);
   const horizonEndpoints = createFailoverEndpoints(
@@ -522,7 +529,13 @@ export function createSorobanDevClient(input: {
     });
   }
 
-  async function submitRawSignedXdr(signedXdrBase64: string): Promise<{
+  async function submitRawSignedXdr(
+    signedXdrBase64: string,
+    opts?: {
+      sourceKeypair?: Keypair | undefined;
+      intentAuth?: { intentId: string; sig: string } | undefined;
+    },
+  ): Promise<{
     hash: string;
     ledger: number;
     channel: "soroban-rpc" | "horizon";
@@ -531,6 +544,56 @@ export function createSorobanDevClient(input: {
     const parsed = TransactionBuilder.fromXDR(cleaned, input.networkPassphrase);
 
     if (txContainsSorobanOp(cleaned, input.networkPassphrase)) {
+      if (input.relaySubmitter && opts?.sourceKeypair) {
+        try {
+          const relayed = await input.relaySubmitter({
+            signedTxXdrBase64: cleaned,
+            sourceKeypair: opts.sourceKeypair,
+            intentAuth: opts.intentAuth,
+          });
+          if (relayed && typeof relayed.hash === "string" && relayed.hash.trim().length > 0) {
+            const relayedHash = relayed.hash.trim();
+            if (typeof relayed.ledger === "number" && relayed.ledger > 0) {
+              return { hash: relayedHash, ledger: relayed.ledger, channel: "soroban-rpc" };
+            }
+            try {
+              return await withRpcFailover(async (server) => {
+                let polled = await server.getTransaction(relayedHash);
+                for (
+                  let i = 0;
+                  i < 15 && polled.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
+                  i += 1
+                ) {
+                  await new Promise((resolve) => setTimeout(resolve, 1000));
+                  polled = await server.getTransaction(relayedHash);
+                }
+                if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
+                  throw new NonRetryableDevLabError(
+                    `Soroban relayed transaction failed (${relayedHash})`,
+                  );
+                }
+                return {
+                  hash: relayedHash,
+                  ledger:
+                    polled.status === rpc.Api.GetTransactionStatus.SUCCESS ? polled.ledger : 0,
+                  channel: "soroban-rpc" as const,
+                };
+              });
+            } catch (pollErr) {
+              if (pollErr instanceof NonRetryableDevLabError) {
+                throw pollErr;
+              }
+              return { hash: relayedHash, ledger: 0, channel: "soroban-rpc" };
+            }
+          }
+        } catch (relayErr) {
+          if (relayErr instanceof NonRetryableDevLabError) {
+            throw relayErr;
+          }
+          // Fall back cleanly to direct Soroban RPC submission
+        }
+      }
+
       return withRpcFailover(async (server) => {
         const sent = await server.sendTransaction(parsed);
         if (sent.status === "ERROR") {

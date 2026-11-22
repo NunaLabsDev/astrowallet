@@ -434,6 +434,8 @@ const RawServerEnvSchema = z
     STELLAR_EXPERT_API_BASE: OptionalUrlSchema("STELLAR_EXPERT_API_BASE"),
     OZ_CHANNELS_API_URL: OptionalUrlSchema("OZ_CHANNELS_API_URL"),
     SOROSWAP_API_BASE: OptionalUrlSchema("SOROSWAP_API_BASE"),
+    ASTRODEX_API_BASE_URL: OptionalUrlSchema("ASTRODEX_API_BASE_URL"),
+    ASTROGATE_API_BASE_URL: OptionalUrlSchema("ASTROGATE_API_BASE_URL"),
     SEP42_ASSET_LIST_URLS: parseUrlCsv("SEP42_ASSET_LIST_URLS", false),
     CLAIM_ESCROW_CONTRACT_ID: z.preprocess(
       emptyToUndefined,
@@ -517,6 +519,8 @@ const RawServerEnvSchema = z
         env.STELLAR_EXPERT_API_BASE,
         env.OZ_CHANNELS_API_URL,
         env.SOROSWAP_API_BASE,
+        env.ASTRODEX_API_BASE_URL,
+        env.ASTROGATE_API_BASE_URL,
         ...env.SEP42_ASSET_LIST_URLS,
         env.TELEGRAM_API_ORIGIN,
       ],
@@ -537,6 +541,8 @@ export interface ServerConfig {
   stellarExpertApiBase?: string | undefined;
   ozChannelsApiUrl?: string | undefined;
   soroswapApiBase?: string | undefined;
+  astrodexApiBaseUrl?: string | undefined;
+  astrogateApiBaseUrl?: string | undefined;
   sep42AssetListUrls: string[];
   claimEscrowContractId?: ContractAddress | undefined;
   smartAccountWasmHash?: string | undefined;
@@ -572,6 +578,8 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     stellarExpertApiBase: parsed.STELLAR_EXPERT_API_BASE,
     ozChannelsApiUrl: parsed.OZ_CHANNELS_API_URL,
     soroswapApiBase: parsed.SOROSWAP_API_BASE,
+    astrodexApiBaseUrl: parsed.ASTRODEX_API_BASE_URL,
+    astrogateApiBaseUrl: parsed.ASTROGATE_API_BASE_URL,
     sep42AssetListUrls: parsed.SEP42_ASSET_LIST_URLS,
     claimEscrowContractId: parsed.CLAIM_ESCROW_CONTRACT_ID,
     smartAccountWasmHash: parsed.SMART_ACCOUNT_WASM_HASH,

@@ -25,6 +25,7 @@ export const ScanReportSchema = z.object({
   balanceDiffs: z.array(BalanceDiffSchema),
   requiresMemoCheck: z.boolean(),
   estimatedFeeStroops: z.string().regex(/^\d+$/),
+  assembledXdr: z.string().optional(),
 });
 
 export type ThreatVerdict = z.infer<typeof ThreatVerdictSchema>;

@@ -1,6 +1,7 @@
 import {
   ClassicAddressSchema,
   ContractAddressSchema,
+  StellarAddressSchema,
   type ClaimLink,
   type ClassicAddress,
   type ServerConfig,
@@ -18,6 +19,7 @@ import {
 } from "@astrowallet/tg-protocol";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
+import type { WorkerBindings } from "../app.js";
 import type { ServerRepository } from "../db/repository.js";
 import {
   verifyTransactionConfirmed,
@@ -74,6 +76,8 @@ const ConfirmIntentBodySchema = z.object({
 const CrossAppIntentEnvelopeSchema = z.object({
   version: z.literal(1).optional(),
   originApp: z.enum(["astrodex", "astrogate"]),
+  sourceAddress: StellarAddressSchema.optional(),
+  originConfirmSig: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   subAction: z.string().trim().min(1).max(64),
   humanSummary: z.string().trim().min(1).max(400),
   unsignedXdr: z.string().trim().min(16).max(32_768),
@@ -101,6 +105,8 @@ const ExternalIntentBodySchema = z.object({
 
 interface IntentPayload {
   originApp?: "astrodex" | "astrogate" | undefined;
+  sourceAddress?: string | undefined;
+  originConfirmSig?: string | undefined;
   subAction?: string | undefined;
   humanSummary?: string | undefined;
   xdrSha256?: string | undefined;
@@ -180,6 +186,7 @@ async function authorizeOptionalCreatorSession(
 }
 
 export type IntentRouteEnv = {
+  Bindings: WorkerBindings;
   Variables: {
     config: ServerConfig;
     repo: ServerRepository;
@@ -862,9 +869,10 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: "Transaction hash already used for another intent" }, 409);
     }
 
+    const resolvedSourceAccount = parsedBody.payerAddress ?? payload.sourceAddress;
     const expected: ExpectedTxMatch = {
       minCreatedAtUnix: intent.createdAt,
-      ...(parsedBody.payerAddress ? { expectedSourceAccount: parsedBody.payerAddress } : {}),
+      ...(resolvedSourceAccount ? { expectedSourceAccount: resolvedSourceAccount } : {}),
       ...(intent.actionType === "pay" || intent.actionType === "request"
         ? {
             destination: payload.destination,
@@ -889,6 +897,50 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
     }
 
     const updated = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+
+    if (payload.originApp === "astrodex") {
+      const callbackBody = JSON.stringify({
+        sig: payload.originConfirmSig ?? parsedBody.sig,
+        txHash: parsedBody.txHash,
+      });
+      const callbackHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (config.ecosystemSharedIntentSecret) {
+        callbackHeaders["X-Ecosystem-Secret"] = config.ecosystemSharedIntentSecret;
+      }
+      const dispatchBoomerangConfirm = async () => {
+        if (c.env?.ASTRODEX) {
+          await c.env.ASTRODEX.fetch(
+            new Request(
+              `https://astrodex.internal/v1/intents/${encodeURIComponent(intent.intentId)}/confirm`,
+              {
+                method: "POST",
+                headers: callbackHeaders,
+                body: callbackBody,
+              },
+            ),
+          );
+        } else if (config.astrodexApiBaseUrl) {
+          const base = config.astrodexApiBaseUrl.replace(/\/+$/, "");
+          const fetchImpl = deps.fetchFn ?? fetch;
+          await fetchImpl(
+            `${base}/v1/intents/${encodeURIComponent(intent.intentId)}/confirm`,
+            {
+              method: "POST",
+              headers: callbackHeaders,
+              body: callbackBody,
+            },
+          );
+        }
+      };
+      const callbackPromise = dispatchBoomerangConfirm().catch(() => undefined);
+      try {
+        c.executionCtx.waitUntil(callbackPromise);
+      } catch {
+        await callbackPromise;
+      }
+    }
 
     let cardText: string;
     if (intent.actionType === "request") {

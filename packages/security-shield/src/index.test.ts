@@ -719,4 +719,55 @@ describe("Scan & Shield deterministic pre-sign rules", () => {
     });
     clearSep42AssetCache();
   });
+
+  it("blocks mismatched sourceAddress and fails closed on Mainnet Soroban simulation error", async () => {
+    const shield = createSecurityShield({
+      networkPassphrase: "Public Global Stellar Network ; September 2015",
+      rpcUrls: ["https://rpc-mainnet.example"],
+      horizonUrls: [],
+      verifiedAssets: [],
+      sep42AssetListUrls: [],
+      fetchFn: async () =>
+        new Response(JSON.stringify({ error: { message: "rpc unavailable" } }), { status: 503 }),
+    });
+    const scanner = shield.createScanner();
+
+    const mismatchedXdr = buildTestTxXdr((b) => {
+      b.addOperation(
+        Operation.payment({
+          destination: DEST_KP.publicKey(),
+          asset: Asset.native(),
+          amount: "5",
+        }),
+      );
+    });
+
+    const mismatchReport = await scanner.scanTransactionXdr(
+      mismatchedXdr,
+      ATTACKER_KP.publicKey(),
+    );
+    expect(mismatchReport.verdict).toBe("malicious");
+    expect(mismatchReport.findings.some((f) => f.code === "SOURCE_ACCOUNT_MISMATCH")).toBe(true);
+
+    const contractId = StrKey.encodeContract(new Uint8Array(32).fill(9));
+    const sorobanXdr = buildTestTxXdr((b) => {
+      b.addOperation(
+        Operation.invokeContractFunction({
+          contract: contractId,
+          function: "swap",
+          args: [],
+        }),
+      );
+    });
+    const simFailReport = await scanner.scanTransactionXdr(
+      sorobanXdr,
+      SOURCE_KP.publicKey(),
+    );
+    expect(simFailReport.verdict).toBe("malicious");
+    expect(
+      simFailReport.findings.some(
+        (f) => f.code === "SOROBAN_SIMULATION_FAILED" && f.blocksSigning === true,
+      ),
+    ).toBe(true);
+  });
 });

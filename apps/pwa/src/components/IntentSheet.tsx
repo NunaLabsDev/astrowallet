@@ -41,6 +41,8 @@ interface RemoteIntentResponse {
   paidCount?: number | undefined;
   payload: {
     originApp?: "astrodex" | "astrogate" | undefined;
+    sourceAddress?: string | undefined;
+    originConfirmSig?: string | undefined;
     subAction?: string | undefined;
     humanSummary?: string | undefined;
     xdrSha256?: string | undefined;
@@ -112,6 +114,7 @@ export function IntentSheet({
     vaultStatus,
     accounts,
     activeAccount,
+    setActiveIndex,
     accountState,
     fundActiveTestnetAccount,
     addOrRemoveTrustline,
@@ -215,6 +218,15 @@ export function IntentSheet({
   useEffect(() => {
     setWarningAcknowledged(false);
   }, [route.intentId, intent?.intentId]);
+
+  useEffect(() => {
+    const requestedSource = intent?.payload.sourceAddress?.trim();
+    if (!requestedSource || activeAccount?.address === requestedSource) return;
+    const match = accounts.find((a) => a.address === requestedSource);
+    if (match && typeof match.derivationIndex === "number") {
+      setActiveIndex(match.derivationIndex);
+    }
+  }, [intent?.payload.sourceAddress, activeAccount?.address, accounts, setActiveIndex]);
 
   useEffect(() => {
     if (accounts.length > 0) {
@@ -475,7 +487,10 @@ export function IntentSheet({
     try {
       let txHash: string;
       if (intent.payload.unsignedXdr) {
-        const res = await signAndSubmitRawXdrWithShield(intent.payload.unsignedXdr, true);
+        const res = await signAndSubmitRawXdrWithShield(intent.payload.unsignedXdr, true, {
+          intentId: route.intentId,
+          sig: route.sig,
+        });
         txHash = res.hash;
       } else {
         const { fromAsset, toAsset, amount } = intent.payload;
@@ -696,7 +711,10 @@ export function IntentSheet({
     setBusy(true);
     setError(null);
     try {
-      const res = await signAndSubmitRawXdrWithShield(intent.payload.unsignedXdr, true);
+      const res = await signAndSubmitRawXdrWithShield(intent.payload.unsignedXdr, true, {
+        intentId: route.intentId,
+        sig: route.sig,
+      });
       await confirmOnServer({
         txHash: res.hash,
         ...(activeAccount ? { payerAddress: activeAccount.address } : {}),

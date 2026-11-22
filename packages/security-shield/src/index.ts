@@ -134,7 +134,7 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
       return {
         async scanTransactionXdr(
           xdrBase64: string,
-          _sourceAddress?: StellarAddress,
+          sourceAddress?: StellarAddress,
         ): Promise<ScanReport> {
           if (!frozenConfig.networkPassphrase) {
             throw new Error("networkPassphrase is required to decode transaction XDR");
@@ -157,7 +157,7 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
             if (op.soroban) {
               collectSorobanContractIds(op.soroban, addressesToInspect);
             }
-            if (op.type === "invokeHostFunction") {
+            if (op.type === "invokeHostFunction" || op.type === "extendFootprintTtl") {
               hasSorobanOp = true;
             }
           }
@@ -171,7 +171,12 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
                 ? fetchSep42VerifiedAssets(frozenConfig.sep42AssetListUrls, { fetchFn })
                 : Promise.resolve(undefined),
             hasSorobanOp && frozenConfig.rpcUrls.length > 0
-              ? simulateSorobanTransaction(frozenConfig.rpcUrls, xdrBase64, fetchFn)
+              ? simulateSorobanTransaction(
+                  frozenConfig.rpcUrls,
+                  xdrBase64,
+                  fetchFn,
+                  frozenConfig.networkPassphrase,
+                )
               : Promise.resolve(null),
             Promise.all(
               [...addressesToInspect].map(async (addr) => {
@@ -200,18 +205,37 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
             simulatedBalanceDiffs,
           });
 
-          if (!sorobanSim) {
-            return baseReport;
+          const extraFindings: SecurityFinding[] = [...baseReport.findings];
+          if (
+            sourceAddress &&
+            decoded.sourceAccount !== sourceAddress &&
+            decoded.feeSource !== sourceAddress
+          ) {
+            extraFindings.push({
+              code: "SOURCE_ACCOUNT_MISMATCH",
+              severity: "malicious",
+              title: "Source Account Mismatch Blocked",
+              description: `Transaction source (${decoded.sourceAccount}) does not match expected signer (${sourceAddress}).`,
+              blocksSigning: true,
+            });
           }
 
-          const extraFindings: SecurityFinding[] = [...baseReport.findings];
+          if (!sorobanSim) {
+            return {
+              ...baseReport,
+              verdict: classifyVerdict(extraFindings),
+              findings: extraFindings,
+            };
+          }
+
           if (!sorobanSim.ok) {
+            const failClosed = /\bpublic\b/i.test(frozenConfig.networkPassphrase);
             extraFindings.push({
               code: "SOROBAN_SIMULATION_FAILED",
-              severity: "warning",
+              severity: failClosed ? "malicious" : "warning",
               title: "Soroban RPC Simulation Warning",
               description: sorobanSim.error ?? "Unable to simulate Soroban invocation",
-              blocksSigning: false,
+              blocksSigning: failClosed,
             });
           } else if (sorobanSim.requiresProtocol23Restore) {
             extraFindings.push({
@@ -237,6 +261,7 @@ export function createSecurityShield(config: SecurityShieldConfig): SecurityShie
             verdict: classifyVerdict(extraFindings),
             findings: extraFindings,
             estimatedFeeStroops,
+            ...(sorobanSim.assembledXdr ? { assembledXdr: sorobanSim.assembledXdr } : {}),
           };
         },
 

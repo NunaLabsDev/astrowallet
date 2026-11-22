@@ -46,11 +46,18 @@ export function createIdentityRoutes(): Hono<IdentityRouteEnv> {
       telegramUserId = q;
       user = await repo.getUserById(q);
     } else if (/^[GC][A-Z2-7]{55}$/.test(q)) {
-      const watched = await repo.listWatchedAccounts();
-      const match = watched.find((item) => item.address === q);
-      if (match) {
-        telegramUserId = match.telegramUserId;
-        user = await repo.getUserById(match.telegramUserId);
+      if (repo.getUserByLinkedAddress) {
+        user = await repo.getUserByLinkedAddress(q);
+        if (user) {
+          telegramUserId = user.telegramUserId;
+        }
+      } else {
+        const watched = await repo.listWatchedAccounts();
+        const match = watched.find((item) => item.address === q);
+        if (match) {
+          telegramUserId = match.telegramUserId;
+          user = await repo.getUserById(match.telegramUserId);
+        }
       }
     } else if (/^[a-zA-Z0-9_]{3,32}$/.test(q)) {
       user = await repo.getUserByUsername(q.toLowerCase());

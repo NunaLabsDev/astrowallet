@@ -54,6 +54,11 @@ import type { SelectedTokenTarget } from "./components/TokenExplorerSheet.js";
 import { TokenBadge } from "./components/TokenBadge.js";
 import { classifyTokenTrust } from "./components/token-catalog.js";
 import {
+  ConnectRequestSheet,
+  parseConnectRouteFromLocation,
+  type ActiveConnectRoute,
+} from "./components/ConnectRequestSheet.js";
+import {
   IntentSheet,
   parseIntentRouteFromLocation,
   type ActiveIntentRoute,
@@ -149,17 +154,23 @@ function parseTabFromSearch(search: string): AppDockTab | null {
 function readLocationRoute(): {
   tab: AppDockTab | null;
   intent: ActiveIntentRoute | null;
+  connect: ActiveConnectRoute | null;
 } {
   if (typeof window === "undefined") {
-    return { tab: null, intent: null };
+    return { tab: null, intent: null, connect: null };
   }
   const intent = parseIntentRouteFromLocation();
   if (intent) {
-    return { tab: "wallet", intent };
+    return { tab: "wallet", intent, connect: null };
+  }
+  const connect = parseConnectRouteFromLocation();
+  if (connect) {
+    return { tab: "wallet", intent: null, connect };
   }
   return {
     tab: parseTabFromSearch(window.location.search),
     intent: null,
+    connect: null,
   };
 }
 
@@ -354,12 +365,16 @@ function WalletShell({
   onClearInitialDrawer,
   intentRoute,
   onClearIntent,
+  connectRoute,
+  onClearConnect,
 }: {
   initialTab: AppDockTab;
   initialDrawer?: ActiveDrawer;
   onClearInitialDrawer?: () => void;
   intentRoute: ActiveIntentRoute | null;
   onClearIntent: () => void;
+  connectRoute: ActiveConnectRoute | null;
+  onClearConnect: () => void;
 }) {
   const {
     tgUser,
@@ -1080,6 +1095,10 @@ function WalletShell({
 
             {intentRoute && (
               <IntentSheet route={intentRoute} onDismiss={onClearIntent} />
+            )}
+
+            {connectRoute && (
+              <ConnectRequestSheet route={connectRoute} onDismiss={onClearConnect} />
             )}
 
             {vaultStatus === "loading" && (
@@ -2710,12 +2729,20 @@ function RoutedExperience() {
   const startParamIntentKey =
     startParamRoute?.kind === "intent"
       ? `${startParamRoute.intentId}:${startParamRoute.sig}`
-      : null;
+      : startParamRoute?.kind === "connect"
+        ? `connect:${startParamRoute.requestId}:${startParamRoute.sig}`
+        : null;
 
   const effectiveIntent: ActiveIntentRoute | null =
     route.intent ??
     (startParamRoute?.kind === "intent" && startParamIntentKey !== dismissedStartParamKey
       ? { intentId: startParamRoute.intentId, sig: startParamRoute.sig }
+      : null);
+
+  const effectiveConnect: ActiveConnectRoute | null =
+    route.connect ??
+    (startParamRoute?.kind === "connect" && startParamIntentKey !== dismissedStartParamKey
+      ? { requestId: startParamRoute.requestId, sig: startParamRoute.sig }
       : null);
 
   const handleDismissIntent = useCallback(() => {
@@ -2726,6 +2753,16 @@ function RoutedExperience() {
       setDismissedStartParamKey(startParamIntentKey);
     }
     setRoute((prev) => ({ ...prev, intent: null }));
+  }, [startParamIntentKey]);
+
+  const handleDismissConnect = useCallback(() => {
+    if (typeof window !== "undefined" && window.location.pathname.startsWith("/connect/")) {
+      window.history.replaceState({}, "", "/app");
+    }
+    if (startParamIntentKey) {
+      setDismissedStartParamKey(startParamIntentKey);
+    }
+    setRoute((prev) => ({ ...prev, connect: null }));
   }, [startParamIntentKey]);
 
   const clearRequestedDrawer = useCallback(() => {
@@ -2739,6 +2776,8 @@ function RoutedExperience() {
       onClearInitialDrawer={clearRequestedDrawer}
       intentRoute={effectiveIntent}
       onClearIntent={handleDismissIntent}
+      connectRoute={effectiveConnect}
+      onClearConnect={handleDismissConnect}
     />
   );
 }

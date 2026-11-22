@@ -1,6 +1,7 @@
 import type {
   ClassicAddress,
   ClaimLink,
+  ConnectRequestRecord,
   ContractAddress,
   IntentStatus,
   SignedIntent,
@@ -148,6 +149,7 @@ function createMemoryRepo(): ServerRepository {
   const relayBudget = new Map<string, bigint>();
   const tgUpdates = new Set<number>();
   const encryptedBackups = new Map<string, StoredEncryptedVaultBackup>();
+  const connectRequests = new Map<string, ConnectRequestRecord>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -389,6 +391,32 @@ function createMemoryRepo(): ServerRepository {
     },
     async deleteEncryptedVaultBackup(telegramUserId, network) {
       return encryptedBackups.delete(`${telegramUserId}:${network}`);
+    },
+    async createConnectRequest(req) {
+      connectRequests.set(req.requestId, req);
+      return req;
+    },
+    async getConnectRequest(requestId) {
+      return connectRequests.get(requestId) ?? null;
+    },
+    async completeConnectRequest({
+      requestId,
+      status,
+      resultJson,
+      responderTelegramUserId,
+      updatedAt,
+    }) {
+      const prev = connectRequests.get(requestId);
+      if (!prev || prev.status !== "pending") return null;
+      const next: ConnectRequestRecord = {
+        ...prev,
+        status,
+        resultJson: resultJson ?? prev.resultJson,
+        responderTelegramUserId: responderTelegramUserId ?? prev.responderTelegramUserId,
+        updatedAt,
+      };
+      connectRequests.set(requestId, next);
+      return next;
     },
   };
 }
@@ -2415,5 +2443,194 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       TEST_ENV,
     );
     expect((await afterDel.json()) as { hasBackup: boolean }).toEqual({ hasBackup: false });
+  });
+
+  it("resolves AstroID public accounts via /v1/identity/resolve without leaking encrypted vault backups", async () => {
+    const repo = createMemoryRepo();
+    const signer = await generateTestSigner();
+    await repo.linkVerifiedAddresses({
+      telegramUserId: "777888",
+      usernameLower: "astro_pilot",
+      accounts: [
+        {
+          address: signer.address,
+          kind: "classic",
+          label: "Primary",
+          isDefault: true,
+          verifiedSigHash: "sig_identity_test",
+        },
+      ],
+    });
+    await repo.upsertEncryptedVaultBackup({
+      telegramUserId: "777888",
+      network: "testnet",
+      envelopeJson: JSON.stringify({ secret: "must-never-leak" }),
+      envelopeSha256: "a".repeat(64),
+      version: 1,
+    });
+
+    const app = createApp({ createRepo: () => repo });
+
+    for (const q of ["777888", "@astro_pilot", signer.address]) {
+      const res = await app.request(
+        `/v1/identity/resolve?q=${encodeURIComponent(q)}`,
+        {},
+        TEST_ENV,
+      );
+      expect(res.status).toBe(200);
+      const rawText = await res.text();
+      expect(rawText).not.toContain("must-never-leak");
+      expect(rawText).not.toContain("envelopeJson");
+      const json = JSON.parse(rawText) as {
+        ok: boolean;
+        found: boolean;
+        telegramUserId: string;
+        username?: string;
+        primaryAddress: string;
+        accounts: Array<{ address: string; kind: string; isDefault: boolean }>;
+      };
+      expect(json.ok).toBe(true);
+      expect(json.found).toBe(true);
+      expect(json.telegramUserId).toBe("777888");
+      expect(json.username).toBe("astro_pilot");
+      expect(json.primaryAddress).toBe(signer.address);
+      expect(json.accounts).toHaveLength(1);
+    }
+
+    const unknownRes = await app.request("/v1/identity/resolve?q=@unknown_user_99", {}, TEST_ENV);
+    expect(unknownRes.status).toBe(200);
+    expect((await unknownRes.json()) as { ok: boolean; found: boolean }).toEqual({
+      ok: true,
+      found: false,
+      accounts: [],
+    });
+  });
+
+  it("federates CrossAppIntentEnvelope v1 via POST /v1/intents/external and verifies confirmation", async () => {
+    const repo = createMemoryRepo();
+    const app = createApp({
+      createRepo: () => repo,
+      verifyTxFn: async () => ({ confirmed: true, ledger: 551100 }),
+    });
+
+    const sharedSecret = "ecosystem-shared-secret-at-least-32-chars!!";
+    const envWithEcosystem = {
+      ...TEST_ENV,
+      TG_BOT_USERNAME: "AstroWalletAppBot",
+      TG_MINI_APP_SHORT_NAME: "wallet",
+      ECOSYSTEM_SHARED_INTENT_SECRET: sharedSecret,
+    };
+
+    const xdrBytes = new TextEncoder().encode(BENIGN_PAYMENT_TX_XDR);
+    const xdrDigest = await crypto.subtle.digest("SHA-256", xdrBytes);
+    const xdrSha256 = Array.from(new Uint8Array(xdrDigest))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+
+    const validBody = {
+      intentId: "ad_sync_intent_01",
+      telegramUserId: "777888",
+      actionType: "sign_xdr" as const,
+      envelope: {
+        version: 1 as const,
+        originApp: "astrodex" as const,
+        subAction: "sdex_limit_order_create",
+        humanSummary: "Create SDEX Sell Offer: 100 XLM @ 0.12 USDC",
+        unsignedXdr: BENIGN_PAYMENT_TX_XDR,
+        xdrSha256,
+        returnStartAppParam: "token_XLM",
+      },
+    };
+
+    // 1. Rejects missing/bad X-Ecosystem-Secret
+    const unauthRes = await app.request(
+      "/v1/intents/external",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Ecosystem-Secret": "wrong-secret-0000000000000000000000000000",
+        },
+        body: JSON.stringify(validBody),
+      },
+      envWithEcosystem,
+    );
+    expect(unauthRes.status).toBe(401);
+
+    // 2. Rejects mismatched xdrSha256
+    const badShaRes = await app.request(
+      "/v1/intents/external",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Ecosystem-Secret": sharedSecret,
+        },
+        body: JSON.stringify({
+          ...validBody,
+          envelope: { ...validBody.envelope, xdrSha256: "f".repeat(64) },
+        }),
+      },
+      envWithEcosystem,
+    );
+    expect(badShaRes.status).toBe(400);
+
+    // 3. Accepts valid swap & sign_xdr CrossAppIntentEnvelope v1
+    const okRes = await app.request(
+      "/v1/intents/external",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Ecosystem-Secret": sharedSecret,
+        },
+        body: JSON.stringify(validBody),
+      },
+      envWithEcosystem,
+    );
+    expect(okRes.status).toBe(200);
+    const created = (await okRes.json()) as {
+      ok: boolean;
+      intentId: string;
+      sig: string;
+      expiresAt: number;
+      deepLink: string;
+    };
+    expect(created.ok).toBe(true);
+    expect(created.intentId).toBe("ad_sync_intent_01");
+    expect(created.sig).toMatch(/^[a-f0-9]{64}$/);
+    expect(created.deepLink).toContain(
+      `startapp=i-${created.intentId}-${created.sig}`,
+    );
+
+    // 4. Fetch intent + confirm transaction
+    const getRes = await app.request(
+      `/v1/intents/${created.intentId}?sig=${created.sig}`,
+      {},
+      envWithEcosystem,
+    );
+    expect(getRes.status).toBe(200);
+    const fetched = (await getRes.json()) as {
+      actionType: string;
+      payload: { originApp: string; subAction: string; xdrSha256: string };
+    };
+    expect(fetched.actionType).toBe("sign_xdr");
+    expect(fetched.payload.originApp).toBe("astrodex");
+    expect(fetched.payload.xdrSha256).toBe(xdrSha256);
+
+    const confirmRes = await app.request(
+      `/v1/intents/${created.intentId}/confirm`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: created.sig,
+          txHash: "1".repeat(64),
+        }),
+      },
+      envWithEcosystem,
+    );
+    expect(confirmRes.status).toBe(200);
+    expect(((await confirmRes.json()) as { status: string }).status).toBe("confirmed");
   });
 });

@@ -42,6 +42,7 @@ export type VerifySessionResult =
 
 export type ParsedStartAppParam =
   | { kind: "intent"; intentId: string; sig: string }
+  | { kind: "connect"; requestId: string; sig: string }
   | { kind: "tab"; tab: string };
 
 interface MinimalTextEncoder {
@@ -357,6 +358,10 @@ export function encodeStartAppIntentParam(intentId: string, sig: string): string
   return `i-${intentId}-${sig.toLowerCase()}`;
 }
 
+export function encodeStartAppConnectParam(requestId: string, sig: string): string {
+  return `c-${requestId}-${sig.toLowerCase()}`;
+}
+
 export function encodeStartAppTabParam(tab: string): string {
   return `t-${tab.toLowerCase()}`;
 }
@@ -369,6 +374,14 @@ export function parseStartAppParam(raw: string): ParsedStartAppParam | null {
       kind: "intent",
       intentId: intentMatch[1],
       sig: intentMatch[2].toLowerCase(),
+    };
+  }
+  const connectMatch = trimmed.match(/^c-([A-Za-z0-9_-]+)-([a-f0-9]{32}|[a-f0-9]{64})$/i);
+  if (connectMatch?.[1] && connectMatch[2]) {
+    return {
+      kind: "connect",
+      requestId: connectMatch[1],
+      sig: connectMatch[2].toLowerCase(),
     };
   }
   const tabMatch = trimmed.match(/^t-([a-z0-9_-]{1,32})$/i);
@@ -397,6 +410,27 @@ export function buildMiniAppWebAppUrl(
     base.searchParams.set("tab", opts.tab);
   }
   return base.toString();
+}
+
+export function buildTelegramMiniAppConnectLink(opts: {
+  botUsername?: string | undefined;
+  shortName?: string | undefined;
+  pwaOrigin: string;
+  requestId: string;
+  sig: string;
+}): string {
+  const { URLCtor } = getCryptoGlobals();
+  const bot = opts.botUsername?.trim().replace(/^@/, "");
+  if (!bot) {
+    const base = new URLCtor(opts.pwaOrigin);
+    base.pathname = `/connect/${encodeURIComponent(opts.requestId)}`;
+    base.searchParams.set("sig", opts.sig);
+    return base.toString();
+  }
+  const short = opts.shortName?.trim();
+  const url = new URLCtor(short ? `https://t.me/${bot}/${short}` : `https://t.me/${bot}`);
+  url.searchParams.set("startapp", encodeStartAppConnectParam(opts.requestId, opts.sig));
+  return url.toString();
 }
 
 export function buildTelegramMiniAppLink(opts: {

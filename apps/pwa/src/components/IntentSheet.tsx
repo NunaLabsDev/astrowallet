@@ -40,6 +40,11 @@ interface RemoteIntentResponse {
   escrowContractId?: string | undefined;
   paidCount?: number | undefined;
   payload: {
+    originApp?: "astrodex" | "astrogate" | undefined;
+    subAction?: string | undefined;
+    humanSummary?: string | undefined;
+    xdrSha256?: string | undefined;
+    returnStartAppParam?: string | undefined;
     message?: string | undefined;
     amount?: string | undefined;
     totalAmount?: string | undefined;
@@ -265,7 +270,8 @@ export function IntentSheet({
         intent.actionType === "split") &&
       intent.payload.destination
         ? intent.payload.destination
-        : intent.actionType === "swap" && intent.payload.unsignedXdr
+        : (intent.actionType === "swap" || intent.actionType === "sign_xdr") &&
+            intent.payload.unsignedXdr
           ? intent.payload.unsignedXdr
           : null;
 
@@ -672,6 +678,67 @@ export function IntentSheet({
     }
   };
 
+  const handleConfirmSignXdr = async () => {
+    if (!intent?.payload.unsignedXdr) {
+      setError("Signed XDR intent is missing unsignedXdr payload");
+      return;
+    }
+    if (destScanReport?.verdict === "malicious") {
+      setError(
+        `Scan & Shield blocked transaction: ${destScanReport.findings[0]?.title ?? "malicious transaction"}`,
+      );
+      return;
+    }
+    if (destScanReport?.verdict === "warning" && !warningAcknowledged) {
+      setError("Acknowledge the Scan & Shield warning before signing this transaction.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const res = await signAndSubmitRawXdrWithShield(intent.payload.unsignedXdr, true);
+      await confirmOnServer({
+        txHash: res.hash,
+        ...(activeAccount ? { payerAddress: activeAccount.address } : {}),
+      });
+      setCompletedMsg(
+        `Transaction confirmed on Stellar (${res.hash.slice(0, 8)}…${res.hash.slice(-8)}).`,
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Transaction execution failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const boomerangReturn = useMemo(() => {
+    const origin = intent?.payload.originApp;
+    const param = intent?.payload.returnStartAppParam?.trim();
+    if (origin === "astrodex" && config.astrodexBotUsername) {
+      const base = config.astrodexMiniAppShortName
+        ? `https://t.me/${config.astrodexBotUsername}/${config.astrodexMiniAppShortName}`
+        : `https://t.me/${config.astrodexBotUsername}`;
+      return {
+        label: "Return to AstroDex",
+        href: param ? `${base}?startapp=${encodeURIComponent(param)}` : base,
+      };
+    }
+    if (origin === "astrogate" && config.astrogateBotUsername) {
+      const base = `https://t.me/${config.astrogateBotUsername}`;
+      return {
+        label: "Return to AstroGate",
+        href: param ? `${base}?start=${encodeURIComponent(param)}` : base,
+      };
+    }
+    return null;
+  }, [
+    intent?.payload.originApp,
+    intent?.payload.returnStartAppParam,
+    config.astrodexBotUsername,
+    config.astrodexMiniAppShortName,
+    config.astrogateBotUsername,
+  ]);
+
   const handleCopyClaimUrl = async () => {
     if (!shareClaimUrl) return;
     try {
@@ -764,9 +831,24 @@ export function IntentSheet({
               </button>
             </div>
           )}
+          {boomerangReturn && (
+            <a
+              href={boomerangReturn.href}
+              className="aw-btn-primary"
+              style={{
+                textAlign: "center",
+                textDecoration: "none",
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              {boomerangReturn.label}
+            </a>
+          )}
           <a
             href={`https://t.me/${config.tgBotUsername}`}
-            className="aw-btn-primary"
+            className={boomerangReturn ? "aw-btn-secondary" : "aw-btn-primary"}
             style={{
               textAlign: "center",
               textDecoration: "none",
@@ -1110,6 +1192,84 @@ export function IntentSheet({
                 onClick={() => void handleConfirmReclaimReserve()}
               >
                 {busy ? "Reclaiming Locked Reserves..." : "Reclaim Locked XLM Now"}
+              </button>
+            </>
+          ) : intent.actionType === "sign_xdr" ? (
+            <>
+              <div className="aw-list-row">
+                <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Origin App</span>
+                <strong style={{ fontSize: 13 }}>
+                  {intent.payload.originApp === "astrodex"
+                    ? "AstroDex Terminal"
+                    : intent.payload.originApp === "astrogate"
+                      ? "AstroGate Launchpad"
+                      : "ASTRO Ecosystem"}
+                </strong>
+              </div>
+              {intent.payload.subAction && (
+                <div className="aw-list-row">
+                  <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>Action</span>
+                  <code>{intent.payload.subAction}</code>
+                </div>
+              )}
+              {intent.payload.humanSummary && (
+                <div className="aw-banner" style={{ fontSize: 12 }}>
+                  <strong>Summary:</strong> {intent.payload.humanSummary}
+                </div>
+              )}
+              <div className="aw-list-row">
+                <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                  Signing Account
+                </span>
+                <span style={{ fontSize: 13, fontWeight: 600 }}>
+                  {activeAccount?.label} ({activeAccount?.address.slice(0, 6)}…
+                  {activeAccount?.address.slice(-4)})
+                </span>
+              </div>
+              {scanningIntent && (
+                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                  Running Scan &amp; Shield XDR inspection...
+                </div>
+              )}
+              {destScanReport && (
+                <div
+                  className={
+                    destScanReport.verdict === "malicious"
+                      ? "aw-banner aw-banner--danger"
+                      : destScanReport.verdict === "warning"
+                        ? "aw-banner aw-banner--warn"
+                        : "aw-banner"
+                  }
+                  style={{ fontSize: 12, display: "grid", gap: 6 }}
+                >
+                  <strong>Scan &amp; Shield: {destScanReport.verdict.toUpperCase()}</strong>
+                  {destScanReport.findings[0] && (
+                    <div>{destScanReport.findings[0].description}</div>
+                  )}
+                  {destScanReport.verdict === "warning" && (
+                    <label className="aw-checkbox-row" style={{ marginTop: 4 }}>
+                      <input
+                        type="checkbox"
+                        checked={warningAcknowledged}
+                        onChange={(e) => setWarningAcknowledged(e.target.checked)}
+                      />
+                      <span>I reviewed this warning and accept the risk.</span>
+                    </label>
+                  )}
+                </div>
+              )}
+              <button
+                type="button"
+                className="aw-btn-primary"
+                disabled={
+                  busy ||
+                  !intent.payload.unsignedXdr ||
+                  destScanReport?.verdict === "malicious" ||
+                  (destScanReport?.verdict === "warning" && !warningAcknowledged)
+                }
+                onClick={() => void handleConfirmSignXdr()}
+              >
+                {busy ? "Signing & Submitting..." : "Sign & Execute Transaction"}
               </button>
             </>
           ) : (

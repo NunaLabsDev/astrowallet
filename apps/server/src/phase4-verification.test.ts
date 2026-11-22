@@ -1,5 +1,6 @@
 import type {
   ClaimLink,
+  ConnectRequestRecord,
   IntentStatus,
   SignedIntent,
   TelegramUserBinding,
@@ -48,6 +49,7 @@ function createPhase4MemoryRepo(): ServerRepository {
   const rateLimits = new Map<string, number>();
   const relayBudget = new Map<string, bigint>();
   const tgUpdates = new Set<number>();
+  const connectRequests = new Map<string, ConnectRequestRecord>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -218,6 +220,32 @@ function createPhase4MemoryRepo(): ServerRepository {
     },
     async deleteEncryptedVaultBackup() {
       return false;
+    },
+    async createConnectRequest(req) {
+      connectRequests.set(req.requestId, req);
+      return req;
+    },
+    async getConnectRequest(requestId) {
+      return connectRequests.get(requestId) ?? null;
+    },
+    async completeConnectRequest({
+      requestId,
+      status,
+      resultJson,
+      responderTelegramUserId,
+      updatedAt,
+    }) {
+      const prev = connectRequests.get(requestId);
+      if (!prev || prev.status !== "pending") return null;
+      const next: ConnectRequestRecord = {
+        ...prev,
+        status,
+        resultJson: resultJson ?? prev.resultJson,
+        responderTelegramUserId: responderTelegramUserId ?? prev.responderTelegramUserId,
+        updatedAt,
+      };
+      connectRequests.set(requestId, next);
+      return next;
     },
   };
 }

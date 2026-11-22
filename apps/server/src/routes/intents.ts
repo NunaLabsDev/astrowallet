@@ -13,6 +13,7 @@ import {
   formatRequestCard,
   formatSplitCard,
   formatSwapQuoteCard,
+  signIntentToken,
   verifyIntentToken,
 } from "@astrowallet/tg-protocol";
 import { Hono, type Context } from "hono";
@@ -70,7 +71,40 @@ const ConfirmIntentBodySchema = z.object({
   expiresAt: z.number().int().positive().optional(),
 });
 
+const CrossAppIntentEnvelopeSchema = z.object({
+  version: z.literal(1).optional(),
+  originApp: z.enum(["astrodex", "astrogate"]),
+  subAction: z.string().trim().min(1).max(64),
+  humanSummary: z.string().trim().min(1).max(400),
+  unsignedXdr: z.string().trim().min(16).max(32_768),
+  xdrSha256: z.string().regex(/^[a-f0-9]{64}$/i),
+  returnStartAppParam: z.string().trim().max(128).optional(),
+  fromAsset: z.string().trim().max(128).optional(),
+  toAsset: z.string().trim().max(128).optional(),
+  amount: z.string().trim().max(64).optional(),
+  expectedOutputAmount: z.string().trim().max(64).optional(),
+  provider: z.string().trim().max(64).optional(),
+  priceImpactPct: z.string().trim().max(32).optional(),
+});
+
+const ExternalIntentBodySchema = z.object({
+  intentId: z
+    .string()
+    .trim()
+    .regex(/^[A-Za-z0-9_-]{8,64}$/)
+    .optional(),
+  telegramUserId: z.string().regex(/^\d{1,20}$/),
+  actionType: z.enum(["swap", "sign_xdr"]),
+  envelope: CrossAppIntentEnvelopeSchema,
+  expiresAt: z.number().int().positive().optional(),
+});
+
 interface IntentPayload {
+  originApp?: "astrodex" | "astrogate" | undefined;
+  subAction?: string | undefined;
+  humanSummary?: string | undefined;
+  xdrSha256?: string | undefined;
+  returnStartAppParam?: string | undefined;
   amount?: string | undefined;
   totalAmount?: string | undefined;
   participantCount?: number | undefined;
@@ -100,6 +134,14 @@ function constantTimeEqual(a: string, b: string): boolean {
     diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
   }
   return diff === 0;
+}
+
+async function sha256Hex(raw: string): Promise<string> {
+  const bytes = new TextEncoder().encode(raw);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function parsePayload(raw: string): IntentPayload {
@@ -146,6 +188,83 @@ export type IntentRouteEnv = {
 
 export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRouteEnv> {
   const router = new Hono<IntentRouteEnv>();
+
+  router.post("/external", async (c) => {
+    const config = c.get("config");
+    const repo = c.get("repo");
+
+    if (!config.ecosystemSharedIntentSecret) {
+      return c.json({ error: "External ecosystem intents are not enabled" }, 503);
+    }
+
+    const secretHeader = c.req.header("X-Ecosystem-Secret")?.trim() ?? "";
+    if (!secretHeader || !constantTimeEqual(secretHeader, config.ecosystemSharedIntentSecret)) {
+      return c.json({ error: "Unauthorized ecosystem intent request" }, 401);
+    }
+
+    let body: z.infer<typeof ExternalIntentBodySchema>;
+    try {
+      body = ExternalIntentBodySchema.parse(await c.req.json());
+    } catch (err) {
+      return c.json(
+        { error: "Invalid external intent payload", details: err instanceof Error ? err.message : undefined },
+        400,
+      );
+    }
+
+    const computedSha = await sha256Hex(body.envelope.unsignedXdr);
+    if (!constantTimeEqual(computedSha, body.envelope.xdrSha256.toLowerCase())) {
+      return c.json({ error: "envelope.xdrSha256 does not match unsignedXdr" }, 400);
+    }
+
+    const intentId = body.intentId ?? `ext_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    const existing = await repo.getSignedIntent(intentId);
+    if (existing) {
+      return c.json({ error: "Intent ID already exists" }, 409);
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const requestedExpiresAt = body.expiresAt ?? now + 300;
+    const expiresAt = Math.max(now + 30, Math.min(now + 300, requestedExpiresAt));
+
+    const sig = await signIntentToken(
+      {
+        intentId,
+        network: config.network,
+        telegramUserId: body.telegramUserId,
+        expiresAt,
+      },
+      config.intentHmacSecret,
+    );
+
+    await repo.createSignedIntent({
+      intentId,
+      network: config.network,
+      creatorTelegramUserId: body.telegramUserId,
+      actionType: body.actionType,
+      payloadJson: JSON.stringify(body.envelope),
+      hmacSig: sig,
+      status: "pending",
+      expiresAt,
+      createdAt: now,
+    });
+
+    const deepLink = buildTelegramMiniAppLink({
+      botUsername: config.tgBotUsername,
+      shortName: config.tgMiniAppShortName,
+      pwaOrigin: config.pwaOrigin,
+      intentId,
+      sig,
+    });
+
+    return c.json({
+      ok: true,
+      intentId,
+      sig,
+      expiresAt,
+      deepLink,
+    });
+  });
 
   router.get("/:intentId", async (c) => {
     const config = c.get("config");
@@ -757,9 +876,11 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
           }
         : intent.actionType === "swap"
           ? { allowSorobanRpcFallback: true, expectedActionType: "swap" }
-          : intent.actionType === "reclaim_reserve"
-            ? { expectedActionType: "reclaim_reserve" }
-            : {}),
+          : intent.actionType === "sign_xdr"
+            ? { allowSorobanRpcFallback: true }
+            : intent.actionType === "reclaim_reserve"
+              ? { expectedActionType: "reclaim_reserve" }
+              : {}),
     };
 
     const txCheck = await verifyFn(config, parsedBody.txHash, expected);

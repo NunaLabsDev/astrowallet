@@ -1,6 +1,10 @@
 import type {
   AccountKind,
   ClaimLink,
+  ConnectActionType,
+  ConnectAppTrustTier,
+  ConnectRequestRecord,
+  ConnectRequestStatus,
   ContractAddress,
   IntentActionType,
   IntentStatus,
@@ -130,6 +134,16 @@ export interface ServerRepository {
     telegramUserId: string,
     network: StellarNetwork,
   ): Promise<boolean>;
+
+  createConnectRequest(req: ConnectRequestRecord): Promise<ConnectRequestRecord>;
+  getConnectRequest(requestId: string): Promise<ConnectRequestRecord | null>;
+  completeConnectRequest(input: {
+    requestId: string;
+    status: "approved" | "rejected" | "expired";
+    resultJson?: string | undefined;
+    responderTelegramUserId?: string | undefined;
+    updatedAt: number;
+  }): Promise<ConnectRequestRecord | null>;
 }
 
 interface RawUserRow {
@@ -185,6 +199,42 @@ interface RawEncryptedBackupRow {
   version: number;
   created_at: number;
   updated_at: number;
+}
+
+interface RawConnectRequestRow {
+  request_id: string;
+  network: StellarNetwork;
+  action: ConnectActionType;
+  status: ConnectRequestStatus;
+  trust_tier: ConnectAppTrustTier;
+  hmac_sig: string;
+  result_token_hash: string;
+  app_json: string;
+  payload_json: string;
+  result_json: string | null;
+  responder_tg_id: string | null;
+  expires_at: number;
+  created_at: number;
+  updated_at: number;
+}
+
+function mapConnectRequestRow(row: RawConnectRequestRow): ConnectRequestRecord {
+  return {
+    requestId: row.request_id,
+    network: row.network,
+    action: row.action,
+    status: row.status,
+    trustTier: row.trust_tier,
+    hmacSig: row.hmac_sig,
+    resultTokenHash: row.result_token_hash,
+    appJson: row.app_json,
+    payloadJson: row.payload_json,
+    resultJson: row.result_json ?? undefined,
+    responderTelegramUserId: row.responder_tg_id ?? undefined,
+    expiresAt: row.expires_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 function mapEncryptedBackupRow(row: RawEncryptedBackupRow): StoredEncryptedVaultBackup {
@@ -752,6 +802,7 @@ export function createD1Repository(db: D1Database): ServerRepository {
     async purgeExpiredRecords(nowSec) {
       await db.batch([
         db.prepare("DELETE FROM signed_intents WHERE expires_at < ?").bind(nowSec - 3600),
+        db.prepare("DELETE FROM connect_requests WHERE expires_at < ?").bind(nowSec - 3600),
         db.prepare("DELETE FROM rate_limits WHERE reset_at < ?").bind(nowSec - 300),
         db
           .prepare("DELETE FROM processed_tg_updates WHERE processed_at < ?")
@@ -825,6 +876,71 @@ export function createD1Repository(db: D1Database): ServerRepository {
         .bind(telegramUserId, network)
         .run();
       return (res.meta?.changes ?? 0) > 0;
+    },
+
+    async createConnectRequest(req) {
+      await db
+        .prepare(
+          `INSERT INTO connect_requests
+           (request_id, network, action, status, trust_tier, hmac_sig, result_token_hash, app_json, payload_json, result_json, responder_tg_id, expires_at, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          req.requestId,
+          req.network,
+          req.action,
+          req.status,
+          req.trustTier,
+          req.hmacSig,
+          req.resultTokenHash,
+          req.appJson,
+          req.payloadJson,
+          req.resultJson ?? null,
+          req.responderTelegramUserId ?? null,
+          req.expiresAt,
+          req.createdAt,
+          req.updatedAt,
+        )
+        .run();
+      return req;
+    },
+
+    async getConnectRequest(requestId) {
+      const row = await db
+        .prepare("SELECT * FROM connect_requests WHERE request_id = ?")
+        .bind(requestId)
+        .first<RawConnectRequestRow>();
+      return row ? mapConnectRequestRow(row) : null;
+    },
+
+    async completeConnectRequest({
+      requestId,
+      status,
+      resultJson,
+      responderTelegramUserId,
+      updatedAt,
+    }) {
+      const res = await db
+        .prepare(
+          `UPDATE connect_requests
+           SET status = ?,
+               result_json = COALESCE(?, result_json),
+               responder_tg_id = COALESCE(?, responder_tg_id),
+               updated_at = ?
+           WHERE request_id = ? AND status = 'pending'`,
+        )
+        .bind(
+          status,
+          resultJson ?? null,
+          responderTelegramUserId ?? null,
+          updatedAt,
+          requestId,
+        )
+        .run();
+      if ((res.meta?.changes ?? 0) === 0) {
+        return null;
+      }
+      return this.getConnectRequest(requestId);
     },
   };
 }

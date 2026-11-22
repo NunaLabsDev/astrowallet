@@ -1,6 +1,7 @@
 import type {
   ClassicAddress,
   ClaimLink,
+  ConnectRequestRecord,
   IntentStatus,
   SignedIntent,
   TelegramUserBinding,
@@ -193,6 +194,7 @@ function createProductionParityRepo(): ServerRepository {
   const relayBudget = new Map<string, bigint>();
   const tgUpdates = new Set<number>();
   const encryptedBackups = new Map<string, StoredEncryptedVaultBackup>();
+  const connectRequests = new Map<string, ConnectRequestRecord>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -443,6 +445,32 @@ function createProductionParityRepo(): ServerRepository {
     },
     async deleteEncryptedVaultBackup(telegramUserId, network) {
       return encryptedBackups.delete(`${telegramUserId}:${network}`);
+    },
+    async createConnectRequest(req) {
+      connectRequests.set(req.requestId, req);
+      return req;
+    },
+    async getConnectRequest(requestId) {
+      return connectRequests.get(requestId) ?? null;
+    },
+    async completeConnectRequest({
+      requestId,
+      status,
+      resultJson,
+      responderTelegramUserId,
+      updatedAt,
+    }) {
+      const prev = connectRequests.get(requestId);
+      if (!prev || prev.status !== "pending") return null;
+      const next: ConnectRequestRecord = {
+        ...prev,
+        status,
+        resultJson: resultJson ?? prev.resultJson,
+        responderTelegramUserId: responderTelegramUserId ?? prev.responderTelegramUserId,
+        updatedAt,
+      };
+      connectRequests.set(requestId, next);
+      return next;
     },
   };
 }

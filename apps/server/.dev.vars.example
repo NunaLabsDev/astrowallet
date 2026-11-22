@@ -29,7 +29,8 @@ TG_BOT_TOKEN=replace_with_dedicated_testnet_bot_token
 TG_WEBHOOK_SECRET=replace_with_at_least_16_char_random_secret
 INTENT_HMAC_SECRET=replace_with_at_least_32_char_random_hmac_secret
 
-# Optional Phase 2/3 secrets
+# Optional Phase 2/3 & Ecosystem Federation secrets
 # OZ_CHANNELS_API_KEY=
 # SOROSWAP_API_KEY=
 # INDEXER_WEBHOOK_SECRET=
+# ECOSYSTEM_SHARED_INTENT_SECRET=replace_with_at_least_32_char_shared_ecosystem_secret

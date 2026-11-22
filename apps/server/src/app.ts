@@ -8,6 +8,9 @@ import { webhookCallback } from "grammy";
 import { Hono, type Context, type Next } from "hono";
 import { createTelegramBot } from "./bot.js";
 import { createD1Repository, type ServerRepository } from "./db/repository.js";
+import { createConnectRoutes } from "./routes/connect.js";
+import { createDiscoveryRoutes } from "./routes/discovery.js";
+import { createIdentityRoutes } from "./routes/identity.js";
 import { createIndexerRoutes } from "./routes/indexer.js";
 import { createIntentRoutes, type IntentRoutesDeps } from "./routes/intents.js";
 import { createProxyRoutes } from "./routes/proxy.js";
@@ -63,16 +66,33 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
     }
     c.set("config", config);
 
-    // 2. Strict CORS allowlist (never wildcard '*')
+    // 2. Scoped CORS: open for permissionless AstroConnect / AstroID / discovery endpoints;
+    //    strict config.allowedOrigins allowlist for all private wallet, webhook, proxy, and relay routes.
     const origin = c.req.header("Origin");
+    const path = c.req.path;
+    const isOpenStandardRoute =
+      path === "/openapi.json" ||
+      path === "/llms.txt" ||
+      path.startsWith("/v1/identity/") ||
+      path.startsWith("/v1/connect/");
+
     if (origin) {
-      if (!config.allowedOrigins.includes(origin)) {
-        return c.json({ error: "Origin not allowed" }, 403);
+      if (isOpenStandardRoute) {
+        c.header("Access-Control-Allow-Origin", "*");
+        c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+        c.header(
+          "Access-Control-Allow-Headers",
+          "Content-Type, Authorization, X-Connect-Token, X-Ecosystem-Secret",
+        );
+      } else {
+        if (!config.allowedOrigins.includes(origin)) {
+          return c.json({ error: "Origin not allowed" }, 403);
+        }
+        c.header("Access-Control-Allow-Origin", origin);
+        c.header("Vary", "Origin");
+        c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+        c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
       }
-      c.header("Access-Control-Allow-Origin", origin);
-      c.header("Vary", "Origin");
-      c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-      c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
       if (c.req.method === "OPTIONS") {
         return c.body(null, 204);
@@ -117,6 +137,8 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
 
   app.use("/tg/webhook", attachRepo);
   app.use("/v1/tg/*", attachRepo);
+  app.use("/v1/identity/*", attachRepo);
+  app.use("/v1/connect/*", attachRepo);
   app.use("/v1/intents/*", attachRepo);
   app.use("/v1/relay/*", attachOptionalRepo);
   app.use("/v1/proxy/*", attachOptionalRepo);
@@ -164,7 +186,16 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
     return handler(c);
   });
 
+  app.route("/", createDiscoveryRoutes());
   app.route("/v1/tg", createTgAuthRoutes());
+  app.route("/v1/identity", createIdentityRoutes());
+  app.route(
+    "/v1/connect",
+    createConnectRoutes({
+      fetchFn: deps.fetchFn,
+      verifyTxFn: deps.verifyTxFn,
+    }),
+  );
 
   app.route(
     "/v1/intents",

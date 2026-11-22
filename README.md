@@ -47,9 +47,17 @@ Every major Stellar wallet today solves only part of the mobile-first experience
 
 ## Modular Architecture Snapshot
 
-- **6 Hexagonal Packages:** `@astrowallet/domain`, `@astrowallet/stellar-core`, `@astrowallet/ton-core`, `@astrowallet/security-shield`, `@astrowallet/defi`, `@astrowallet/tg-protocol`.
+- **7 Hexagonal Packages:** `@astrowallet/domain`, `@astrowallet/stellar-core`, `@astrowallet/ton-core`, `@astrowallet/security-shield`, `@astrowallet/defi`, `@astrowallet/tg-protocol`, `@astrowallet/connect` (open AstroConnect v1 developer SDK).
 - **2 Unified Apps:** `apps/pwa` (Telegram-Exclusive Apple Liquid Glass Mini App) and `apps/server` (Cloudflare Worker running Hono + `grammY` + D1 + KV + Durable Objects), plus minimal `contracts/` (Phase 2 Claim-Link Escrow).
 - **Zero Hardcoding:** Switching `STELLAR_NETWORK=testnet` ↔ `mainnet` is strictly environment-driven via Zod schemas with an enforced Mainnet Friendbot hard-block.
+
+---
+
+## Open Standard for Third-Party Developers (`AstroConnect v1`)
+
+Any Stellar or Soroban Telegram Mini App can use **AstroWallet** as its permissionless login & Clear-Sign wallet layer:
+- [`docs/DEVELOPER_QUICKSTART.md`](docs/DEVELOPER_QUICKSTART.md) — 5-minute TypeScript guide (`@astrowallet/connect`, SEP-53 login verification, Soroban XDR execution, and `@creit.tech/stellar-wallets-kit` bridge).
+- [`docs/ASTRO_CONNECT_SPEC.md`](docs/ASTRO_CONNECT_SPEC.md) — Formal AstroConnect v1 cryptographic & Telegram ToS §7.3–7.4 protocol specification (`/v1/connect/*`, `/openapi.json`, `/llms.txt`).
 
 ---
 
@@ -74,9 +82,9 @@ Every major Stellar wallet today solves only part of the mobile-first experience
 
 | Component | Live Testnet Identifier |
 | :--- | :--- |
-| **Telegram Mini App Link** | [`t.me/AstroWalletAppBot/wallet`](https://t.me/AstroWalletAppBot/wallet) (`https://astrowallet-b1o.pages.dev/app`) |
-| **Health Check** | `https://astrowallet-b1o.pages.dev/health` |
-| **Telegram Super-Bot** | [`@AstroWalletAppBot`](https://t.me/AstroWalletAppBot) (`https://astrowallet-b1o.pages.dev/tg/webhook`) |
+| **Telegram Mini App Link** | [`t.me/AstroWalletAppBot/wallet`](https://t.me/AstroWalletAppBot/wallet) (`https://astrowallet-soroban.pages.dev/app`) |
+| **Health Check** | `https://astrowallet-soroban.pages.dev/health` |
+| **Telegram Super-Bot** | [`@AstroWalletAppBot`](https://t.me/AstroWalletAppBot) (`https://astrowallet-soroban.pages.dev/tg/webhook`) |
 | **Claim-Link Escrow V2 Contract (Testnet Live)** | `CDEOJ4KCHMCSJY2N6VCHD3UYVFIIJ3ZVG7DRZ6XMLSTTU4US6ITH36BQ` *(D1 `0002` + `0003` applied remotely + Worker/Pages live)* |
 | **Claim-Link Escrow V2 WASM Hash** | `33ecebddb590eedcf1059a969122c4edf3a9fe092912356d19bd827ce17f61fb` *(superseded V1: `CBZBB5ZAGB...72635`)* |
 | **Sorobits SEP-50 Contract (Testnet)** | `CBVETCPLVAMNUUQRUJGH54XHVQT5ZOVB4FGGP2IGOGAZLUIYBBV7G3I3` |

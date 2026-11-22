@@ -223,4 +223,25 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    files: ["packages/connect-sdk/**/*.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          paths: [
+            { name: "react", message: "connect-sdk must stay framework-agnostic." },
+            { name: "react-dom", message: "connect-sdk must stay framework-agnostic." },
+            { name: "grammy", message: "connect-sdk must stay server-agnostic." },
+            { name: "hono", message: "connect-sdk must stay server-agnostic." },
+          ],
+          patterns: [
+            { group: ["@astrowallet/*"], message: "connect-sdk must stay standalone for npm consumers." },
+            { group: ["@stellar/*"], message: "connect-sdk must stay dependency-light without @stellar/*." },
+            { group: ["cloudflare:*"], message: "connect-sdk cannot import Cloudflare modules." },
+          ],
+        },
+      ],
+    },
+  },
 );

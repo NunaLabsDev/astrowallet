@@ -91,6 +91,20 @@ const OptionalShortNameSchema = (field: string) =>
       .optional(),
   );
 
+const OptionalBotUsernameSchema = (field: string) =>
+  z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .trim()
+      .transform((v) => v.replace(/^@/, ""))
+      .refine(
+        (v) => /^[A-Za-z0-9_]{5,32}$/.test(v),
+        `${field} must be a valid Telegram bot username (5-32 chars)`,
+      )
+      .optional(),
+  );
+
 function parseContractCsv(field: string) {
   return z
     .preprocess(
@@ -113,6 +127,34 @@ function parseContractCsv(field: string) {
           ctx.addIssue({
             code: z.ZodIssueCode.custom,
             message: `${field} contains invalid Soroban contract address "${addr}"`,
+          });
+        }
+      }
+    });
+}
+
+function parseBotUsernameCsv(field: string) {
+  return z
+    .preprocess(
+      (val) => (typeof val === "string" ? val : ""),
+      z.string(),
+    )
+    .transform((raw) =>
+      Array.from(
+        new Set(
+          raw
+            .split(",")
+            .map((part) => part.trim().replace(/^@/, "").toLowerCase())
+            .filter(Boolean),
+        ),
+      ),
+    )
+    .superRefine((bots, ctx) => {
+      for (const bot of bots) {
+        if (!/^[a-z0-9_]{5,32}$/.test(bot)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `${field} contains invalid Telegram bot username "${bot}"`,
           });
         }
       }
@@ -229,6 +271,9 @@ const RawPwaEnvSchema = z
         "VITE_TG_BOT_USERNAME must be a valid Telegram bot username (5-32 chars)",
       ),
     VITE_TG_MINI_APP_SHORT_NAME: OptionalShortNameSchema("VITE_TG_MINI_APP_SHORT_NAME"),
+    VITE_ASTRODEX_BOT_USERNAME: OptionalBotUsernameSchema("VITE_ASTRODEX_BOT_USERNAME"),
+    VITE_ASTRODEX_MINI_APP_SHORT_NAME: OptionalShortNameSchema("VITE_ASTRODEX_MINI_APP_SHORT_NAME"),
+    VITE_ASTROGATE_BOT_USERNAME: OptionalBotUsernameSchema("VITE_ASTROGATE_BOT_USERNAME"),
     VITE_TON_NETWORK: z.preprocess(emptyToUndefined, TonNetworkSchema.optional()),
     VITE_TON_RPC_URLS: parseUrlCsv("VITE_TON_RPC_URLS", false),
     VITE_TON_BRIDGE_URL: OptionalUrlSchema("VITE_TON_BRIDGE_URL"),
@@ -316,6 +361,9 @@ export interface PwaConfig {
   pwaOrigin: string;
   tgBotUsername: string;
   tgMiniAppShortName?: string | undefined;
+  astrodexBotUsername?: string | undefined;
+  astrodexMiniAppShortName?: string | undefined;
+  astrogateBotUsername?: string | undefined;
   tonNetwork: TonNetwork;
   tonRpcUrls: string[];
   tonBridgeUrl?: string | undefined;
@@ -347,6 +395,9 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     pwaOrigin: parsed.VITE_PWA_ORIGIN,
     tgBotUsername: parsed.VITE_TG_BOT_USERNAME,
     tgMiniAppShortName: parsed.VITE_TG_MINI_APP_SHORT_NAME,
+    astrodexBotUsername: parsed.VITE_ASTRODEX_BOT_USERNAME,
+    astrodexMiniAppShortName: parsed.VITE_ASTRODEX_MINI_APP_SHORT_NAME,
+    astrogateBotUsername: parsed.VITE_ASTROGATE_BOT_USERNAME,
     tonNetwork: parsed.VITE_TON_NETWORK ?? parsed.VITE_STELLAR_NETWORK,
     tonRpcUrls: parsed.VITE_TON_RPC_URLS,
     tonBridgeUrl: parsed.VITE_TON_BRIDGE_URL,
@@ -437,6 +488,15 @@ const RawServerEnvSchema = z
     OZ_CHANNELS_API_KEY: OptionalNonEmptyStringSchema,
     SOROSWAP_API_KEY: OptionalNonEmptyStringSchema,
     INDEXER_WEBHOOK_SECRET: OptionalNonEmptyStringSchema,
+    ECOSYSTEM_SHARED_INTENT_SECRET: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .min(32, "ECOSYSTEM_SHARED_INTENT_SECRET must be at least 32 characters")
+        .optional(),
+    ),
+    CONNECT_VERIFIED_BOTS: parseBotUsernameCsv("CONNECT_VERIFIED_BOTS"),
   })
   .superRefine((env, ctx) => {
     if (env.STELLAR_NETWORK === "mainnet" && env.FRIENDBOT_URL) {
@@ -495,6 +555,8 @@ export interface ServerConfig {
   ozChannelsApiKey?: string | undefined;
   soroswapApiKey?: string | undefined;
   indexerWebhookSecret?: string | undefined;
+  ecosystemSharedIntentSecret?: string | undefined;
+  connectVerifiedBots: string[];
 }
 
 export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig {
@@ -528,5 +590,7 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     ozChannelsApiKey: parsed.OZ_CHANNELS_API_KEY,
     soroswapApiKey: parsed.SOROSWAP_API_KEY,
     indexerWebhookSecret: parsed.INDEXER_WEBHOOK_SECRET,
+    ecosystemSharedIntentSecret: parsed.ECOSYSTEM_SHARED_INTENT_SECRET,
+    connectVerifiedBots: parsed.CONNECT_VERIFIED_BOTS,
   };
 }

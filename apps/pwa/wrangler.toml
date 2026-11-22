@@ -1,0 +1,7 @@
+name = "astrowallet-soroban"
+compatibility_date = "2026-04-01"
+pages_build_output_dir = "dist"
+
+[[services]]
+binding = "ASTROWALLET_SERVER"
+service = "astrowallet-server"

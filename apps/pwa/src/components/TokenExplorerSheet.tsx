@@ -785,6 +785,27 @@ export function TokenExplorerSheet({
               <span>{trustBusy ? "Reclaiming..." : "Reclaim 0.5 XLM"}</span>
             </button>
           )}
+
+          {config.astrodexBotUsername && (
+            <a
+              href={`${
+                config.astrodexMiniAppShortName
+                  ? `https://t.me/${config.astrodexBotUsername}/${config.astrodexMiniAppShortName}`
+                  : `https://t.me/${config.astrodexBotUsername}`
+              }?startapp=${encodeURIComponent(
+                `token_${
+                  selectedToken.assetIssuer
+                    ? `${selectedToken.assetCode}_${selectedToken.assetIssuer}`
+                    : selectedToken.assetCode
+                }`,
+              )}`}
+              className="aw-btn-secondary"
+              style={{ textDecoration: "none" }}
+            >
+              <IconChart size={15} />
+              <span>Pro Chart &amp; Scan on AstroDex</span>
+            </a>
+          )}
         </div>
       </div>
 

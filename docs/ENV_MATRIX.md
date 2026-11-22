@@ -18,6 +18,9 @@
 | `VITE_PWA_ORIGIN` | `https://testnet.astrowallet.example` | `https://app.astrowallet.example` | WebAuthn `rpId` origin anchor |
 | `VITE_TG_BOT_USERNAME` | `AstroWalletAppBot` | `AstroWalletBot` | Deep-link builder only |
 | `VITE_TG_MINI_APP_SHORT_NAME` | `wallet` | `wallet` | BotFather Mini App short name (`t.me/<bot>/<short_name>`) |
+| `VITE_ASTRODEX_BOT_USERNAME` | `AstroDexBot` | `AstroDexBot` | Optional Boomerang return & Token Explorer pro link target |
+| `VITE_ASTRODEX_MINI_APP_SHORT_NAME` | `dex` | `dex` | Optional AstroDex Mini App short name (`t.me/<bot>/<short_name>`) |
+| `VITE_ASTROGATE_BOT_USERNAME` | `AstroGateSorobanBot` | `AstroGateBot` | Optional Boomerang return link for AstroGate-origin intents |
 | `VITE_TON_NETWORK` | `testnet` | `mainnet` | Defaults to `VITE_STELLAR_NETWORK` |
 | `VITE_TON_RPC_URLS` | Comma-separated TON RPC URLs | Comma-separated TON RPC URLs | Toncenter JSON-RPC v2 endpoints (HTTPS on mainnet) |
 | `VITE_TON_BRIDGE_URL` | TON Connect SSE bridge URL | TON Connect SSE bridge URL | TON Connect v2 encrypted bridge (`https://...`) |
@@ -61,3 +64,5 @@
 | `OZ_CHANNELS_API_KEY` | Secret | Rate-limited OpenZeppelin Channels sponsorship key |
 | `SOROSWAP_API_KEY` | Secret | Proxied `sk_` key (never exposed to browser) |
 | `INDEXER_WEBHOOK_SECRET` | Secret | Verifies Goldsky Turbo Pipeline / Mercury webhook signatures on `/webhooks/indexer` |
+| `ECOSYSTEM_SHARED_INTENT_SECRET` | Secret | Authenticates server-to-server `POST /v1/intents/external` & `official` AstroConnect requests (`>= 32` chars) |
+| `CONNECT_VERIFIED_BOTS` | Env Var | Optional comma-separated list of verified third-party Telegram bot usernames (`verified` trust tier in AstroConnect v1) |

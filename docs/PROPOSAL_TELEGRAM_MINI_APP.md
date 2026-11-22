@@ -17,7 +17,7 @@
 Hoy el bot abre enlaces HTTPS al PWA en un navegador externo o en el WebView embebido de Telegram. Eso causa:
 
 1. **Pérdida de contexto:** el usuario sale de Telegram para firmar.
-2. **Almacenamiento aislado en iOS:** el WebView de Telegram, Safari y el PWA instalado no comparten IndexedDB. [`IosBrowserGuard`](../apps/pwa/src/components/IosBrowserGuard.tsx) sugiere "Confirmar con PIN aquí", pero la bóveda no existe en ese WebView, lo que empuja a pegar la semilla en un navegador embebido (ver auditoría §4).
+2. **Almacenamiento aislado en iOS:** el WebView de Telegram, Safari y el PWA instalado no comparten IndexedDB. `IosBrowserGuard` (superseded by [`TelegramOnlyGate`](../apps/pwa/src/components/TelegramOnlyGate.tsx)) sugiere "Confirmar con PIN aquí", pero la bóveda no existe en ese WebView, lo que empuja a pegar la semilla en un navegador embebido (ver auditoría §4).
 3. **Identidad débil:** el enlace firmado es un token al portador; nadie comprueba que quien lo abre sea el usuario de Telegram que lo pidió (auditoría P0-1).
 
 ## 2. Hipótesis de solución

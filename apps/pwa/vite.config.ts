@@ -48,9 +48,32 @@ function cspConnectSrcPlugin(env: Record<string, string | undefined>): Plugin {
   };
 }
 
+function loadFallbackEnvExample(dir: string): Record<string, string> {
+  const examplePath = path.resolve(dir, ".env.example");
+  if (!existsSync(examplePath)) return {};
+  const out: Record<string, string> = {};
+  for (const rawLine of readFileSync(examplePath, "utf8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || !line.includes("=")) continue;
+    const eq = line.indexOf("=");
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    if (key.startsWith("VITE_") && val !== "") {
+      out[key] = val;
+    }
+  }
+  return out;
+}
+
 export default defineConfig(({ mode }) => {
+  const exampleEnv = loadFallbackEnvExample(process.cwd());
   const fileEnv = loadEnv(mode, process.cwd(), "VITE_");
-  const combinedEnv = { ...fileEnv, ...process.env };
+  for (const [k, v] of Object.entries(exampleEnv)) {
+    if (process.env[k] === undefined && fileEnv[k] === undefined) {
+      process.env[k] = v;
+    }
+  }
+  const combinedEnv = { ...exampleEnv, ...fileEnv, ...process.env };
   return {
     plugins: [react(), cspConnectSrcPlugin(combinedEnv)],
     worker: {

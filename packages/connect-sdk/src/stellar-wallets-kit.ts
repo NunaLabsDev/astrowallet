@@ -20,6 +20,17 @@ export interface StellarWalletsKitCompatibleModule {
     message: string,
     opts?: { address?: string | undefined; humanSummary?: string | undefined },
   ): Promise<{ signedMessage: string; signerAddress?: string | undefined }>;
+  signAuthEntry?(
+    entryXdr: string,
+    opts?: { address?: string | undefined; humanSummary?: string | undefined },
+  ): Promise<{ signedAuthEntry: string; signerAddress?: string | undefined }>;
+  getProviderMetadata?(): {
+    id: string;
+    name: string;
+    standards: readonly string[];
+    chains: readonly string[];
+    capabilities: readonly string[];
+  };
   getNetwork(): Promise<{ network: string; networkPassphrase?: string | undefined }>;
 }
 
@@ -96,6 +107,29 @@ export function createAstroWalletKitModule(
       return {
         signedMessage: result.signatureBase64,
         signerAddress: result.address,
+      };
+    },
+
+    async signAuthEntry(entryXdr, opts) {
+      const result = await client.signMessage(entryXdr, {
+        humanSummary:
+          opts?.humanSummary ?? `Authorize Soroban entry for ${options.app.name}`,
+      });
+      cachedAddress = result.address;
+      cachedNetwork = result.network;
+      return {
+        signedAuthEntry: result.signatureBase64,
+        signerAddress: result.address,
+      };
+    },
+
+    getProviderMetadata() {
+      return {
+        id: "astrowallet",
+        name: "AstroWallet (Telegram)",
+        standards: ["SEP-43", "SEP-53", "SEP-60-draft", "AstroConnect-v1"],
+        chains: ["stellar:pubnet", "stellar:testnet"],
+        capabilities: ["clear_sign", "fee_bump_relay", "x402_auth_entry"],
       };
     },
 

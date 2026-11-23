@@ -3210,4 +3210,104 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(badgeRes.status).toBe(200);
     expect(badgeRes.headers.get("Content-Type")).toContain("image/svg+xml");
   });
+
+  it("auto-routes /pay for non-XLM asset into ClaimEscrow when recipient @bob lacks trustline", async () => {
+    const repo = createMemoryRepo();
+    const bobAddr = Keypair.random().publicKey() as ClassicAddress;
+    const usdcIssuer = "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5";
+    await repo.linkVerifiedAddresses({
+      telegramUserId: "2002",
+      usernameLower: "bob_user",
+      accounts: [
+        {
+          address: bobAddr,
+          accountKind: "classic",
+          label: "Main",
+          derivationIndex: 0,
+          isDefault: true,
+        },
+      ],
+    });
+
+    const createdIntents: SignedIntent[] = [];
+    const origCreate = repo.createSignedIntent.bind(repo);
+    repo.createSignedIntent = async (intent) => {
+      createdIntents.push(intent);
+      return origCreate(intent);
+    };
+
+    const telegramReplies: string[] = [];
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input, init) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url.includes("api.telegram.org")) {
+          const body = JSON.parse(String(init?.body ?? "{}")) as { text?: string };
+          if (body.text) telegramReplies.push(body.text);
+          return new Response(
+            JSON.stringify({ ok: true, result: { message_id: 99, chat: { id: 1001, type: "private" } } }),
+            { status: 200 },
+          );
+        }
+        if (url.includes(`/accounts/${bobAddr}`)) {
+          return new Response(
+            JSON.stringify({
+              id: bobAddr,
+              balances: [{ asset_type: "native", balance: "10.0000000" }],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("sep42") || url.includes("asset-list")) {
+          return new Response(
+            JSON.stringify({
+              assets: [{ code: "USDC", issuer: usdcIssuer }],
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({}), { status: 404 });
+      },
+    });
+
+    const res = await app.request(
+      "/tg/webhook",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Telegram-Bot-Api-Secret-Token": TEST_ENV.TG_WEBHOOK_SECRET,
+        },
+        body: JSON.stringify({
+          update_id: 991001,
+          message: {
+            message_id: 12,
+            date: Math.floor(Date.now() / 1000),
+            chat: { id: 1001, type: "private" },
+            from: { id: 1001, is_bot: false, first_name: "Alice", username: "alice_user" },
+            text: "/pay 5 USDC @bob_user",
+            entities: [{ offset: 0, length: 4, type: "bot_command" }],
+          },
+        }),
+      },
+      {
+        ...TEST_ENV,
+        CLAIM_ESCROW_CONTRACT_ID: "CDEOJ4KCHMCSJY2N6VCHD3UYVFIIJ3ZVG7DRZ6XMLSTTU4US6ITH36BQ",
+        SEP42_ASSET_LIST_URLS: "https://api.stellar.expert/explorer/testnet/asset-list/top50",
+      },
+    );
+
+    expect(res.status).toBe(200);
+    expect(createdIntents).toHaveLength(1);
+    expect(createdIntents[0]?.actionType).toBe("claim");
+    const payload = JSON.parse(createdIntents[0]!.payloadJson) as {
+      autoEscrowReason?: string;
+      assetCode?: string;
+      recipientUsername?: string;
+    };
+    expect(payload.autoEscrowReason).toBe("missing_trustline");
+    expect(payload.assetCode).toBe("USDC");
+    expect(payload.recipientUsername).toBe("bob_user");
+    expect(telegramReplies.some((t) => t.includes("Auto-Escrow Protection"))).toBe(true);
+  });
 });

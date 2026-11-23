@@ -368,6 +368,24 @@ export function PublicStatsPage() {
             </div>
           </div>
 
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <span className="glass-pill glass-pill--trust" style={{ fontSize: 11 }}>
+              ✓ Zero-PII Salted Analytics
+            </span>
+            <span className="glass-pill glass-pill--gold" style={{ fontSize: 11, color: "#0B1433", fontWeight: 700 }}>
+              Ethena USDe / sUSDe &amp; USDT0
+            </span>
+            <span className="glass-pill" style={{ fontSize: 11 }}>
+              Zero-op_no_trust Auto-Escrow
+            </span>
+            <span className="glass-pill" style={{ fontSize: 11 }}>
+              x402 Agentic Payments
+            </span>
+            <span className="glass-pill" style={{ fontSize: 11 }}>
+              MoneyGram SEP-24 &amp; NEAR Intents
+            </span>
+          </div>
+
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
             {(["all", "mainnet", "testnet"] as const).map((s) => (
               <button

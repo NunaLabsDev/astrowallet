@@ -1,4 +1,5 @@
 import { Asset } from "@stellar/stellar-sdk";
+export * from "./ramps.js";
 import type {
   ContractAddress,
   RampPort,

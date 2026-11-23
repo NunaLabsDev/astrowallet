@@ -21,6 +21,7 @@ import { fetchSep42VerifiedAssets } from "./sep42.js";
 import { simulateSorobanTransaction } from "./simulator.js";
 
 export * from "./decoder.js";
+export * from "./human-summary.js";
 export * from "./rules.js";
 export * from "./sep42.js";
 export * from "./simulator.js";

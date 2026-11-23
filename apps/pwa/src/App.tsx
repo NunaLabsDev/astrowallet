@@ -117,6 +117,9 @@ const DevLabSheet = lazy(() =>
 const RampSheet = lazy(() =>
   import("./components/RampSheet.js").then((m) => ({ default: m.RampSheet })),
 );
+const AgentBudgetSheet = lazy(() =>
+  import("./components/AgentBudgetSheet.js").then((m) => ({ default: m.AgentBudgetSheet })),
+);
 const ReceiveSheet = lazy(() =>
   import("./components/ReceiveSheet.js").then((m) => ({ default: m.ReceiveSheet })),
 );
@@ -151,6 +154,7 @@ type ActiveDrawer =
   | "nftDetail"
   | "tools"
   | "ramp"
+  | "agentBudget"
   | "tonConnect"
   | "dev"
   | "revealSeed"
@@ -276,8 +280,13 @@ function drawerMetadata(
       };
     case "ramp":
       return {
-        title: "CCTP Precision Guard",
-        subtitle: "Circle CCTP 6↔7 USDC decimal guard & forwarder validator",
+        title: "Cash & Cross-Chain Hub",
+        subtitle: "MoneyGram SEP-24 Cash-Out, 1-Click Deposits, CCTP & LayerZero OFT",
+      };
+    case "agentBudget":
+      return {
+        title: "AI Agent Budget (x402)",
+        subtitle: "Daily USDC caps & zero-XLM Soroban auth entries for AI agents",
       };
     case "tonConnect":
       return {
@@ -2014,8 +2023,23 @@ function WalletShell({
                                   </span>
                                   <IconChevronRight size={16} />
                                 </div>
-                                <div className="aw-tool-title">CCTP Bridge</div>
-                                <div className="aw-tool-sub">Circle CCTP 6&harr;7 Guard</div>
+                                <div className="aw-tool-title">Cash &amp; Bridges</div>
+                                <div className="aw-tool-sub">MoneyGram, 1-Click, CCTP</div>
+                              </button>
+
+                              <button
+                                type="button"
+                                className="aw-tool-card"
+                                onClick={() => setActiveDrawer("agentBudget")}
+                              >
+                                <div className="aw-tool-card-top">
+                                  <span className="aw-tool-icon aw-tool-icon--purple">
+                                    <IconZap size={18} />
+                                  </span>
+                                  <IconChevronRight size={16} />
+                                </div>
+                                <div className="aw-tool-title">AI Agent (x402)</div>
+                                <div className="aw-tool-sub">Daily USDC Allowance</div>
                               </button>
 
                               <button
@@ -3424,6 +3448,7 @@ function WalletShell({
           )}
           {activeDrawer === "tools" && <ClassicToolsSheet />}
           {activeDrawer === "ramp" && <RampSheet />}
+          {activeDrawer === "agentBudget" && <AgentBudgetSheet />}
           {activeDrawer === "tonConnect" && <TonConnectSheet />}
           {activeDrawer === "dev" && <DevLabSheet />}
           {activeDrawer === "revealSeed" && (

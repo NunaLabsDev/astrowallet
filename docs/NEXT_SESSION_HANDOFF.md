@@ -54,6 +54,8 @@
    - Enroll `contracts/claim-escrow/src/lib.rs` (V2.2) before Mainnet and deploy with atomic guardian, then populate Mainnet `CLAIM_ESCROW_CONTRACT_ID` and `RELAY_ALLOWED_CONTRACTS`.
 3. **OpenZeppelin Smart Account Integration (`VITE_SMART_ACCOUNT_WASM_HASH`) & Physical QA:**
    - Pin an audited OpenZeppelin `stellar-contracts` WASM hash in `VITE_SMART_ACCOUNT_WASM_HASH` and run live iOS/Android Telegram QA.
+4. **Community & SCF Roadmap Execution (Nov 2026 — See `ASTRO/docs/COMMUNITY_INTELLIGENCE_AND_SCF_PLAN.md`):**
+   - Ethena (`USDE`/`SUSDE`) + `USDT0` anti-spoof & Token Explorer support; Zero-`op_no_trust` `/pay` auto-escrow; Clear-Signing 2.0 (`buildHumanClearSignSummary`); redesigned `RampSheet` (MoneyGram SEP-24 + NEAR Intents 1-Click + CCTP/OFT Pro); `x402` Agent Allowance (`m/44'/148'/99'`); `SEP-60` `signAuthEntry` + `getProviderMetadata()`; Privacy-Preserving Analytics polish.
 
 ---
 

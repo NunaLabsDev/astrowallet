@@ -378,6 +378,7 @@ export interface ClaimLinkCardInput {
   txHash?: string | undefined;
   claimUrlHint?: string | undefined;
   botUsername?: string | undefined;
+  autoEscrowReason?: "missing_trustline" | "unfunded_account" | undefined;
 }
 
 export function formatClaimLinkCard(input: ClaimLinkCardInput): string {
@@ -403,10 +404,21 @@ export function formatClaimLinkCard(input: ClaimLinkCardInput): string {
   ];
 
   if (input.status === "pending_funding") {
-    lines.push(
-      "",
-      `${escapeTelegramHtml(input.senderLabel)}: tap below to lock funds into Soroban Escrow and generate the secret claim link for @${escapeTelegramHtml(cleanRecipient)}.`,
-    );
+    if (input.autoEscrowReason) {
+      const reasonText =
+        input.autoEscrowReason === "unfunded_account"
+          ? `@${escapeTelegramHtml(cleanRecipient)}'s wallet is not activated on Stellar yet`
+          : `@${escapeTelegramHtml(cleanRecipient)} does not have a ${escapeTelegramHtml(input.assetCode)} trustline yet`;
+      lines.push(
+        "",
+        `🛡️ <b>Auto-Escrow Protection:</b> ${reasonText}. Fund this 1-tap Claim Link so they can activate it and claim automatically (zero <code>op_no_trust</code> errors).`,
+      );
+    } else {
+      lines.push(
+        "",
+        `${escapeTelegramHtml(input.senderLabel)}: tap below to lock funds into Soroban Escrow and generate the secret claim link for @${escapeTelegramHtml(cleanRecipient)}.`,
+      );
+    }
   } else if (input.status === "open") {
     lines.push(
       "",

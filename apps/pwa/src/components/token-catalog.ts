@@ -21,9 +21,39 @@ const PROTECTED_ASSET_SYMBOLS = new Set([
   "BTC",
   "ETH",
   "USDT",
+  "USDT0",
+  "USDE",
+  "SUSDE",
   "YUSDC",
   "YXLM",
 ]);
+
+export const CANONICAL_MAINNET_OFT_ASSETS: readonly VerifiedAssetEntry[] = [
+  {
+    code: "USDE",
+    issuer: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+    name: "Ethena USDe",
+    domain: "ethena.fi",
+    contract: "CCNOV6XVI2O5BSTA3232GIRUQULDEBV7IWGKM6QKI6II5OIIQTU24JJN",
+    decimals: 7,
+  },
+  {
+    code: "SUSDE",
+    issuer: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+    name: "Ethena Staked USDe",
+    domain: "ethena.fi",
+    contract: "CACSKWC753QVGC4J6YPDBIR2BEHFVWIAE7CBSS3HOVYMN623OAIQYE2M",
+    decimals: 7,
+  },
+  {
+    code: "USDT0",
+    issuer: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q",
+    name: "Tether USDT0 (LayerZero OFT)",
+    domain: "usdt0.to",
+    contract: "CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF",
+    decimals: 7,
+  },
+];
 
 /**
  * Normalizes an asset code + optional issuer into a deterministic lookup key.
@@ -87,6 +117,18 @@ export function classifyTokenTrust(input: {
     };
   }
 
+  const exactOft = CANONICAL_MAINNET_OFT_ASSETS.find(
+    (v) => v.code.toUpperCase() === code && v.issuer === issuer,
+  );
+  if (exactOft) {
+    return {
+      status: "official",
+      label: "Canonical LayerZero OFT",
+      reason: `Verified canonical omnichain asset (${exactOft.domain ?? "LayerZero V2 EID 30600"}).`,
+      matchedVerified: exactOft,
+    };
+  }
+
   const exact = input.verifiedAssets.find(
     (v) => v.code.toUpperCase() === code && v.issuer === issuer,
   );
@@ -101,9 +143,9 @@ export function classifyTokenTrust(input: {
     };
   }
 
-  const officialForCode = input.verifiedAssets.find(
-    (v) => v.code.toUpperCase() === code,
-  );
+  const officialForCode =
+    input.verifiedAssets.find((v) => v.code.toUpperCase() === code) ??
+    CANONICAL_MAINNET_OFT_ASSETS.find((v) => v.code.toUpperCase() === code);
   if (
     officialForCode ||
     (input.verifiedAssets.length > 0 && PROTECTED_ASSET_SYMBOLS.has(code))
@@ -179,6 +221,7 @@ export function buildTokenCatalog(input: {
   horizonResults: readonly TokenCatalogItem[];
   filter: TokenCatalogFilter;
   query: string;
+  includeCanonicalOfts?: boolean | undefined;
 }): TokenCatalogItem[] {
   const verifiedMap = new Map<string, VerifiedAssetEntry>();
   for (const v of input.verifiedAssets) {
@@ -218,7 +261,8 @@ export function buildTokenCatalog(input: {
     });
   }
 
-  for (const v of input.verifiedAssets) {
+  const extraVerified = input.includeCanonicalOfts ? CANONICAL_MAINNET_OFT_ASSETS : [];
+  for (const v of [...input.verifiedAssets, ...extraVerified]) {
     const k = tokenAssetKey(v.code, v.issuer);
     if (map.has(k)) continue;
     map.set(k, {

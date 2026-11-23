@@ -7,7 +7,7 @@
 ## 1. SCF 7.0 Integration Track Summary
 
 ### Core Thesis
-AstroWallet closes the mobile UX gap between Classic Stellar (`G...` SEP-0005), gasless Soroban Smart Accounts (`C...`), pre-sign threat defense, and Telegram social commerce—shipped as an MIT-licensed, zero-hardcoding, 100% phone-first PWA + ToS-compliant Telegram Super-Bot (`grammY`, zero Mini App / zero TON dependency).
+AstroWallet closes the mobile UX gap between Classic Stellar (`G...` SEP-0005), gasless Soroban Smart Accounts (`C...`), pre-sign Clear-Signing (`Scan & Shield`), `x402` AI agent allowances, MoneyGram SEP-24 cash off-ramps, and zero-`op_no_trust` Telegram social payments—shipped as an MIT-licensed, zero-hardcoding, 100% phone-first Telegram Mini App + Super-Bot (`grammY`).
 
 ### Composed Stellar Ecosystem Stack
 | Ecosystem Component | Role in AstroWallet | Integration Module |

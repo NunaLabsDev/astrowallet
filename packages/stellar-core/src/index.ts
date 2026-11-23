@@ -12,3 +12,4 @@ export * from "./vault/crypto.js";
 export * from "./vault/indexeddb-store.js";
 export * from "./vault/kdf-runner.js";
 export * from "./vault/webauthn-fingerprint.js";
+export * from "./x402/index.js";

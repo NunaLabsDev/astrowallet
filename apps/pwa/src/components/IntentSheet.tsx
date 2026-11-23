@@ -15,6 +15,7 @@ import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
 import { triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
 import { requiresHighValueReauth } from "./flow-validators.js";
 import { HighValueReauthGate } from "./HighValueReauthGate.js";
 
@@ -1271,10 +1272,19 @@ export function IntentSheet({
                   <code>{intent.payload.subAction}</code>
                 </div>
               )}
-              {intent.payload.humanSummary && (
-                <div className="aw-banner" style={{ fontSize: 12 }}>
-                  <strong>Summary:</strong> {intent.payload.humanSummary}
-                </div>
+              {intent.payload.unsignedXdr ? (
+                <ClearSignSummaryCard
+                  unsignedXdr={intent.payload.unsignedXdr}
+                  networkPassphrase={config.networkPassphrase}
+                  scanReport={destScanReport}
+                  overrideSummary={intent.payload.humanSummary}
+                />
+              ) : (
+                intent.payload.humanSummary && (
+                  <div className="aw-banner" style={{ fontSize: 12 }}>
+                    <strong>Summary:</strong> {intent.payload.humanSummary}
+                  </div>
+                )
               )}
               <div className="aw-list-row">
                 <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>

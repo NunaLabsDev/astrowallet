@@ -37,7 +37,52 @@ export interface SecurityRuleContext {
   simulatedBalanceDiffs?: readonly BalanceDiff[] | undefined;
 }
 
-const PROTECTED_ASSET_SYMBOLS = new Set(["USDC", "EURC", "PYUSD", "AQUA", "BTC", "ETH"]);
+const PROTECTED_ASSET_SYMBOLS = new Set([
+  "USDC",
+  "EURC",
+  "PYUSD",
+  "AQUA",
+  "BTC",
+  "ETH",
+  "USDT",
+  "USDT0",
+  "USDE",
+  "SUSDE",
+]);
+
+export const CANONICAL_LAYERZERO_OFT_ASSETS: readonly VerifiedAssetEntry[] = [
+  {
+    code: "USDE",
+    issuer: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+    name: "Ethena USDe",
+    domain: "ethena.fi",
+    contract: "CCNOV6XVI2O5BSTA3232GIRUQULDEBV7IWGKM6QKI6II5OIIQTU24JJN",
+    decimals: 7,
+  },
+  {
+    code: "SUSDE",
+    issuer: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+    name: "Ethena Staked USDe",
+    domain: "ethena.fi",
+    contract: "CACSKWC753QVGC4J6YPDBIR2BEHFVWIAE7CBSS3HOVYMN623OAIQYE2M",
+    decimals: 7,
+  },
+  {
+    code: "USDT0",
+    issuer: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q",
+    name: "Tether USDT0 (LayerZero OFT)",
+    domain: "usdt0.to",
+    contract: "CBSJZEIO5C7KC2SF3MKSNXXJSW5G3VTNBX4ATMKUI3B2MR4JKM4R26YF",
+    decimals: 7,
+  },
+];
+
+function isCanonicalLayerZeroOft(code: string, issuer: string): boolean {
+  const upperCode = code.trim().toUpperCase();
+  return CANONICAL_LAYERZERO_OFT_ASSETS.some(
+    (entry) => entry.code.toUpperCase() === upperCode && entry.issuer === issuer,
+  );
+}
 const PHISHING_URL_REGEX = /(?:https?:\/\/|www\.|[a-z0-9-]+\.(?:com|io|org|net|xyz|app|gg|me|link|claim|airdrop)\b)/i;
 
 /**
@@ -307,6 +352,10 @@ export function evaluateDecodedTransaction(
         PROTECTED_ASSET_SYMBOLS.has(asset.code.toUpperCase())
       ) {
         const verifiedList = context.verifiedAssets ?? [];
+        const isOft = isCanonicalLayerZeroOft(asset.code, asset.issuer);
+        if (isOft) {
+          continue;
+        }
         if (verifiedList.length === 0) {
           findings.push({
             code: "UNVERIFIED_PROTECTED_ASSET_NO_REGISTRY",
@@ -414,11 +463,13 @@ export function filterSpamClaimableBalances(
     }
 
     if (PROTECTED_ASSET_SYMBOLS.has(item.assetCode.toUpperCase())) {
-      const ok = verified.some(
-        (v) =>
-          v.code.toUpperCase() === item.assetCode.toUpperCase() &&
-          v.issuer === item.assetIssuer,
-      );
+      const ok =
+        (item.assetIssuer ? isCanonicalLayerZeroOft(item.assetCode, item.assetIssuer) : false) ||
+        verified.some(
+          (v) =>
+            v.code.toUpperCase() === item.assetCode.toUpperCase() &&
+            v.issuer === item.assetIssuer,
+        );
       if (!ok) return false;
     }
 

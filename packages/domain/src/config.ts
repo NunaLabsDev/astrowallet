@@ -313,6 +313,8 @@ const RawPwaEnvSchema = z
     ),
     VITE_MOONPAY_WIDGET_URL: OptionalUrlSchema("VITE_MOONPAY_WIDGET_URL"),
     VITE_TRANSAK_WIDGET_URL: OptionalUrlSchema("VITE_TRANSAK_WIDGET_URL"),
+    VITE_MONEYGRAM_ANCHOR_DOMAIN: OptionalNonEmptyStringSchema,
+    VITE_NEAR_INTENTS_API_BASE: OptionalUrlSchema("VITE_NEAR_INTENTS_API_BASE"),
     VITE_HIGH_VALUE_REAUTH_XLM: z.preprocess(
       (val) => emptyToUndefined(val) ?? "250",
       z.coerce
@@ -472,6 +474,8 @@ export interface PwaConfig {
   cctpForwarderContractId?: ContractAddress | undefined;
   moonPayWidgetUrl?: string | undefined;
   transakWidgetUrl?: string | undefined;
+  moneygramAnchorDomain?: string | undefined;
+  nearIntentsApiBase?: string | undefined;
   highValueReauthXlm: number;
   altNetworkProfile?: PwaNetworkProfile | undefined;
 }
@@ -526,6 +530,8 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     cctpForwarderContractId: parsed.VITE_CCTP_FORWARDER_CONTRACT_ID,
     moonPayWidgetUrl: parsed.VITE_MOONPAY_WIDGET_URL,
     transakWidgetUrl: parsed.VITE_TRANSAK_WIDGET_URL,
+    moneygramAnchorDomain: parsed.VITE_MONEYGRAM_ANCHOR_DOMAIN,
+    nearIntentsApiBase: parsed.VITE_NEAR_INTENTS_API_BASE,
     highValueReauthXlm: parsed.VITE_HIGH_VALUE_REAUTH_XLM,
     ...(altNetworkProfile ? { altNetworkProfile } : {}),
   };

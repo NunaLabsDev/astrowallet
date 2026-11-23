@@ -680,6 +680,85 @@ export function createTelegramBot(
     }
 
     const memo = args.length > 3 ? args.slice(3).join(" ").slice(0, 28) : undefined;
+
+    // Zero op_no_trust protection: if sending a non-XLM asset to a linked G... account
+    // that is unfunded or missing the asset trustline, route into ClaimEscrowContract V2.2
+    // so the recipient can activate the trustline and claim in 1 tap.
+    if (
+      assetIssuer &&
+      resolved.address.startsWith("G") &&
+      config.claimEscrowContractId &&
+      rawRecipient.startsWith("@")
+    ) {
+      const recipientLive = await fetchLiveAccountBalances(
+        config,
+        resolved.address,
+        fetchFn,
+      ).catch(() => null);
+      const hasTrustline = Boolean(
+        recipientLive?.funded &&
+          recipientLive.balances.some(
+            (b) =>
+              b.assetCode.toUpperCase() === assetCode.toUpperCase() &&
+              b.assetIssuer === assetIssuer,
+          ),
+      );
+      if (recipientLive && !hasTrustline) {
+        const autoEscrowReason = recipientLive.funded ? "missing_trustline" : "unfunded_account";
+        const recipientHandle = rawRecipient.slice(1).toLowerCase();
+        const intentId = generateId("it");
+        const claimId = await deriveClaimId(intentId);
+        const escrowExpiresAt = Math.floor(Date.now() / 1000) + 86_400 * 7;
+        const { intent } = await createAndSignIntent(config, repo, {
+          intentId,
+          creatorTelegramUserId: tgId,
+          actionType: "claim",
+          chatId: String(ctx.chat.id),
+          ttlSeconds: 300,
+          payload: {
+            amount,
+            assetCode,
+            assetIssuer,
+            recipientUsername: recipientHandle,
+            senderLabel: username,
+            claimId,
+            escrowContractId: config.claimEscrowContractId,
+            escrowExpiresAt,
+            autoEscrowReason,
+          },
+        });
+
+        const keyboard = appendMiniAppButton(
+          new InlineKeyboard(),
+          `Fund Auto-Escrow (${amount} ${assetCode})`,
+          {
+            isPrivateChat: ctx.chat?.type === "private",
+            config,
+            botUsername: ctx.me?.username,
+            intentId: intent.intentId,
+            sig: intent.hmacSig,
+          },
+        );
+        const sent = await ctx.reply(
+          formatClaimLinkCard({
+            status: "pending_funding",
+            amount,
+            assetCode,
+            senderLabel: username,
+            recipientUsername: recipientHandle,
+            network: config.network,
+            autoEscrowReason,
+          }),
+          { parse_mode: "HTML", reply_markup: keyboard },
+        );
+        await repo.attachIntentMessageRef(intent.intentId, {
+          chatId: String(sent.chat.id),
+          messageId: String(sent.message_id),
+        });
+        return;
+      }
+    }
+
     const { intent } = await createAndSignIntent(config, repo, {
       creatorTelegramUserId: tgId,
       actionType: "pay",

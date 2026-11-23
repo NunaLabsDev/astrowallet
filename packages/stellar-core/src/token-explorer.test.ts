@@ -513,7 +513,7 @@ name = "Euro Coin"
     expect(requestedResolutions).toContain("3600000");
     expect(requestedResolutions).not.toContain("14400000");
     expect(agg7d.candles.length).toBeGreaterThanOrEqual(1);
-    expect(agg7d.high).toBeLessThan(0.25);
+    expect(agg7d.high).toBeLessThan(0.165);
 
     const aggAll = await fetchTokenPriceHistoryAgainstXlm({
       horizonUrls: ["https://horizon-test.example"],

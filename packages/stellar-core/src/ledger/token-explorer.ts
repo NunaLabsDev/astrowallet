@@ -987,9 +987,15 @@ function rollupTokenCandles(candles: readonly RawTokenCandle[], bucketMs: number
     }));
 }
 
+function percentile75(nums: readonly number[]): number {
+  if (nums.length === 0) return 0;
+  const sorted = [...nums].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.75))]!;
+}
+
 export function sanitizeOhlcvCandles(
   candles: readonly RawTokenCandle[],
-  opts?: { maxWickFloorPct?: number },
+  opts?: { timeframe?: TokenPriceTimeframe; maxWickFloorPct?: number },
 ): TokenPriceCandle[] {
   if (candles.length === 0) return [];
   const deduped = new Map<number, RawTokenCandle>();
@@ -1004,13 +1010,8 @@ export function sanitizeOhlcvCandles(
   const allAnchors = sorted.map((c) => (c.avg && c.avg > 0 ? c.avg : c.close));
   const seriesMedian = medianNumber(allAnchors);
   const medianVol = medianNumber(sorted.map((c) => c.baseVolume).filter((v) => v > 0));
-  const bodyChanges = sorted
-    .map((c) => (c.close > 0 ? Math.abs(c.close - c.open) / c.close : 0))
-    .filter((v) => Number.isFinite(v) && v >= 0);
-  const robustVol = medianNumber(bodyChanges) * 4;
-  const maxWickPct = Math.max(opts?.maxWickFloorPct ?? 0.12, Math.min(0.35, robustVol));
 
-  return sorted.map((c, idx) => {
+  const bodyCleaned = sorted.map((c, idx) => {
     const start = Math.max(0, idx - 3);
     const end = Math.min(sorted.length, idx + 4);
     const windowAnchors = allAnchors.slice(start, end);
@@ -1024,8 +1025,8 @@ export function sanitizeOhlcvCandles(
     const avgValid =
       c.avg !== undefined && c.avg > 0 && localMed > 0 && c.avg >= 0.4 * localMed && c.avg <= 2.5 * localMed;
     if (avgValid && c.avg !== undefined) {
-      if (open > c.avg * 2.0 || open < c.avg * 0.5) open = c.avg;
-      if (close > c.avg * 2.0 || close < c.avg * 0.5) close = c.avg;
+      if (Math.abs(open - c.avg) / c.avg > 0.12) open = c.avg;
+      if (Math.abs(close - c.avg) / c.avg > 0.12) close = c.avg;
     }
 
     if (
@@ -1040,17 +1041,52 @@ export function sanitizeOhlcvCandles(
       low = localMed;
     }
 
-    const bodyMax = Math.max(open, close, avgValid && c.avg ? c.avg : close);
-    const bodyMin = Math.min(open, close, avgValid && c.avg ? c.avg : close);
-    high = Math.max(Math.max(open, close), Math.min(high, bodyMax * (1 + maxWickPct)));
-    low = Math.min(Math.min(open, close), Math.max(low, bodyMin / (1 + maxWickPct)));
+    return { timestamp: c.timestamp, open, high, low, close, baseVolume: c.baseVolume };
+  });
+
+  const cleanUpWicks = bodyCleaned
+    .map((c) => {
+      const bm = Math.max(c.open, c.close);
+      return bm > 0 ? (c.high - bm) / bm : 0;
+    })
+    .filter((w) => w >= 0 && w < 0.10);
+  const cleanDnWicks = bodyCleaned
+    .map((c) => {
+      const bm = Math.min(c.open, c.close);
+      return bm > 0 ? (bm - c.low) / bm : 0;
+    })
+    .filter((w) => w >= 0 && w < 0.10);
+
+  const p75Up = Math.max(0.015, Math.min(0.045, percentile75(cleanUpWicks) || 0.025));
+  const p75Dn = Math.max(0.015, Math.min(0.045, percentile75(cleanDnWicks) || 0.025));
+
+  const isMultiYearAll = opts?.timeframe === "all";
+  const upThreshold = isMultiYearAll ? 0.35 : Math.min(0.11, Math.max(0.075, p75Up * 3.0));
+  const dnThreshold = isMultiYearAll ? 0.35 : Math.min(0.11, Math.max(0.075, p75Dn * 3.0));
+  const upReconstruct = isMultiYearAll ? 0.12 : Math.min(0.035, p75Up * 1.25);
+  const dnReconstruct = isMultiYearAll ? 0.12 : Math.min(0.035, p75Dn * 1.25);
+
+  return bodyCleaned.map((c) => {
+    const bodyMax = Math.max(c.open, c.close);
+    const bodyMin = Math.min(c.open, c.close);
+    const rawUp = bodyMax > 0 ? (c.high - bodyMax) / bodyMax : 0;
+    const rawDn = bodyMin > 0 ? (bodyMin - c.low) / bodyMin : 0;
+
+    const high = Math.max(
+      bodyMax,
+      rawUp > upThreshold ? bodyMax * (1 + upReconstruct) : c.high,
+    );
+    const low = Math.min(
+      bodyMin,
+      rawDn > dnThreshold ? bodyMin / (1 + dnReconstruct) : c.low,
+    );
 
     return {
       timestamp: c.timestamp,
-      open,
+      open: c.open,
       high,
       low,
-      close,
+      close: c.close,
       baseVolume: c.baseVolume,
     };
   });
@@ -1174,8 +1210,13 @@ export async function fetchTokenPriceHistoryAgainstXlm(input: {
       rawCandles = combined.length > 100 ? rollupTokenCandles(combined, 604_800_000) : combined;
     }
 
+    if (rawCandles.length < 2 && (input.timeframe === "30d" || input.timeframe === "1y" || input.timeframe === "all")) {
+      const hourly = await queryAggRange(nowMs - 7 * DAY_MS, nowMs, 3_600_000, 168).catch(() => []);
+      if (hourly.length > rawCandles.length) rawCandles = hourly;
+    }
+
     if (rawCandles.length > 0) {
-      const parsedCandles = sanitizeOhlcvCandles(rawCandles, { maxWickFloorPct: wickFloor });
+      const parsedCandles = sanitizeOhlcvCandles(rawCandles, { timeframe: input.timeframe });
       const first = parsedCandles[0]!;
       const last = parsedCandles[parsedCandles.length - 1]!;
       const high = Math.max(...parsedCandles.map((c) => c.high));

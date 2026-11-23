@@ -5,6 +5,7 @@ import {
   ColorType,
   CrosshairMode,
   HistogramSeries,
+  PriceScaleMode,
   createChart,
   type IChartApi,
   type ISeriesApi,
@@ -48,6 +49,7 @@ export function LightweightPriceChart({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [hoveredCandle, setHoveredCandle] = useState<TokenPriceCandle | null>(null);
+  const [logScale, setLogScale] = useState(false);
 
   const normalized = useMemo(() => {
     const bySec = new Map<number, TokenPriceCandle>();
@@ -103,9 +105,11 @@ export function LightweightPriceChart({
         borderColor: "rgba(165, 139, 224, 0.18)",
         timeVisible: timeframe === "24h" || timeframe === "7d",
         secondsVisible: false,
+        minBarSpacing: 0.2,
       },
       rightPriceScale: {
         borderColor: "rgba(165, 139, 224, 0.18)",
+        mode: logScale ? PriceScaleMode.Logarithmic : PriceScaleMode.Normal,
         scaleMargins: { top: 0.1, bottom: 0.22 },
       },
       handleScroll: {
@@ -201,10 +205,15 @@ export function LightweightPriceChart({
       }
     });
 
+    let hasSized = false;
     const ro = new ResizeObserver((entries) => {
       const width = entries[0]?.contentRect.width;
       if (width && width > 0) {
         chart.applyOptions({ width: Math.floor(width) });
+        if (!hasSized) {
+          chart.timeScale().fitContent();
+          hasSized = true;
+        }
       }
     });
     ro.observe(el);
@@ -214,7 +223,7 @@ export function LightweightPriceChart({
       chart.remove();
       chartRef.current = null;
     };
-  }, [normalized, candles, chartMode, positive, timeframe, expanded]);
+  }, [normalized, candles, chartMode, positive, timeframe, expanded, logScale]);
 
   if (normalized.length === 0) {
     return (
@@ -254,22 +263,29 @@ export function LightweightPriceChart({
           </strong>{" "}
           · {dateLabel}
         </span>
-        <span className="tabular-nums" style={{ flexShrink: 0, display: "flex", gap: 8, alignItems: "center" }}>
+        <span className="tabular-nums" style={{ flexShrink: 0, display: "flex", gap: 6, alignItems: "center" }}>
           <span>
             {chartMode === "candles"
               ? `O:${formatTokenPriceValue(active.open)} H:${formatTokenPriceValue(active.high)} L:${formatTokenPriceValue(active.low)} · V:${formatCompactNumber(active.baseVolume)}`
               : `H:${formatTokenPriceValue(active.high)} · L:${formatTokenPriceValue(active.low)}`}
           </span>
-          {expanded && (
-            <button
-              type="button"
-              className="aw-mini-chip"
-              onClick={() => chartRef.current?.timeScale().fitContent()}
-              title="Reset zoom to fit all candles"
-            >
-              Fit
-            </button>
-          )}
+          <button
+            type="button"
+            className="aw-mini-chip"
+            aria-pressed={logScale}
+            onClick={() => setLogScale((v) => !v)}
+            title="Toggle logarithmic price scale"
+          >
+            Log
+          </button>
+          <button
+            type="button"
+            className="aw-mini-chip"
+            onClick={() => chartRef.current?.timeScale().fitContent()}
+            title="Reset zoom to fit all candles"
+          >
+            Fit
+          </button>
         </span>
       </div>
 

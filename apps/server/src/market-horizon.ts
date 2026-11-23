@@ -127,13 +127,68 @@ function rollupCandles(candles: readonly RawOhlcvCandle[], bucketMs: number): Ra
     }));
 }
 
+function percentile75(nums: readonly number[]): number {
+  if (nums.length === 0) return 0;
+  const sorted = [...nums].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.75))]!;
+}
+
+function rollupMonthlyCandles(candles: readonly RawOhlcvCandle[]): RawOhlcvCandle[] {
+  if (candles.length === 0) return [];
+  const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  const buckets = new Map<number, RawOhlcvCandle & { weightedSum: number; weightVol: number }>();
+
+  for (const c of sorted) {
+    const d = new Date(c.timestamp);
+    const monthTs = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1);
+    const prev = buckets.get(monthTs);
+    const weight = c.baseVolume > 0 ? c.baseVolume : 0;
+    const avgPrice = c.avg && c.avg > 0 ? c.avg : c.close;
+    if (!prev) {
+      buckets.set(monthTs, {
+        timestamp: monthTs,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        baseVolume: c.baseVolume,
+        avg: avgPrice,
+        weightedSum: avgPrice * weight,
+        weightVol: weight,
+      });
+    } else {
+      prev.high = Math.max(prev.high, c.high);
+      prev.low = Math.min(prev.low, c.low);
+      prev.close = c.close;
+      prev.baseVolume += c.baseVolume;
+      prev.weightedSum += avgPrice * weight;
+      prev.weightVol += weight;
+      prev.avg = prev.weightVol > 0 ? prev.weightedSum / prev.weightVol : prev.close;
+    }
+  }
+
+  return Array.from(buckets.values())
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map(({ timestamp, open, high, low, close, baseVolume, avg }) => ({
+      timestamp,
+      open,
+      high,
+      low,
+      close,
+      baseVolume,
+      ...(avg !== undefined ? { avg } : {}),
+    }));
+}
+
 /**
- * Sanitizes Stellar SDEX/AMM OHLCV candles by guarding against 1-stroop dust trades
- * and clamping extreme outlier wicks relative to rolling median consensus & VWAP.
+ * Two-tier Stellar SDEX/AMM OHLCV sanitizer:
+ * 1) Snaps dust-corrupted open/close prices (>12% away from Horizon VWAP `avg`) back to `avg`.
+ * 2) Leaves normal wicks untouched while reconstructing unmistakably corrupted SDEX dust wicks
+ *    to a realistic 75th-percentile candle wick ratio (instead of leaving 15% hair-comb spikes).
  */
 export function sanitizeOhlcvCandles(
   candles: readonly RawOhlcvCandle[],
-  opts?: { maxWickFloorPct?: number },
+  opts?: { timeframe?: MarketTimeframe; maxWickFloorPct?: number },
 ): Array<{
   timestamp: number;
   open: number;
@@ -162,14 +217,8 @@ export function sanitizeOhlcvCandles(
   const seriesMedian = medianOf(allAnchors);
   const medianVol = medianOf(sorted.map((c) => c.baseVolume).filter((v) => v > 0));
 
-  const bodyChanges = sorted
-    .map((c) => (c.close > 0 ? Math.abs(c.close - c.open) / c.close : 0))
-    .filter((v) => Number.isFinite(v) && v >= 0);
-  const robustVol = medianOf(bodyChanges) * 4;
-  const maxWickFloor = opts?.maxWickFloorPct ?? 0.12;
-  const maxWickPct = Math.max(maxWickFloor, Math.min(0.35, robustVol));
-
-  return sorted.map((c, idx) => {
+  // Pass 1: clean bodies against VWAP / rolling median before measuring normal wick distribution
+  const bodyCleaned = sorted.map((c, idx) => {
     const start = Math.max(0, idx - 3);
     const end = Math.min(sorted.length, idx + 4);
     const windowAnchors = allAnchors.slice(start, end);
@@ -180,10 +229,11 @@ export function sanitizeOhlcvCandles(
     let high = c.high;
     let low = c.low;
 
-    const avgValid = c.avg !== undefined && c.avg > 0 && localMed > 0 && c.avg >= 0.4 * localMed && c.avg <= 2.5 * localMed;
+    const avgValid =
+      c.avg !== undefined && c.avg > 0 && localMed > 0 && c.avg >= 0.4 * localMed && c.avg <= 2.5 * localMed;
     if (avgValid && c.avg !== undefined) {
-      if (open > c.avg * 2.0 || open < c.avg * 0.5) open = c.avg;
-      if (close > c.avg * 2.0 || close < c.avg * 0.5) close = c.avg;
+      if (Math.abs(open - c.avg) / c.avg > 0.12) open = c.avg;
+      if (Math.abs(close - c.avg) / c.avg > 0.12) close = c.avg;
     }
 
     if (
@@ -198,28 +248,69 @@ export function sanitizeOhlcvCandles(
       low = localMed;
     }
 
-    const bodyMax = Math.max(open, close, avgValid && c.avg ? c.avg : close);
-    const bodyMin = Math.min(open, close, avgValid && c.avg ? c.avg : close);
-    high = Math.max(Math.max(open, close), Math.min(high, bodyMax * (1 + maxWickPct)));
-    low = Math.min(Math.min(open, close), Math.max(low, bodyMin / (1 + maxWickPct)));
+    return { timestamp: c.timestamp, open, high, low, close, baseVolume: c.baseVolume };
+  });
+
+  const cleanUpWicks = bodyCleaned
+    .map((c) => {
+      const bm = Math.max(c.open, c.close);
+      return bm > 0 ? (c.high - bm) / bm : 0;
+    })
+    .filter((w) => w >= 0 && w < 0.10);
+  const cleanDnWicks = bodyCleaned
+    .map((c) => {
+      const bm = Math.min(c.open, c.close);
+      return bm > 0 ? (bm - c.low) / bm : 0;
+    })
+    .filter((w) => w >= 0 && w < 0.10);
+
+  const p75Up = Math.max(0.015, Math.min(0.045, percentile75(cleanUpWicks) || 0.025));
+  const p75Dn = Math.max(0.015, Math.min(0.045, percentile75(cleanDnWicks) || 0.025));
+
+  const isMultiYearAll = opts?.timeframe === "all";
+  const upThreshold = isMultiYearAll ? 0.35 : Math.min(0.11, Math.max(0.075, p75Up * 3.0));
+  const dnThreshold = isMultiYearAll ? 0.35 : Math.min(0.11, Math.max(0.075, p75Dn * 3.0));
+  const upReconstruct = isMultiYearAll ? 0.12 : Math.min(0.035, p75Up * 1.25);
+  const dnReconstruct = isMultiYearAll ? 0.12 : Math.min(0.035, p75Dn * 1.25);
+
+  return bodyCleaned.map((c) => {
+    const bodyMax = Math.max(c.open, c.close);
+    const bodyMin = Math.min(c.open, c.close);
+    const rawUp = bodyMax > 0 ? (c.high - bodyMax) / bodyMax : 0;
+    const rawDn = bodyMin > 0 ? (bodyMin - c.low) / bodyMin : 0;
+
+    const high = Math.max(
+      bodyMax,
+      rawUp > upThreshold ? bodyMax * (1 + upReconstruct) : c.high,
+    );
+    const low = Math.min(
+      bodyMin,
+      rawDn > dnThreshold ? bodyMin / (1 + dnReconstruct) : c.low,
+    );
 
     return {
       timestamp: c.timestamp,
-      open,
+      open: c.open,
       high,
       low,
-      close,
+      close: c.close,
       baseVolume: c.baseVolume,
     };
   });
 }
 
-async function fetchKrakenXlmWeeklyOhlcv(fetchFn: FetchLike): Promise<RawOhlcvCandle[]> {
+async function fetchKrakenXlmOhlcv(
+  intervalMinutes: 1440 | 10080,
+  fetchFn: FetchLike,
+): Promise<RawOhlcvCandle[]> {
   try {
-    const res = await fetchFn("https://api.kraken.com/0/public/OHLC?pair=XLMUSD&interval=10080", {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(5000),
-    });
+    const res = await fetchFn(
+      `https://api.kraken.com/0/public/OHLC?pair=XLMUSD&interval=${intervalMinutes}`,
+      {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(5000),
+      },
+    );
     if (!res.ok) return [];
     const body = (await res.json()) as {
       error?: string[];
@@ -357,14 +448,21 @@ export async function fetchMarketPriceHistory(input: {
 
   try {
     if (
-      input.timeframe === "all" &&
       isBaseNative &&
       isMainnet &&
-      (quoteCode.toUpperCase() === "USDC" || quoteCode.toUpperCase() === "USD")
+      (quoteCode.toUpperCase() === "USDC" || quoteCode.toUpperCase() === "USD") &&
+      (input.timeframe === "30d" || input.timeframe === "1y" || input.timeframe === "all")
     ) {
-      const krakenRaw = await fetchKrakenXlmWeeklyOhlcv(fetchFn);
+      const interval = input.timeframe === "all" ? 10080 : 1440;
+      const krakenRaw = await fetchKrakenXlmOhlcv(interval, fetchFn);
       if (krakenRaw.length >= 10) {
-        const candles = sanitizeOhlcvCandles(krakenRaw, { maxWickFloorPct: wickFloor });
+        const shaped =
+          input.timeframe === "30d"
+            ? krakenRaw.slice(-30)
+            : input.timeframe === "1y"
+              ? krakenRaw.slice(-365)
+              : rollupMonthlyCandles(krakenRaw);
+        const candles = sanitizeOhlcvCandles(shaped, { timeframe: input.timeframe });
         const first = candles[0]!;
         const last = candles[candles.length - 1]!;
         return {
@@ -413,8 +511,15 @@ export async function fetchMarketPriceHistory(input: {
       rawCandles = combined.length > 100 ? rollupCandles(combined, 604_800_000) : combined;
     }
 
+    if (rawCandles.length < 2 && (input.timeframe === "30d" || input.timeframe === "1y" || input.timeframe === "all")) {
+      const hourly = await queryAggRange(input.nowMs - 7 * DAY_MS, input.nowMs, 3_600_000, 168).catch(() => []);
+      if (hourly.length > rawCandles.length) {
+        rawCandles = hourly;
+      }
+    }
+
     if (rawCandles.length > 0) {
-      const candles = sanitizeOhlcvCandles(rawCandles, { maxWickFloorPct: wickFloor });
+      const candles = sanitizeOhlcvCandles(rawCandles, { timeframe: input.timeframe });
       const first = candles[0]!;
       const last = candles[candles.length - 1]!;
       return {

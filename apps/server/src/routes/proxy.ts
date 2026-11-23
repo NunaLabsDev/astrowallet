@@ -26,6 +26,7 @@ import {
   type MarketTimeframe,
 } from "../market-horizon.js";
 import type { KVNamespace } from "@cloudflare/workers-types";
+import { FeeBumpTransaction, Keypair, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
@@ -1058,6 +1059,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
   }
 
   router.get("/sep10/challenge", async (c) => {
+    const config = c.get("config");
     const domain = c.req.query("domain") ?? "";
     const account = c.req.query("account") ?? "";
     const parsedAcct = ClassicAddressSchema.safeParse(account.trim());
@@ -1066,19 +1068,62 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     }
     try {
       const endpoints = await resolveSep24AnchorEndpoints(domain, c.env.CACHE);
-      const res = await fetchFn(
-        `${endpoints.webAuthEndpoint}?account=${encodeURIComponent(parsedAcct.data)}`,
-        { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) },
-      );
-      const body = (await res.json()) as { transaction?: string; network_passphrase?: string; error?: string };
+      const challengeUrl = new URL(endpoints.webAuthEndpoint);
+      challengeUrl.searchParams.set("account", parsedAcct.data);
+      if (config.sep10ClientDomain) {
+        challengeUrl.searchParams.set("client_domain", config.sep10ClientDomain);
+      }
+      const res = await fetchFn(challengeUrl.toString(), {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(8000),
+      });
+      const body = (await res.json()) as {
+        transaction?: string;
+        network_passphrase?: string;
+        error?: string;
+      };
       if (!res.ok || !body.transaction) {
         return c.json({ error: body.error ?? `SEP-10 challenge failed (${res.status})` }, 502);
       }
+
+      let challengeXdr = body.transaction;
+      let clientDomainSigned = false;
+      if (config.sep10ClientDomain && config.sep10ClientSigningSecret) {
+        const passphrase = body.network_passphrase || config.networkPassphrase;
+        const parsed = TransactionBuilder.fromXDR(body.transaction, passphrase);
+        if (parsed instanceof FeeBumpTransaction || !(parsed instanceof Transaction)) {
+          return c.json({ error: "Invalid SEP-10 challenge envelope type" }, 502);
+        }
+        if (parsed.sequence !== "0" || parsed.operations.length === 0) {
+          return c.json({ error: "SEP-10 challenge must have sequence 0 and operations" }, 502);
+        }
+        const allManageData = parsed.operations.every((op) => op.type === "manageData");
+        if (!allManageData) {
+          return c.json({ error: "Refusing to cosign non-manageData SEP-10 challenge" }, 502);
+        }
+        const hasMatchingClientDomain = parsed.operations.some((op) => {
+          if (op.type !== "manageData" || op.name !== "client_domain") return false;
+          const valStr = op.value ? Buffer.from(op.value).toString("utf8") : "";
+          return valStr === config.sep10ClientDomain;
+        });
+        if (!hasMatchingClientDomain) {
+          return c.json(
+            { error: "SEP-10 challenge missing matching client_domain manageData op" },
+            502,
+          );
+        }
+        parsed.sign(Keypair.fromSecret(config.sep10ClientSigningSecret));
+        challengeXdr = parsed.toXDR();
+        clientDomainSigned = true;
+      }
+
       return c.json({
-        transaction: body.transaction,
+        transaction: challengeXdr,
         network_passphrase: body.network_passphrase,
         webAuthEndpoint: endpoints.webAuthEndpoint,
         transferServerSep24: endpoints.transferServerSep24,
+        ...(config.sep10ClientDomain ? { client_domain: config.sep10ClientDomain } : {}),
+        ...(clientDomainSigned ? { clientDomainSigned: true } : {}),
       });
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : "SEP-10 challenge error" }, 400);

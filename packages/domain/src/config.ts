@@ -705,6 +705,29 @@ const RawServerEnvSchema = z
         ),
     ),
     RELAY_BOOTSTRAP_DAILY_LIMIT: parsePositiveIntWithDefault(25, 500),
+    SEP10_CLIENT_DOMAIN: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .transform((v) => v.replace(/^https?:\/\//i, "").replace(/\/+$/, ""))
+        .refine(
+          (v) => /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(v),
+          "SEP10_CLIENT_DOMAIN must be a valid public hostname",
+        )
+        .optional(),
+    ),
+    SEP10_CLIENT_SIGNING_SECRET: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .regex(
+          /^S[A-Z2-7]{55}$/,
+          "SEP10_CLIENT_SIGNING_SECRET must be a valid Stellar S... secret key",
+        )
+        .optional(),
+    ),
   })
   .superRefine((env, ctx) => {
     if (env.STELLAR_NETWORK === "mainnet" && env.FRIENDBOT_URL) {
@@ -773,6 +796,8 @@ export interface ServerConfig {
   relaySponsorSecret?: string | undefined;
   relayBootstrapStartingBalanceXlm: string;
   relayBootstrapDailyLimit: number;
+  sep10ClientDomain?: string | undefined;
+  sep10ClientSigningSecret?: string | undefined;
 }
 
 export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig {
@@ -814,5 +839,7 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     relaySponsorSecret: parsed.RELAY_SPONSOR_SECRET,
     relayBootstrapStartingBalanceXlm: parsed.RELAY_BOOTSTRAP_STARTING_BALANCE_XLM,
     relayBootstrapDailyLimit: parsed.RELAY_BOOTSTRAP_DAILY_LIMIT,
+    sep10ClientDomain: parsed.SEP10_CLIENT_DOMAIN,
+    sep10ClientSigningSecret: parsed.SEP10_CLIENT_SIGNING_SECRET,
   };
 }

@@ -428,6 +428,7 @@ export function createTelegramBot(
   });
 
   bot.command("stats", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     const snap = await repo.getPublicMetricsSnapshot(config.network);
     const isPrivate = ctx.chat?.type === "private";
     const statsUrl = `${config.pwaOrigin.replace(/\/+$/, "")}/stats`;
@@ -1192,15 +1193,20 @@ export function createTelegramBot(
       try {
         const dexRes = await fetchFn(`${dexBase}/v1/quote?net=${config.network}`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "User-Agent": "AstroWallet-Worker/1.0",
+          },
           body: JSON.stringify({
             fromAsset,
             toAsset,
             amount: opts.amount,
             mode: "exact_in",
             slippageBps: 100,
+            ...(defaultClassic ? { sourceAddress: defaultClassic.address } : {}),
           }),
-          signal: AbortSignal.timeout(5000),
+          signal: AbortSignal.timeout(10000),
         });
         if (dexRes.ok) {
           const dexJson = (await dexRes.json()) as {
@@ -1329,8 +1335,8 @@ export function createTelegramBot(
       const headerPrefix = opts.headline ? `${opts.headline}\n` : "";
       const sent = await ctx.reply(
         `${headerPrefix}${formatSwapQuoteCard({
-          fromAsset,
-          toAsset,
+          fromAsset: fromResolved.assetCode,
+          toAsset: toResolved.assetCode,
           inputAmount: quote.inputAmount,
           expectedOutputAmount: quote.expectedOutputAmount,
           provider: quote.provider,

@@ -129,3 +129,33 @@ Webhooks for `/start /help /balance /nft /buy /sell /swap` returned 200. Pages c
 7. Cosmetic: `wrangler.toml` `env.mainnet` warns about vars not inherited (FRIENDBOT_URL, CLAIM_ESCROW_CONTRACT_ID, RELAY_ALLOWED_CONTRACTS, ASTRODEX_API_BASE_URL, ASTROGATE_API_BASE_URL) — decide whether mainnet should define them.
 
 Secrets stay in `~/.secrets/` (never print). Scratch E2E scripts: `~/.gemini/antigravity-cli/brain/939b652b-b3d3-485d-ab34-b518d29b89b2/scratch/`.
+
+
+---
+
+## Session checkpoint — 2026-11-24: Full Telegram Audit, `ASTRODEX` Service Binding, `stellar.toml` & Community Sync
+
+**State: deployed & live-verified** (`astrowallet-server`, `astrowallet-server-mainnet`, Pages `astrowallet-soroban`).
+
+### Done
+- **Service Binding `ASTRODEX`:** Added `[[services]]` (`binding = "ASTRODEX"`, `service = "astrodex-server"`) in `apps/server/wrangler.toml` and routed bot quote calls in `apps/server/src/app.ts` through `c.env.ASTRODEX.fetch(...)`, resolving Cloudflare same-account Worker→Pages blocking.
+- **MoneyGram `/.well-known/stellar.toml` & SEP-10 `client_domain`:**
+  - Generated dedicated unfunded SEP-10 client-domain keypair (`SIGNING_KEY = "GBFRJ6WMZJ37EQBA34RUEZBDSGZBKRY5T2JIVPG7EHJXZZUSKKQD6YRT"`), uploaded `SEP10_CLIENT_SIGNING_SECRET` to both `astrowallet-server` and `astrowallet-server-mainnet`.
+  - Published `apps/pwa/public/.well-known/stellar.toml` + `apps/pwa/public/_headers` (`Content-Type: text/plain; charset=utf-8`, `Access-Control-Allow-Origin: *`, `https://stellar.moneygram.com` in `connect-src`).
+  - Wired `SEP10_CLIENT_DOMAIN` & strict sequence-0 `manageData`-only cosigning in `packages/domain/src/config.ts` and `apps/server/src/routes/proxy.ts` (+ unit tests in `apps/server/src/app.test.ts`).
+- **Telegram Best Practices & Cleanup:**
+  - Added `setBottomBarColor("#060E24")` + `viewportChanged` / `safeAreaChanged` / `contentSafeAreaChanged` inset listeners in `apps/pwa/src/telegram/webapp.ts`.
+  - Added group-chat collision guard to `/stats`, clean asset tickers in `/buy`/`/sell`/`/swap` cards, and removed `ASTROGATE_API_BASE_URL` from `wrangler.toml` + `sorobitsContractId` fallback in `DevLabSheet.tsx`.
+  - Updated `README.md`, `docs/INDEX.md`, `docs/ENV_MATRIX.md`, `docs/SCF_7_SUBMISSION_AND_STRIDE_THREAT_MODEL.md`; `astro-docs lint` passes 0 errors / 0 warnings.
+- **Banners, `@BotFather` & `@AstroSoroban` Community Sync:**
+  - Regenerated AstroWallet 640×360 banner without AstroGate, updated `@BotFather` avatar/banner/Mini App & Bot API (`17` commands), updated `@AstroSoroban` metadata/pinned guide, and posted the Mainnet Upgrade announcement (`message_id=17743`).
+
+### Verified live (Telethon MTProto + Bot API + Probes)
+- `@AstroWalletAppBot` **17/17 commands** + inline `pay` verified live in real Telegram chat (`/buy 10 USDE`, `/sell 10 USDE`, `/swap 10 XLM USDE` return live XOXNO `1.3033830 USDe` quotes + `⚡ Express Sign Swap` buttons).
+- `GET https://astrowallet-soroban.pages.dev/.well-known/stellar.toml` → HTTP 200, `text/plain; charset=utf-8`, `Access-Control-Allow-Origin: *`.
+- `GET /v1/proxy/sep10/challenge` forwards `client_domain=astrowallet-soroban.pages.dev` (MoneyGram returns `unable to process` until partner onboarding completes).
+- Full test suite: **174/174** Vitest tests, typecheck, lint, `secret-scan`, and PWA build passed.
+
+### Open / next (User-side)
+1. **Real Mainnet Express Sign tx:** Tap any live `⚡ Express Sign Swap` button sitting in `@AstroWalletAppBot` chat (e.g. from `/buy 10 USDE`) or `/nft send` with your device PIN/biometric.
+2. **MoneyGram Partner Onboarding:** Register domain `astrowallet-soroban.pages.dev` and `SIGNING_KEY` (`GBFRJ6WMZJ37EQBA34RUEZBDSGZBKRY5T2JIVPG7EHJXZZUSKKQD6YRT`) with MoneyGram.

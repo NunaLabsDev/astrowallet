@@ -3312,4 +3312,108 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(payload.recipientUsername).toBe("bob_user");
     expect(telegramReplies.some((t) => t.includes("Auto-Escrow Protection"))).toBe(true);
   });
+
+  it("appends client_domain and cosigns valid sequence-0 manageData SEP-10 challenges, while rejecting non-manageData", async () => {
+    const { Account, Asset, Keypair, Networks, Operation, TransactionBuilder } = await import(
+      "@stellar/stellar-sdk"
+    );
+    const clientSigner = Keypair.random();
+    const anchorSigner = Keypair.random();
+    const userKp = Keypair.random();
+
+    const validChallenge = new TransactionBuilder(new Account(anchorSigner.publicKey(), "-1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(
+        Operation.manageData({
+          source: userKp.publicKey(),
+          name: "extstellar.moneygram.com auth",
+          value: "nonce123",
+        }),
+      )
+      .addOperation(
+        Operation.manageData({
+          source: clientSigner.publicKey(),
+          name: "client_domain",
+          value: "astrowallet-soroban.pages.dev",
+        }),
+      )
+      .setTimeout(300)
+      .build();
+    validChallenge.sign(anchorSigner);
+
+    const maliciousChallenge = new TransactionBuilder(new Account(anchorSigner.publicKey(), "-1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(
+        Operation.payment({
+          destination: anchorSigner.publicKey(),
+          asset: Asset.native(),
+          amount: "10",
+        }),
+      )
+      .setTimeout(300)
+      .build();
+
+    let mode: "valid" | "malicious" = "valid";
+    let capturedAuthUrl = "";
+    const app = createApp({
+      fetchFn: async (input) => {
+        const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+        if (url === "https://extstellar.moneygram.com/.well-known/stellar.toml") {
+          return new Response(
+            [
+              'WEB_AUTH_ENDPOINT="https://extstellar.moneygram.com/stellaradapterservice/auth"',
+              'TRANSFER_SERVER_SEP0024="https://extstellar.moneygram.com/sep24"',
+            ].join("\n"),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("https://extstellar.moneygram.com/stellaradapterservice/auth")) {
+          capturedAuthUrl = url;
+          return new Response(
+            JSON.stringify({
+              transaction: mode === "valid" ? validChallenge.toXDR() : maliciousChallenge.toXDR(),
+              network_passphrase: Networks.TESTNET,
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    const sep10Env = {
+      ...TEST_ENV,
+      SEP10_CLIENT_DOMAIN: "astrowallet-soroban.pages.dev",
+      SEP10_CLIENT_SIGNING_SECRET: clientSigner.secret(),
+    };
+
+    const okRes = await app.request(
+      `/v1/proxy/sep10/challenge?domain=extstellar.moneygram.com&account=${userKp.publicKey()}`,
+      {},
+      sep10Env,
+    );
+    expect(okRes.status).toBe(200);
+    expect(capturedAuthUrl).toContain("client_domain=astrowallet-soroban.pages.dev");
+    const okJson = (await okRes.json()) as {
+      transaction: string;
+      client_domain?: string;
+      clientDomainSigned?: boolean;
+    };
+    expect(okJson.client_domain).toBe("astrowallet-soroban.pages.dev");
+    expect(okJson.clientDomainSigned).toBe(true);
+    const cosigned = TransactionBuilder.fromXDR(okJson.transaction, Networks.TESTNET);
+    expect(cosigned.signatures).toHaveLength(2);
+
+    mode = "malicious";
+    const badRes = await app.request(
+      `/v1/proxy/sep10/challenge?domain=extstellar.moneygram.com&account=${userKp.publicKey()}`,
+      {},
+      sep10Env,
+    );
+    expect(badRes.status).toBe(502);
+  });
 });

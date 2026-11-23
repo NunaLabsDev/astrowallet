@@ -189,8 +189,23 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
       }
     }
 
+    const dexBase = config.astrodexApiBaseUrl?.replace(/\/+$/, "");
+    const botFetchFn: FetchLike | undefined =
+      deps.fetchFn ??
+      (c.env.ASTRODEX && dexBase
+        ? (input, init) => {
+            const rawUrl =
+              typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+            if (rawUrl.startsWith(dexBase)) {
+              const targetReq = input instanceof Request ? input : new Request(rawUrl, init);
+              return c.env.ASTRODEX!.fetch(targetReq);
+            }
+            return globalThis.fetch(input, init);
+          }
+        : undefined);
+
     const bot = createTelegramBot(config, repo, {
-      fetchFn: deps.fetchFn,
+      fetchFn: botFetchFn,
       cache: c.env.CACHE,
     });
     const handler = webhookCallback(bot, "hono");

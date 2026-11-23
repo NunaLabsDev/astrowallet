@@ -64,7 +64,7 @@ export function DevLabSheet() {
 
   // Soroban Contract Caller
   const [contractId, setContractId] = useState(
-    () => config.sorobitsContractId ?? config.claimEscrowContractId ?? "",
+    () => config.claimEscrowContractId ?? "",
   );
   const [fnName, setFnName] = useState("total_supply");
   const [argsJson, setArgsJson] = useState("[]");

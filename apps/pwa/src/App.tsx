@@ -254,11 +254,10 @@ function renderDockIcon(tab: AppDockTab) {
 }
 
 const MOBILE_DOCK_ITEMS: ReadonlyArray<{ id: AppDockTab; label: string }> = [
-  { id: "wallet", label: "Stellar" },
+  { id: "wallet", label: "Wallet" },
   { id: "ton", label: "TON" },
   { id: "activity", label: "Activity" },
-  { id: "nfts", label: "NFTs" },
-  { id: "accounts", label: "Vault" },
+  { id: "accounts", label: "Accounts" },
 ];
 
 function RevealSeedModalContent({ onDone }: { onDone: () => void }) {
@@ -502,6 +501,7 @@ function WalletShell({
   const [contactError, setContactError] = useState<string | null>(null);
 
   const [wipeConfirmArmed, setWipeConfirmArmed] = useState(false);
+  const [showMoreTools, setShowMoreTools] = useState(false);
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -1085,20 +1085,6 @@ function WalletShell({
               </div>
             </header>
 
-            {/* Banking-Trust Custody Posture Strip */}
-            {isWalletUnlocked && (
-              <div className="aw-trust-strip" role="status" aria-label="Security posture">
-                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: "1 1 200px" }}>
-                  <span className="aw-trust-dot" />
-                  <span style={{ minWidth: 0 }}>
-                    <strong>Self-Custodial Stellar &amp; TON</strong> · Argon2id IndexedDB · Scan &amp;
-                    Shield Active
-                  </span>
-                </div>
-                <span className="glass-pill glass-pill--trust">0 Server Keys</span>
-              </div>
-            )}
-
             {intentRoute && (
               <IntentSheet route={intentRoute} onDismiss={onClearIntent} />
             )}
@@ -1146,9 +1132,6 @@ function WalletShell({
                         <div className="aw-balance-meta">
                           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
                             <span className="glass-pill">{activeAccount.label}</span>
-                            <span className="glass-pill">
-                              m/44&apos;/148&apos;/{activeAccount.derivationIndex ?? 0}&apos;
-                            </span>
                             <button
                               type="button"
                               className="aw-chip-btn"
@@ -1311,7 +1294,7 @@ function WalletShell({
                           <span className="aw-action-circle">
                             <IconShield size={18} />
                           </span>
-                          <span className="aw-action-label">Scan &amp; Shield</span>
+                          <span className="aw-action-label">Shield</span>
                         </button>
                       </div>
                     </section>
@@ -1541,97 +1524,122 @@ function WalletShell({
                         )}
                       </section>
 
-                      {/* Right: Stellar Suite Tools 2x2 Launcher + Dev/Telegram Shortcuts */}
+                      {/* Right: Progressive-Disclosure Pro Tools Drawer Launcher */}
                       <section className="glass-card" style={{ display: "grid", gap: 12, alignContent: "start" }}>
-                        <div>
-                          <div style={{ fontWeight: 700, fontSize: 15 }}>Stellar Suite &amp; Tools</div>
-                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                            Execute swaps, security scans, SDEX offers &amp; bridges
+                        <button
+                          type="button"
+                          onClick={() => setShowMoreTools((prev) => !prev)}
+                          aria-expanded={showMoreTools}
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "space-between",
+                            gap: 10,
+                            width: "100%",
+                            background: "transparent",
+                            border: "none",
+                            padding: 0,
+                            color: "inherit",
+                            fontFamily: "inherit",
+                            cursor: "pointer",
+                            textAlign: "left",
+                          }}
+                        >
+                          <div style={{ minWidth: 0 }}>
+                            <div style={{ fontWeight: 700, fontSize: 15 }}>More Tools</div>
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                              Reserves, Bridge, TON Connect, Dev Lab
+                            </div>
                           </div>
-                        </div>
+                          <span className="aw-chip-btn" style={{ flexShrink: 0 }}>
+                            <span>{showMoreTools ? "Hide" : "Open"}</span>
+                            <span
+                              style={{
+                                display: "inline-flex",
+                                transform: showMoreTools ? "rotate(90deg)" : undefined,
+                                transition: "transform 160ms ease",
+                              }}
+                            >
+                              <IconChevronRight size={14} />
+                            </span>
+                          </span>
+                        </button>
 
-                        <div className="aw-tool-grid">
-                          <button
-                            type="button"
-                            className="aw-tool-card"
-                            onClick={() => openSwapWith()}
-                          >
-                            <div className="aw-tool-card-top">
-                              <span className="aw-tool-icon aw-tool-icon--purple">
-                                <IconSwap size={18} />
-                              </span>
-                              <IconChevronRight size={16} />
+                        {showMoreTools && (
+                          <div style={{ display: "grid", gap: 10 }}>
+                            <div className="aw-tool-grid">
+                              <button
+                                type="button"
+                                className="aw-tool-card"
+                                onClick={() => setActiveDrawer("tools")}
+                              >
+                                <div className="aw-tool-card-top">
+                                  <span className="aw-tool-icon aw-tool-icon--gold">
+                                    <IconTools size={18} />
+                                  </span>
+                                  <IconChevronRight size={16} />
+                                </div>
+                                <div className="aw-tool-title">Classic &amp; Reserves</div>
+                                <div className="aw-tool-sub">SDEX, M..., LumenWipe</div>
+                              </button>
+
+                              <button
+                                type="button"
+                                className="aw-tool-card"
+                                onClick={() => setActiveDrawer("ramp")}
+                              >
+                                <div className="aw-tool-card-top">
+                                  <span className="aw-tool-icon aw-tool-icon--orange">
+                                    <IconBridge size={18} />
+                                  </span>
+                                  <IconChevronRight size={16} />
+                                </div>
+                                <div className="aw-tool-title">CCTP Bridge</div>
+                                <div className="aw-tool-sub">Circle CCTP 6&harr;7 Guard</div>
+                              </button>
+
+                              <button
+                                type="button"
+                                className="aw-tool-card"
+                                onClick={() => setActiveDrawer("tonConnect")}
+                              >
+                                <div className="aw-tool-card-top">
+                                  <span className="aw-tool-icon aw-tool-icon--purple">
+                                    <IconPlug size={18} />
+                                  </span>
+                                  <IconChevronRight size={16} />
+                                </div>
+                                <div className="aw-tool-title">TON Connect</div>
+                                <div className="aw-tool-sub">Linked dApp sessions</div>
+                              </button>
+
+                              <button
+                                type="button"
+                                className="aw-tool-card"
+                                onClick={() => selectTab("nfts")}
+                              >
+                                <div className="aw-tool-card-top">
+                                  <span className="aw-tool-icon aw-tool-icon--emerald">
+                                    <IconNft size={18} />
+                                  </span>
+                                  <IconChevronRight size={16} />
+                                </div>
+                                <div className="aw-tool-title">Collectibles</div>
+                                <div className="aw-tool-sub">View on-chain assets</div>
+                              </button>
                             </div>
-                            <div className="aw-tool-title">Swap &amp; Path Router</div>
-                            <div className="aw-tool-sub">Soroswap + Horizon Path</div>
-                          </button>
 
-                          <button
-                            type="button"
-                            className="aw-tool-card"
-                            onClick={() => setActiveDrawer("scan")}
-                          >
-                            <div className="aw-tool-card-top">
-                              <span className="aw-tool-icon aw-tool-icon--emerald">
-                                <IconShield size={18} />
-                              </span>
-                              <IconChevronRight size={16} />
-                            </div>
-                            <div className="aw-tool-title">Scan &amp; Shield</div>
-                            <div className="aw-tool-sub">Pre-sign XDR firewall</div>
-                          </button>
-
-                          <button
-                            type="button"
-                            className="aw-tool-card"
-                            onClick={() => setActiveDrawer("tools")}
-                          >
-                            <div className="aw-tool-card-top">
-                              <span className="aw-tool-icon aw-tool-icon--gold">
-                                <IconTools size={18} />
-                              </span>
-                              <IconChevronRight size={16} />
-                            </div>
-                            <div className="aw-tool-title">Classic &amp; Reserves</div>
-                            <div className="aw-tool-sub">SDEX, M..., LumenWipe</div>
-                          </button>
-
-                          <button
-                            type="button"
-                            className="aw-tool-card"
-                            onClick={() => setActiveDrawer("ramp")}
-                          >
-                            <div className="aw-tool-card-top">
-                              <span className="aw-tool-icon aw-tool-icon--orange">
-                                <IconBridge size={18} />
-                              </span>
-                              <IconChevronRight size={16} />
-                            </div>
-                            <div className="aw-tool-title">CCTP Precision</div>
-                            <div className="aw-tool-sub">Circle CCTP 6&harr;7 Guard</div>
-                          </button>
-                        </div>
-
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                          <button
-                            type="button"
-                            className="aw-chip-btn"
-                            style={{ flex: 1 }}
-                            onClick={() => setActiveDrawer("dev")}
-                          >
-                            <IconCode size={13} />
-                            <span>Open Dev Lab</span>
-                          </button>
-                          <button
-                            type="button"
-                            className="aw-chip-btn"
-                            style={{ flex: 1 }}
-                            onClick={() => setActiveDrawer("tonConnect")}
-                          >
-                            <IconPlug size={13} />
-                            <span>TON Connect</span>
-                          </button>
-                        </div>
+                            <button
+                              type="button"
+                              className="aw-chip-btn"
+                              style={{ justifyContent: "center" }}
+                              onClick={() => setActiveDrawer("dev")}
+                            >
+                              <IconCode size={13} />
+                              <span>Open Dev Lab</span>
+                            </button>
+                          </div>
+                        )}
                       </section>
                     </div>
                   </div>

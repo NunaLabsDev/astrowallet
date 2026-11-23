@@ -220,7 +220,11 @@ export interface WalletContextValue {
     newPinOrPassphrase: string,
   ): Promise<{ envelopeJson: string }>;
   restoreAgVaultJson(rawJson: string, pinOrPassphrase: string): Promise<void>;
-  syncFromNewerCloudBackup(rawJson: string): Promise<"synced" | "pin_required" | "not_newer">;
+  syncFromNewerCloudBackup(rawJson: string): Promise<{
+    status: "synced" | "push_merged" | "pin_required" | "up_to_date";
+    envelopeJson?: string | undefined;
+    accountCount?: number | undefined;
+  }>;
   exportAgVaultJson(): Promise<string>;
   revealMnemonicWithPin(pinOrPassphrase: string): Promise<string>;
   verifyPinOrPassphrase(pinOrPassphrase: string): Promise<void>;
@@ -1491,41 +1495,175 @@ export function WalletProvider({
   );
 
   const syncFromNewerCloudBackup = useCallback(
-    async (rawJson: string): Promise<"synced" | "pin_required" | "not_newer"> => {
-      let envelope;
+    async (
+      rawJson: string,
+    ): Promise<{
+      status: "synced" | "push_merged" | "pin_required" | "up_to_date";
+      envelopeJson?: string | undefined;
+      accountCount?: number | undefined;
+    }> => {
+      let cloudEnvelope;
       try {
-        envelope = parseAgVaultBackup(rawJson);
+        cloudEnvelope = parseAgVaultBackup(rawJson);
       } catch {
-        return "not_newer";
+        return { status: "up_to_date" };
       }
-      if (envelope.updatedAt <= (localVaultUpdatedAt ?? 0) + 1) {
-        return "not_newer";
+
+      const localEnvelope = await loadEncryptedVault(cleanScopeId).catch(() => null);
+      if (localEnvelope && localEnvelope.ciphertextB64 === cloudEnvelope.ciphertextB64) {
+        return { status: "up_to_date" };
       }
+
       const lease = await loadValidSessionLease();
       if (!lease) {
-        return "pin_required";
+        return { status: "pin_required" };
       }
+
+      let cloudPayload;
       try {
-        const decrypted = await decryptVaultPayload(envelope, lease.pin, {
+        cloudPayload = await decryptVaultPayload(cloudEnvelope, lease.pin, {
           deriveKeyFn: deriveKeyInWorker,
         });
-        await saveEncryptedVault(envelope, cleanScopeId);
-        setLocalVaultUpdatedAt(envelope.updatedAt);
-        sessionVault.set(decrypted.mnemonic);
-        for (const acc of decrypted.accounts) {
+      } catch {
+        return { status: "pin_required" };
+      }
+
+      if (!localEnvelope) {
+        await saveEncryptedVault(cloudEnvelope, cleanScopeId);
+        setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
+        sessionVault.set(cloudPayload.mnemonic);
+        for (const acc of cloudPayload.accounts) {
           if (acc.importedSecret) {
             sessionVault.setImportedSecret(acc.address, acc.importedSecret);
           }
         }
-        setAccountMetaList(decrypted.accounts);
+        setAccountMetaList(cloudPayload.accounts);
         setVaultStatus("unlocked");
-        showToast(`Synced ${decrypted.accounts.length} accounts from Telegram Cloud`);
-        return "synced";
-      } catch {
-        return "pin_required";
+        showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
+        return { status: "synced", accountCount: cloudPayload.accounts.length };
       }
+
+      let localPayload;
+      try {
+        localPayload = await decryptVaultPayload(localEnvelope, lease.pin, {
+          deriveKeyFn: deriveKeyInWorker,
+        });
+      } catch {
+        // Local PIN differed from session lease; replace with cloud
+        await saveEncryptedVault(cloudEnvelope, cleanScopeId);
+        setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
+        sessionVault.set(cloudPayload.mnemonic);
+        for (const acc of cloudPayload.accounts) {
+          if (acc.importedSecret) {
+            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+          }
+        }
+        setAccountMetaList(cloudPayload.accounts);
+        setVaultStatus("unlocked");
+        showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
+        return { status: "synced", accountCount: cloudPayload.accounts.length };
+      }
+
+      if (localPayload.mnemonic.trim() !== cloudPayload.mnemonic.trim()) {
+        if (cloudEnvelope.updatedAt > localEnvelope.updatedAt) {
+          await saveEncryptedVault(cloudEnvelope, cleanScopeId);
+          setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
+          sessionVault.set(cloudPayload.mnemonic);
+          for (const acc of cloudPayload.accounts) {
+            if (acc.importedSecret) {
+              sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+            }
+          }
+          setAccountMetaList(cloudPayload.accounts);
+          setVaultStatus("unlocked");
+          showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
+          return { status: "synced", accountCount: cloudPayload.accounts.length };
+        }
+        return {
+          status: "push_merged",
+          envelopeJson: serializeAgVaultBackup(localEnvelope),
+          accountCount: localPayload.accounts.length,
+        };
+      }
+
+      // CRDT account-union merge (never drop accounts from either device)
+      const primaryFirst =
+        localEnvelope.updatedAt >= cloudEnvelope.updatedAt
+          ? localPayload.accounts
+          : cloudPayload.accounts;
+      const secondary =
+        localEnvelope.updatedAt >= cloudEnvelope.updatedAt
+          ? cloudPayload.accounts
+          : localPayload.accounts;
+
+      const byAddress = new Map<string, VaultAccountMetadata>();
+      const usedIndices = new Set<number>();
+      let maxIdx = 999;
+
+      for (const acc of primaryFirst) {
+        byAddress.set(acc.address, acc);
+        usedIndices.add(acc.index);
+        if (acc.index > maxIdx) maxIdx = acc.index;
+      }
+      for (const acc of secondary) {
+        if (byAddress.has(acc.address)) continue;
+        let nextIdx = acc.index;
+        if (usedIndices.has(nextIdx)) {
+          maxIdx += 1;
+          nextIdx = maxIdx;
+        }
+        usedIndices.add(nextIdx);
+        byAddress.set(acc.address, { ...acc, index: nextIdx });
+      }
+
+      const mergedAccounts = Array.from(byAddress.values()).sort((a, b) => a.index - b.index);
+      const cloudMissingAny = mergedAccounts.length > cloudPayload.accounts.length;
+      const localMissingAny = mergedAccounts.length > localPayload.accounts.length;
+
+      if (cloudMissingAny) {
+        const mergedEnvelope = await encryptVaultPayload(
+          {
+            mnemonic: localPayload.mnemonic,
+            accounts: mergedAccounts,
+            createdAt: Math.min(localPayload.createdAt, cloudPayload.createdAt),
+          },
+          lease.pin,
+          { deriveKeyFn: deriveKeyInWorker },
+        );
+        await saveEncryptedVault(mergedEnvelope, cleanScopeId);
+        setLocalVaultUpdatedAt(mergedEnvelope.updatedAt);
+        sessionVault.set(localPayload.mnemonic);
+        for (const acc of mergedAccounts) {
+          if (acc.importedSecret) {
+            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+          }
+        }
+        setAccountMetaList(mergedAccounts);
+        return {
+          status: "push_merged",
+          envelopeJson: serializeAgVaultBackup(mergedEnvelope),
+          accountCount: mergedAccounts.length,
+        };
+      }
+
+      if (localMissingAny || cloudEnvelope.updatedAt > localEnvelope.updatedAt) {
+        await saveEncryptedVault(cloudEnvelope, cleanScopeId);
+        setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
+        sessionVault.set(cloudPayload.mnemonic);
+        for (const acc of cloudPayload.accounts) {
+          if (acc.importedSecret) {
+            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+          }
+        }
+        setAccountMetaList(cloudPayload.accounts);
+        setVaultStatus("unlocked");
+        showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
+        return { status: "synced", accountCount: cloudPayload.accounts.length };
+      }
+
+      return { status: "up_to_date" };
     },
-    [cleanScopeId, loadValidSessionLease, localVaultUpdatedAt, showToast],
+    [cleanScopeId, loadValidSessionLease, showToast],
   );
 
   const exportAgVaultJson = useCallback(async () => {

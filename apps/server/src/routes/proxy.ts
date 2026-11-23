@@ -22,6 +22,7 @@ import {
   fetchMarketPriceHistory,
   fetchMarketRecentTrades,
   fetchMarketTokenDetails,
+  fetchMarketTopHoldersAndPools,
   type MarketTimeframe,
 } from "../market-horizon.js";
 import type { KVNamespace } from "@cloudflare/workers-types";
@@ -964,7 +965,14 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             fetchFn,
           }).catch(() => []),
         ]);
-        return { details, orderbook, recentTrades };
+        const { holders, liquidityPools } = await fetchMarketTopHoldersAndPools({
+          horizonUrls: config.horizonUrls,
+          assetCode: code,
+          assetIssuer: issuerParse?.data as ClassicAddress | undefined,
+          supplyAmount: details?.supplyAmount,
+          fetchFn,
+        }).catch(() => ({ holders: [], liquidityPools: [] }));
+        return { details, orderbook, recentTrades, holders, liquidityPools };
       },
     });
   });

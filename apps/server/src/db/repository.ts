@@ -126,6 +126,7 @@ export interface ServerRepository {
     envelopeJson: string;
     envelopeSha256: string;
     version?: number | undefined;
+    updatedAt?: number | undefined;
   }): Promise<StoredEncryptedVaultBackup>;
   getEncryptedVaultBackup(
     telegramUserId: string,
@@ -835,8 +836,13 @@ export function createD1Repository(db: D1Database): ServerRepository {
       envelopeJson,
       envelopeSha256,
       version = 1,
+      updatedAt,
     }) {
       const now = Math.floor(Date.now() / 1000);
+      const effectiveUpdatedAt =
+        typeof updatedAt === "number" && Number.isFinite(updatedAt) && updatedAt > 0
+          ? Math.floor(updatedAt)
+          : now;
       await db.batch([
         db
           .prepare(
@@ -853,9 +859,18 @@ export function createD1Repository(db: D1Database): ServerRepository {
                envelope_json = excluded.envelope_json,
                envelope_sha256 = excluded.envelope_sha256,
                version = excluded.version,
-               updated_at = excluded.updated_at`,
+               updated_at = excluded.updated_at
+             WHERE excluded.updated_at >= encrypted_vault_backups.updated_at`,
           )
-          .bind(telegramUserId, network, envelopeJson, envelopeSha256, version, now, now),
+          .bind(
+            telegramUserId,
+            network,
+            envelopeJson,
+            envelopeSha256,
+            version,
+            now,
+            effectiveUpdatedAt,
+          ),
       ]);
 
       const row = await db

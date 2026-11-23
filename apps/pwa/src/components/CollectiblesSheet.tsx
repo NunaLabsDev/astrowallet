@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ClassicAddress, ContractAddress } from "@astrowallet/domain";
 import {
   fetchOwnerSorobits,
@@ -24,7 +24,7 @@ const NAVIGATOR_STATES: ReadonlyArray<{ id: NavigatorState; label: string }> = [
   { id: "zenith", label: "Zenith" },
 ];
 
-interface ClassicNftMeta {
+export interface ClassicNftMeta {
   code: string;
   issuer: string;
   homeDomain?: string | undefined;
@@ -35,26 +35,23 @@ interface ClassicNftMeta {
   resolved: boolean;
 }
 
-export interface CollectiblesSheetProps {
-  onInspectAsset?: (target: {
-    assetCode: string;
-    assetIssuer?: string | undefined;
-    name?: string | undefined;
-    domain?: string | undefined;
-    icon?: string | undefined;
-  }) => void;
-  onSendAsset?: (prefill: {
-    assetCode: string;
-    assetIssuer?: string | undefined;
-  }) => void;
+export interface ClassicNftSelection {
+  assetCode: string;
+  assetIssuer: string;
+  meta?: ClassicNftMeta | undefined;
 }
 
-const NFT_PAGE_SIZE = 12;
+export interface CollectiblesSheetProps {
+  onBack?: () => void;
+  onSelectClassicNft?: (nft: ClassicNftSelection) => void;
+}
+
+const NFT_BATCH_SIZE = 12;
 const NFT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 export function CollectiblesSheet({
-  onInspectAsset,
-  onSendAsset,
+  onBack,
+  onSelectClassicNft,
 }: CollectiblesSheetProps = {}) {
   const { config, activeAccount, accountState } = useWallet();
 
@@ -67,14 +64,15 @@ export function CollectiblesSheet({
     classicNfts.length > 0 ? "classic" : "sorobits",
   );
   const [nftSearch, setNftSearch] = useState("");
-  const [nftPage, setNftPage] = useState(0);
+  const [visibleCount, setVisibleCount] = useState(NFT_BATCH_SIZE);
   const [nftMetaMap, setNftMetaMap] = useState<Record<string, ClassicNftMeta>>({});
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (classicNfts.length > 0) {
       setGalleryTab("classic");
     }
-    setNftPage(0);
+    setVisibleCount(NFT_BATCH_SIZE);
   }, [activeAccount?.address, classicNfts.length]);
 
   const filteredClassicNfts = useMemo(() => {
@@ -92,18 +90,32 @@ export function CollectiblesSheet({
     });
   }, [classicNfts, nftSearch, nftMetaMap]);
 
-  const totalNftPages = Math.max(1, Math.ceil(filteredClassicNfts.length / NFT_PAGE_SIZE));
-  const safeNftPage = Math.min(nftPage, totalNftPages - 1);
   const visibleClassicNfts = useMemo(
-    () =>
-      filteredClassicNfts.slice(
-        safeNftPage * NFT_PAGE_SIZE,
-        (safeNftPage + 1) * NFT_PAGE_SIZE,
-      ),
-    [filteredClassicNfts, safeNftPage],
+    () => filteredClassicNfts.slice(0, visibleCount),
+    [filteredClassicNfts, visibleCount],
   );
 
-  // Lazy-resolve real IPFS/TOML metadata for the currently visible Classic NFT page (concurrency 4)
+  const hasMoreNfts = visibleCount < filteredClassicNfts.length;
+
+  // Smooth infinite scroll as the user scrolls down
+  useEffect(() => {
+    if (galleryTab !== "classic" || !hasMoreNfts) return undefined;
+    const node = sentinelRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") return undefined;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisibleCount((prev) => Math.min(prev + NFT_BATCH_SIZE, filteredClassicNfts.length));
+        }
+      },
+      { rootMargin: "260px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [galleryTab, hasMoreNfts, filteredClassicNfts.length]);
+
+  // Lazy-resolve real IPFS/TOML metadata for visible Classic NFTs (concurrency 4)
   useEffect(() => {
     if (galleryTab !== "classic" || visibleClassicNfts.length === 0) return undefined;
     let cancelled = false;
@@ -246,27 +258,34 @@ export function CollectiblesSheet({
   if (!activeAccount || !traits) return null;
 
   return (
-    <div style={{ display: "grid", gap: 16 }}>
-      {/* Gallery Sub-Tabs */}
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-        <button
-          type="button"
-          className="aw-chip-btn"
-          aria-pressed={galleryTab === "classic"}
-          onClick={() => setGalleryTab("classic")}
-        >
-          <IconNft size={14} />
-          <span>Classic Stellar NFTs ({classicNfts.length})</span>
-        </button>
-        <button
-          type="button"
-          className="aw-chip-btn"
-          aria-pressed={galleryTab === "sorobits"}
-          onClick={() => setGalleryTab("sorobits")}
-        >
-          <IconSparkles size={14} />
-          <span>Sorobits SEP-50 ({ownedSorobits.length})</span>
-        </button>
+    <div style={{ display: "grid", gap: 14 }}>
+      {/* Top Back Bar + Gallery Sub-Tabs */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {onBack && (
+          <button type="button" className="aw-chip-btn" onClick={onBack}>
+            ← Back to Wallet
+          </button>
+        )}
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            className="aw-chip-btn"
+            aria-pressed={galleryTab === "classic"}
+            onClick={() => setGalleryTab("classic")}
+          >
+            <IconNft size={14} />
+            <span>Classic NFTs ({classicNfts.length})</span>
+          </button>
+          <button
+            type="button"
+            className="aw-chip-btn"
+            aria-pressed={galleryTab === "sorobits"}
+            onClick={() => setGalleryTab("sorobits")}
+          >
+            <IconSparkles size={14} />
+            <span>Sorobits ({ownedSorobits.length})</span>
+          </button>
+        </div>
       </div>
 
       {/* Classic Stellar NFTs (0.0000001 / Litemint & SEP-1) */}
@@ -284,15 +303,15 @@ export function CollectiblesSheet({
             <div>
               <div style={{ fontWeight: 700, fontSize: 16, display: "flex", alignItems: "center", gap: 8 }}>
                 <IconNft size={18} />
-                <span>Classic Stellar NFTs ({classicNfts.length})</span>
+                <span>Collectible Gallery ({classicNfts.length})</span>
               </div>
               <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
-                1-stroop collectibles resolved live from issuer IPFS &amp; stellar.toml
+                Tap any artwork to inspect provenance, edition &amp; collection
               </div>
             </div>
-            {classicNfts.length > 0 && (
-              <span className="glass-pill glass-pill--gold">
-                Page {safeNftPage + 1} / {totalNftPages}
+            {filteredClassicNfts.length > 0 && (
+              <span className="glass-pill glass-pill--gold tabular-nums">
+                {visibleClassicNfts.length} / {filteredClassicNfts.length}
               </span>
             )}
           </div>
@@ -314,11 +333,11 @@ export function CollectiblesSheet({
                 type="search"
                 className="aw-input"
                 style={{ paddingLeft: 36 }}
-                placeholder="Filter NFTs by code, name, or domain..."
+                placeholder="Filter collectibles by name, code, or creator..."
                 value={nftSearch}
                 onChange={(e) => {
                   setNftSearch(e.target.value);
-                  setNftPage(0);
+                  setVisibleCount(NFT_BATCH_SIZE);
                 }}
               />
             </div>
@@ -337,7 +356,20 @@ export function CollectiblesSheet({
                   const key = `${item.assetCode}:${item.assetIssuer ?? ""}`;
                   const meta = nftMetaMap[key];
                   return (
-                    <article key={key} className="aw-nft-card">
+                    <button
+                      key={key}
+                      type="button"
+                      className="aw-nft-card aw-nft-card--interactive"
+                      onClick={() => {
+                        if (item.assetIssuer && onSelectClassicNft) {
+                          onSelectClassicNft({
+                            assetCode: item.assetCode,
+                            assetIssuer: item.assetIssuer,
+                            meta,
+                          });
+                        }
+                      }}
+                    >
                       <div className="aw-nft-media">
                         {meta?.image ? (
                           <img
@@ -353,7 +385,7 @@ export function CollectiblesSheet({
                         )}
                       </div>
 
-                      <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+                      <div style={{ minWidth: 0, display: "grid", gap: 2, textAlign: "left" }}>
                         <div className="aw-nft-title" title={meta?.name ?? item.assetCode}>
                           {meta?.name ?? item.assetCode}
                         </div>
@@ -364,78 +396,39 @@ export function CollectiblesSheet({
                               : "Stellar Asset")}
                         </div>
                       </div>
-
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {onInspectAsset && (
-                          <button
-                            type="button"
-                            className="aw-mini-chip"
-                            style={{ flex: 1 }}
-                            onClick={() =>
-                              onInspectAsset({
-                                assetCode: item.assetCode,
-                                assetIssuer: item.assetIssuer,
-                                name: meta?.name,
-                                domain: meta?.homeDomain,
-                                icon: meta?.image,
-                              })
-                            }
-                          >
-                            Inspect
-                          </button>
-                        )}
-                        {onSendAsset && (
-                          <button
-                            type="button"
-                            className="aw-mini-chip"
-                            style={{ flex: 1 }}
-                            onClick={() =>
-                              onSendAsset({
-                                assetCode: item.assetCode,
-                                assetIssuer: item.assetIssuer,
-                              })
-                            }
-                          >
-                            Send
-                          </button>
-                        )}
-                      </div>
-                    </article>
+                    </button>
                   );
                 })}
               </div>
 
-              {totalNftPages > 1 && (
+              {hasMoreNfts && (
                 <div
+                  ref={sentinelRef}
                   style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
+                    display: "grid",
+                    placeItems: "center",
                     gap: 8,
-                    flexWrap: "wrap",
+                    padding: "10px 0",
+                    fontSize: 12,
+                    color: "var(--aw-ink-secondary)",
                   }}
                 >
-                  <button
-                    type="button"
-                    className="aw-btn-secondary"
-                    disabled={safeNftPage === 0}
-                    onClick={() => setNftPage((p) => Math.max(0, p - 1))}
-                  >
-                    ← Prev
-                  </button>
-                  <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                    Showing {safeNftPage * NFT_PAGE_SIZE + 1}–
-                    {Math.min((safeNftPage + 1) * NFT_PAGE_SIZE, filteredClassicNfts.length)} of{" "}
-                    {filteredClassicNfts.length}
+                  <span>
+                    Loading more collectibles… ({visibleClassicNfts.length} / {filteredClassicNfts.length})
                   </span>
-                  <button
-                    type="button"
-                    className="aw-btn-secondary"
-                    disabled={safeNftPage >= totalNftPages - 1}
-                    onClick={() => setNftPage((p) => Math.min(totalNftPages - 1, p + 1))}
-                  >
-                    Next →
-                  </button>
+                  {typeof IntersectionObserver === "undefined" && (
+                    <button
+                      type="button"
+                      className="aw-btn-secondary"
+                      onClick={() =>
+                        setVisibleCount((prev) =>
+                          Math.min(prev + NFT_BATCH_SIZE, filteredClassicNfts.length),
+                        )
+                      }
+                    >
+                      Load More
+                    </button>
+                  )}
                 </div>
               )}
             </>

@@ -87,10 +87,25 @@ export function dedupedFetch<T>(key: string, fetcher: () => Promise<T>): Promise
   return promise;
 }
 
+export interface TokenHolderEntry {
+  address: string;
+  balance: string;
+  sharePct: number | null;
+}
+
+export interface TokenLiquidityPoolEntry {
+  id: string;
+  totalTrustlines: number;
+  totalShares: string;
+  reserves: Array<{ asset: string; amount: string }>;
+}
+
 export interface TokenBundleResult {
   details: StellarTokenDetails;
   orderbook: TokenOrderbookSnapshot | null;
   recentTrades: TokenRecentTradeRecord[];
+  holders?: TokenHolderEntry[] | undefined;
+  liquidityPools?: TokenLiquidityPoolEntry[] | undefined;
 }
 
 export async function fetchCachedMarketHistory(input: {

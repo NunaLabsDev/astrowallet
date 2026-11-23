@@ -213,7 +213,7 @@ export function TelegramProvider({
               ? {
                   kind: "found",
                   envelope: valid.data,
-                  updatedAt: data.backup.updatedAt ?? valid.data.updatedAt,
+                  updatedAt: valid.data.updatedAt,
                 }
               : { kind: "error", message: "Stored encrypted backup envelope failed validation" };
           } catch {
@@ -224,25 +224,10 @@ export function TelegramProvider({
           }
         };
 
-        const altNet = config.altNetworkProfile?.network;
-        const fetchServer = Promise.all([
-          fetchBackupFromServer(targetNetwork),
-          altNet && altNet !== targetNetwork
-            ? fetchBackupFromServer(altNet)
-            : Promise.resolve<ServerFetchResult>({ kind: "empty" }),
-        ]).then(([primaryRes, altRes]) => {
-          const primaryFound = primaryRes.kind === "found" ? primaryRes : null;
-          const altFound = altRes.kind === "found" ? altRes : null;
-          if (primaryFound && altFound) {
-            const winnerServer =
-              primaryFound.updatedAt >= altFound.updatedAt ? primaryFound : altFound;
-            return { result: winnerServer as ServerFetchResult, primaryUpdatedAt: primaryFound.updatedAt };
-          }
-          return {
-            result: primaryFound ?? altFound ?? (primaryRes.kind === "error" ? primaryRes : altRes),
-            primaryUpdatedAt: primaryFound?.updatedAt ?? 0,
-          };
-        });
+        const fetchServer = fetchBackupFromServer(targetNetwork).then((primaryRes) => ({
+          result: primaryRes,
+          primaryUpdatedAt: primaryRes.kind === "found" ? primaryRes.updatedAt : 0,
+        }));
 
         const fetchTgCloud = Promise.all([
           tgCloudStorageGet(UNIFIED_TG_CLOUD_VAULT_KEY),
@@ -453,7 +438,6 @@ export function TelegramProvider({
       const activeToken = await ensureFreshSessionToken();
 
       let serverUpdatedAt = parsed.updatedAt;
-      const altNet = config.altNetworkProfile?.network;
       const d1Promise = activeToken
         ? fetch(`${base}/v1/tg/vault-backup`, {
             method: "PUT",
@@ -475,18 +459,6 @@ export function TelegramProvider({
             .catch(() => false)
         : Promise.resolve(false);
 
-      if (activeToken && altNet && altNet !== networkRef.current) {
-        void fetch(`${base}/v1/tg/vault-backup`, {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${activeToken}`,
-            "X-Astro-Network": altNet,
-          },
-          body: JSON.stringify({ envelope: parsed }),
-        }).catch(() => undefined);
-      }
-
       const tgCloudPromise =
         new TextEncoder().encode(compact).byteLength <= MAX_TG_CLOUD_STORAGE_BYTES
           ? tgCloudStorageSet(UNIFIED_TG_CLOUD_VAULT_KEY, compact)
@@ -499,17 +471,16 @@ export function TelegramProvider({
 
       setCloudBackupJson(compact);
       setHasEncryptedBackup(true);
-      setBackupUpdatedAt(serverUpdatedAt);
+      setBackupUpdatedAt(parsed.updatedAt);
       setCloudBackupError(null);
-      return { d1Saved, tgCloudSaved, updatedAt: serverUpdatedAt };
+      return { d1Saved, tgCloudSaved, updatedAt: Math.max(parsed.updatedAt, serverUpdatedAt) };
     },
-    [config.apiBaseUrl, config.altNetworkProfile?.network, ensureFreshSessionToken],
+    [config.apiBaseUrl, ensureFreshSessionToken],
   );
 
   const deleteEncryptedBackup = useCallback(async () => {
     const base = config.apiBaseUrl.replace(/\/+$/, "");
     const activeToken = await ensureFreshSessionToken();
-    const altNet = config.altNetworkProfile?.network;
     if (activeToken) {
       const res = await fetch(`${base}/v1/tg/vault-backup`, {
         method: "DELETE",
@@ -522,15 +493,6 @@ export function TelegramProvider({
         const errBody = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(errBody.error ?? `Failed to delete server cloud backup (${res.status})`);
       }
-      if (altNet && altNet !== networkRef.current) {
-        void fetch(`${base}/v1/tg/vault-backup`, {
-          method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${activeToken}`,
-            "X-Astro-Network": altNet,
-          },
-        }).catch(() => undefined);
-      }
     }
     await Promise.all([
       tgCloudStorageRemove(UNIFIED_TG_CLOUD_VAULT_KEY),
@@ -540,7 +502,7 @@ export function TelegramProvider({
     setHasEncryptedBackup(false);
     setBackupUpdatedAt(null);
     setCloudBackupError(null);
-  }, [config.apiBaseUrl, config.altNetworkProfile?.network, ensureFreshSessionToken]);
+  }, [config.apiBaseUrl, ensureFreshSessionToken]);
 
   const allowed = shouldAllowMiniAppAccess({
     inTelegram,

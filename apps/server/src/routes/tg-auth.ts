@@ -299,6 +299,7 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
       envelopeJson: compactJson,
       envelopeSha256,
       version: parsedBody.envelope.version,
+      updatedAt: parsedBody.envelope.updatedAt,
     });
 
     return c.json({

@@ -597,3 +597,116 @@ export async function fetchMarketLiquidAssets(input: {
 
   return Array.from(discovered.values()).slice(0, limit);
 }
+
+export interface MarketTopHolder {
+  address: string;
+  balance: string;
+  sharePct: number | null;
+}
+
+export interface MarketLiquidityPoolSummary {
+  id: string;
+  totalTrustlines: number;
+  totalShares: string;
+  reserves: Array<{ asset: string; amount: string }>;
+}
+
+/**
+ * Fetches live top on-chain holders (for issued assets) and AMM liquidity pools
+ * from Horizon so the Token Explorer displays rich Stellar.Expert-style telemetry.
+ */
+export async function fetchMarketTopHoldersAndPools(input: {
+  horizonUrls: readonly string[];
+  assetCode: string;
+  assetIssuer?: ClassicAddress | undefined;
+  supplyAmount?: string | undefined;
+  fetchFn?: FetchLike | undefined;
+}): Promise<{
+  holders: MarketTopHolder[];
+  liquidityPools: MarketLiquidityPoolSummary[];
+}> {
+  const fetchFn = input.fetchFn ?? fetch;
+  const isNative = input.assetCode.trim().toUpperCase() === "XLM" && !input.assetIssuer;
+  const reserveParam = isNative
+    ? "native"
+    : `${input.assetCode.trim()}:${input.assetIssuer}`;
+
+  const holdersPromise: Promise<MarketTopHolder[]> = isNative
+    ? Promise.resolve([])
+    : fetchHorizonJson<{
+        _embedded?: {
+          records?: Array<{
+            id?: string;
+            balances?: Array<{
+              asset_type?: string;
+              asset_code?: string;
+              asset_issuer?: string;
+              balance?: string;
+            }>;
+          }>;
+        };
+      }>(
+        input.horizonUrls,
+        `/accounts?asset=${encodeURIComponent(reserveParam)}&limit=25&order=desc`,
+        fetchFn,
+      )
+        .then((body) => {
+          const supplyNum = parseFinite(input.supplyAmount);
+          const list: MarketTopHolder[] = [];
+          for (const rec of body?._embedded?.records ?? []) {
+            if (!rec.id) continue;
+            const bal = rec.balances?.find(
+              (b) =>
+                b.asset_code?.toUpperCase() === input.assetCode.trim().toUpperCase() &&
+                b.asset_issuer === input.assetIssuer,
+            );
+            const val = parseFinite(bal?.balance);
+            if (!bal?.balance || val === null || val <= 0) continue;
+            list.push({
+              address: rec.id,
+              balance: bal.balance,
+              sharePct:
+                supplyNum && supplyNum > 0
+                  ? Math.min(100, (val / supplyNum) * 100)
+                  : null,
+            });
+          }
+          list.sort((a, b) => (parseFinite(b.balance) ?? 0) - (parseFinite(a.balance) ?? 0));
+          return list.slice(0, 10);
+        })
+        .catch(() => []);
+
+  const poolsPromise: Promise<MarketLiquidityPoolSummary[]> = fetchHorizonJson<{
+    _embedded?: {
+      records?: Array<{
+        id?: string;
+        total_trustlines?: number;
+        total_shares?: string;
+        reserves?: Array<{ asset?: string; amount?: string }>;
+      }>;
+    };
+  }>(
+    input.horizonUrls,
+    `/liquidity_pools?reserves=${encodeURIComponent(reserveParam)}&limit=6&order=desc`,
+    fetchFn,
+  )
+    .then((body) => {
+      const out: MarketLiquidityPoolSummary[] = [];
+      for (const p of body?._embedded?.records ?? []) {
+        if (!p.id) continue;
+        out.push({
+          id: p.id,
+          totalTrustlines: p.total_trustlines ?? 0,
+          totalShares: p.total_shares ?? "0",
+          reserves: (p.reserves ?? [])
+            .filter((r) => r.asset && r.amount)
+            .map((r) => ({ asset: r.asset!, amount: r.amount! })),
+        });
+      }
+      return out;
+    })
+    .catch(() => []);
+
+  const [holders, liquidityPools] = await Promise.all([holdersPromise, poolsPromise]);
+  return { holders, liquidityPools };
+}

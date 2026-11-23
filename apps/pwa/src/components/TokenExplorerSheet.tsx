@@ -17,6 +17,8 @@ import {
   fetchCachedTokenBundle,
   readCachedEntry,
   type TokenBundleResult,
+  type TokenHolderEntry,
+  type TokenLiquidityPoolEntry,
 } from "../state/market-cache.js";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
@@ -55,9 +57,30 @@ export interface TokenExplorerSheetProps {
   initialToken?: SelectedTokenTarget | null | undefined;
   onOpenSend: (prefill: { assetCode: string; assetIssuer?: string | undefined }) => void;
   onOpenSwap: (prefill: { assetId: string; mode: "from" | "to" }) => void;
+  onInspectAddress?: (address: string) => void;
 }
 
-type InspectorTab = "overview" | "security" | "orderbook";
+type InspectorTab = "overview" | "holders" | "orderbook" | "security";
+
+function computeOnChainAssetScore(input: {
+  isNativeXlm: boolean;
+  isOfficial: boolean;
+  isSpoof: boolean;
+  hasDomain: boolean;
+  details: StellarTokenDetails | null;
+  poolCount: number;
+}): number {
+  if (input.isSpoof) return 1.0;
+  if (input.isNativeXlm) return 10.0;
+  let score = 4.0;
+  if (input.isOfficial) score += 2.5;
+  if (input.hasDomain) score += 1.0;
+  if (input.details?.flags.authImmutable) score += 1.0;
+  if (!input.details?.flags.authClawbackEnabled) score += 0.5;
+  if (!input.details?.flags.authRevocable) score += 0.5;
+  if ((input.details?.numAccounts ?? 0) >= 100 || input.poolCount > 0) score += 0.5;
+  return Math.min(10.0, Math.round(score * 10) / 10);
+}
 
 function PriceAreaChart({
   candles,
@@ -195,6 +218,7 @@ export function TokenExplorerSheet({
   initialToken,
   onOpenSend,
   onOpenSwap,
+  onInspectAddress,
 }: TokenExplorerSheetProps) {
   const {
     config,
@@ -225,6 +249,8 @@ export function TokenExplorerSheet({
   const [priceHistory, setPriceHistory] = useState<TokenPriceHistoryResult | null>(null);
   const [orderbook, setOrderbook] = useState<TokenOrderbookSnapshot | null>(null);
   const [recentTrades, setRecentTrades] = useState<TokenRecentTradeRecord[]>([]);
+  const [holders, setHolders] = useState<TokenHolderEntry[]>([]);
+  const [liquidityPools, setLiquidityPools] = useState<TokenLiquidityPoolEntry[]>([]);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [trustBusy, setTrustBusy] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -291,6 +317,8 @@ export function TokenExplorerSheet({
       setDetails(null);
       setOrderbook(null);
       setRecentTrades([]);
+      setHolders([]);
+      setLiquidityPools([]);
       setDetailError(null);
       return undefined;
     }
@@ -311,6 +339,8 @@ export function TokenExplorerSheet({
         setDetails(hit.data.details);
         setOrderbook(hit.data.orderbook);
         setRecentTrades(hit.data.recentTrades);
+        setHolders(hit.data.holders ?? []);
+        setLiquidityPools(hit.data.liquidityPools ?? []);
         setLoadingDetails(false);
       } else {
         setLoadingDetails(true);
@@ -331,6 +361,8 @@ export function TokenExplorerSheet({
         setDetails(bundle.details);
         setOrderbook(bundle.orderbook);
         setRecentTrades(bundle.recentTrades);
+        setHolders(bundle.holders ?? []);
+        setLiquidityPools(bundle.liquidityPools ?? []);
       })
       .catch((err) => {
         if (cancelled || hasWarmCache) return;
@@ -893,8 +925,9 @@ export function TokenExplorerSheet({
         {(
           [
             ["overview", "Chart & Stats"],
-            ["security", "Scanner & Security"],
+            ["holders", "Holders & Pools"],
             ["orderbook", "Orderbook & Trades"],
+            ["security", "Scanner & Security"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -910,8 +943,9 @@ export function TokenExplorerSheet({
             }}
           >
             {id === "overview" && <IconChart size={13} />}
-            {id === "security" && <IconShield size={13} />}
+            {id === "holders" && <IconSearch size={13} />}
             {id === "orderbook" && <IconRefresh size={13} />}
+            {id === "security" && <IconShield size={13} />}
             <span>{label}</span>
           </button>
         ))}
@@ -1025,69 +1059,166 @@ export function TokenExplorerSheet({
             </div>
           </div>
 
-          {!isNativeXlm && details && (
-            <div className="aw-contract-seals" style={{ fontSize: 12 }}>
+          {/* Stellar.Expert-Style Asset Summary */}
+          <div className="aw-contract-seals" style={{ fontSize: 12 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>Summary</div>
+            {details?.sacContractId && (
               <div className="aw-seal-row">
-                <span>Holders Breakdown</span>
+                <span>Soroban Contract</span>
+                <button
+                  type="button"
+                  className="aw-mini-chip"
+                  onClick={() => void handleCopy("sac_summary", details.sacContractId!)}
+                >
+                  {copiedField === "sac_summary" ? <IconCheck size={11} /> : <IconCopy size={11} />}
+                  <code>
+                    {details.sacContractId.slice(0, 5)}…{details.sacContractId.slice(-5)}
+                  </code>
+                </button>
+              </div>
+            )}
+            <div className="aw-seal-row">
+              <span>On-Chain Rating</span>
+              <span className="glass-pill glass-pill--trust tabular-nums">
+                {computeOnChainAssetScore({
+                  isNativeXlm,
+                  isOfficial,
+                  isSpoof: trust.status === "scam_spoof",
+                  hasDomain: Boolean(displayDomain),
+                  details,
+                  poolCount: liquidityPools.length,
+                }).toFixed(1)}{" "}
+                / 10
+              </span>
+            </div>
+            {details?.supplyAmount && (
+              <div className="aw-seal-row">
+                <span>Total Supply</span>
                 <code className="tabular-nums">
-                  Auth: {formatCompactNumber(details.numAccounts)} · Maint:{" "}
-                  {formatCompactNumber(details.authorizedToMaintainLiabilitiesAccounts ?? 0)} ·
-                  Unauth: {formatCompactNumber(details.unauthorizedAccounts ?? 0)}
+                  {Math.round(Number(details.supplyAmount)).toLocaleString()} {selectedToken.assetCode}
                 </code>
               </div>
+            )}
+            {displayDomain && (
               <div className="aw-seal-row">
-                <span>On-Chain Distribution</span>
-                <code className="tabular-nums">
-                  Pools: {details.numLiquidityPools ?? 0} · Claimables:{" "}
-                  {details.numClaimableBalances ?? 0} · Contracts: {details.numContracts ?? 0}
-                  {details.contractsAmount
-                    ? ` (${formatCompactNumber(details.contractsAmount)})`
-                    : ""}
-                </code>
+                <span>Home Domain</span>
+                <code>{displayDomain}</code>
               </div>
-              {userHolding && (
+            )}
+            {!isNativeXlm && details && (
+              <>
                 <div className="aw-seal-row">
-                  <span>Your Trustline</span>
+                  <span>Trustlines (Holders)</span>
                   <code className="tabular-nums">
-                    Limit: {userHolding.limit ? formatCompactNumber(userHolding.limit) : "Max"} ·
-                    Sell Liab: {userHolding.sellingLiabilities ?? "0"} ·{" "}
-                    {userHolding.isAuthorized === false ? "Frozen" : "Authorized"}
+                    {formatCompactNumber(details.numAccounts)} Auth ·{" "}
+                    {formatCompactNumber(details.authorizedToMaintainLiabilitiesAccounts ?? 0)} Maint ·{" "}
+                    {formatCompactNumber(details.unauthorizedAccounts ?? 0)} Unauth
                   </code>
                 </div>
-              )}
-            </div>
-          )}
+                <div className="aw-seal-row">
+                  <span>On-Chain Distribution</span>
+                  <code className="tabular-nums">
+                    Pools: {details.numLiquidityPools ?? liquidityPools.length} · Claimables:{" "}
+                    {details.numClaimableBalances ?? 0} · Contracts: {details.numContracts ?? 0}
+                  </code>
+                </div>
+              </>
+            )}
+            {userHolding && (
+              <div className="aw-seal-row">
+                <span>Your Trustline</span>
+                <code className="tabular-nums">
+                  Limit: {userHolding.limit ? formatCompactNumber(userHolding.limit) : "Max"} ·
+                  Sell Liab: {userHolding.sellingLiabilities ?? "0"} ·{" "}
+                  {userHolding.isAuthorized === false ? "Frozen" : "Authorized"}
+                </code>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
-          <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+      {/* TAB 2: TOP HOLDERS & AMM POOLS */}
+      {inspectorTab === "holders" && (
+        <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 12 }}>
+          <div style={{ display: "grid", gap: 8 }}>
             <div style={{ fontWeight: 700, fontSize: 13 }}>
-              Recent SDEX / AMM Trades ({recentTrades.length})
+              Top On-Chain Holders {holders.length > 0 ? `(${holders.length})` : ""}
             </div>
-            {recentTrades.length === 0 ? (
-              <div style={{ fontSize: 12, color: "var(--aw-ink-muted)" }}>
-                No recent trades recorded on Horizon for this pair.
+            {isNativeXlm ? (
+              <div className="aw-banner" style={{ fontSize: 12 }}>
+                XLM is the native protocol asset held across millions of ledger accounts. Active
+                AMM Liquidity Pools &amp; Market Depth are shown below.
+              </div>
+            ) : holders.length === 0 ? (
+              <div className="aw-empty-state" style={{ fontSize: 12 }}>
+                No public holder records returned by Horizon for this asset.
               </div>
             ) : (
               <div style={{ display: "grid", gap: 6 }}>
-                {recentTrades.slice(0, 10).map((t) => (
-                  <div
-                    key={t.id}
-                    className="aw-seal-row tabular-nums"
-                    style={{ fontSize: 11 }}
-                  >
-                    <span
-                      style={{
-                        color: t.isBuy ? "var(--aw-trust-emerald)" : "#ffb396",
-                        fontWeight: 700,
-                      }}
-                    >
-                      {t.isBuy ? "BUY" : "SELL"} {formatCompactNumber(t.baseAmount)}{" "}
-                      {selectedToken.assetCode} @ {t.price} {quoteCode}
-                    </span>
-                    <span style={{ color: "var(--aw-ink-muted)" }}>
-                      {new Date(t.timestamp).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
+                {holders.map((h, idx) => (
+                  <div key={h.address} className="aw-seal-row tabular-nums" style={{ fontSize: 12 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+                      <span className="glass-pill" style={{ padding: "1px 6px", fontSize: 10 }}>
+                        #{idx + 1}
+                      </span>
+                      {onInspectAddress ? (
+                        <button
+                          type="button"
+                          className="aw-mini-chip"
+                          onClick={() => onInspectAddress(h.address)}
+                        >
+                          <code>
+                            {h.address.slice(0, 6)}…{h.address.slice(-5)}
+                          </code>
+                        </button>
+                      ) : (
+                        <code>
+                          {h.address.slice(0, 6)}…{h.address.slice(-5)}
+                        </code>
+                      )}
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      <strong>{formatCompactNumber(h.balance)}</strong>
+                      {h.sharePct !== null && (
+                        <span style={{ fontSize: 10, color: "var(--aw-ink-secondary)", marginLeft: 6 }}>
+                          ({h.sharePct.toFixed(2)}%)
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: "grid", gap: 8 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>
+              AMM Liquidity Pools ({liquidityPools.length})
+            </div>
+            {liquidityPools.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                No active Stellar AMM liquidity pools found for {selectedToken.assetCode}.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 8 }}>
+                {liquidityPools.map((pool) => (
+                  <div key={pool.id} className="aw-list-row" style={{ fontSize: 12 }}>
+                    <div style={{ minWidth: 0, display: "grid", gap: 3 }}>
+                      <div style={{ fontWeight: 700 }}>
+                        {pool.reserves
+                          .map((r) => {
+                            const code = r.asset === "native" ? "XLM" : (r.asset.split(":")[0] ?? "ASSET");
+                            return `${formatCompactNumber(r.amount)} ${code}`;
+                          })
+                          .join(" / ")}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                        Pool {pool.id.slice(0, 8)}…{pool.id.slice(-6)} · {pool.totalTrustlines} LPs
+                      </div>
+                    </div>
+                    <span className="glass-pill tabular-nums">
+                      {formatCompactNumber(pool.totalShares)} shares
                     </span>
                   </div>
                 ))}
@@ -1282,43 +1413,6 @@ export function TokenExplorerSheet({
               <IconExternalLink size={14} />
             </a>
           )}
-
-          <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
-            <div style={{ fontWeight: 700, fontSize: 13 }}>
-              Recent SDEX / AMM Trades ({recentTrades.length})
-            </div>
-            {recentTrades.length === 0 ? (
-              <div style={{ fontSize: 12, color: "var(--aw-ink-muted)" }}>
-                No recent trades recorded on Horizon for this pair.
-              </div>
-            ) : (
-              <div style={{ display: "grid", gap: 6 }}>
-                {recentTrades.slice(0, 10).map((t) => (
-                  <div
-                    key={t.id}
-                    className="aw-seal-row tabular-nums"
-                    style={{ fontSize: 11 }}
-                  >
-                    <span
-                      style={{
-                        color: t.isBuy ? "var(--aw-trust-emerald)" : "#ffb396",
-                        fontWeight: 700,
-                      }}
-                    >
-                      {t.isBuy ? "BUY" : "SELL"} {formatCompactNumber(t.baseAmount)}{" "}
-                      {selectedToken.assetCode} @ {t.price} {quoteCode}
-                    </span>
-                    <span style={{ color: "var(--aw-ink-muted)" }}>
-                      {new Date(t.timestamp).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         </div>
       )}
 

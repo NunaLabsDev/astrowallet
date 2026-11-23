@@ -45,7 +45,6 @@ import {
   IconArrowDownLeft,
   IconArrowUpRight,
   IconBridge,
-  IconChart,
   IconCheck,
   IconChevronRight,
   IconClose,
@@ -108,6 +107,10 @@ import type { ChainInspectTarget } from "./components/ChainInspectorSheet.js";
 const CollectiblesSheet = lazy(() =>
   import("./components/CollectiblesSheet.js").then((m) => ({ default: m.CollectiblesSheet })),
 );
+const NftDetailSheet = lazy(() =>
+  import("./components/NftDetailSheet.js").then((m) => ({ default: m.NftDetailSheet })),
+);
+import type { ClassicNftDetailTarget } from "./components/NftDetailSheet.js";
 const DevLabSheet = lazy(() =>
   import("./components/DevLabSheet.js").then((m) => ({ default: m.DevLabSheet })),
 );
@@ -145,6 +148,7 @@ type ActiveDrawer =
   | "scan"
   | "tokens"
   | "inspect"
+  | "nftDetail"
   | "tools"
   | "ramp"
   | "tonConnect"
@@ -159,6 +163,7 @@ interface SendPrefill {
   assetIssuer?: string | undefined;
   destination?: string | undefined;
   memo?: string | undefined;
+  amount?: string | undefined;
 }
 
 const VALID_TABS: readonly AppDockTab[] = [
@@ -258,6 +263,11 @@ function drawerMetadata(
       return {
         title: "Stellar Chain Inspector",
         subtitle: `Live in-ecosystem account & transaction verification · ${network.toUpperCase()}`,
+      };
+    case "nftDetail":
+      return {
+        title: "Collectible Artwork",
+        subtitle: `Classic Stellar NFT provenance & collection · ${network.toUpperCase()}`,
       };
     case "tools":
       return {
@@ -443,6 +453,7 @@ function WalletShell({
     sessionToken,
     linkedAccounts,
     refreshLinkedAccounts,
+    refreshCloudBackup,
     hasEncryptedBackup,
     backupUpdatedAt,
     cloudBackupJson,
@@ -501,6 +512,7 @@ function WalletShell({
   const [swapToPrefill, setSwapToPrefill] = useState<string | undefined>(undefined);
   const [selectedTokenTarget, setSelectedTokenTarget] = useState<SelectedTokenTarget | null>(null);
   const [inspectTarget, setInspectTarget] = useState<ChainInspectTarget | null>(null);
+  const [nftDetailTarget, setNftDetailTarget] = useState<ClassicNftDetailTarget | null>(null);
 
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
@@ -619,6 +631,11 @@ function WalletShell({
   const openChainInspector = (target: ChainInspectTarget) => {
     setInspectTarget(target);
     setActiveDrawer("inspect");
+  };
+
+  const openNftDetail = (target: ClassicNftDetailTarget) => {
+    setNftDetailTarget(target);
+    setActiveDrawer("nftDetail");
   };
 
   const selectTab = useCallback((tab: AppDockTab) => {
@@ -1016,21 +1033,27 @@ function WalletShell({
     handleSyncWalletWithTelegram,
   ]);
 
-  // Bidirectional encrypted vault sync across devices (Telegram Web <-> Telegram Mobile)
+  // Bidirectional CRDT encrypted vault sync across devices (Telegram Web <-> Telegram Mobile)
   useEffect(() => {
     if (vaultStatus !== "unlocked" || !localVaultUpdatedAt) return;
-    if (
-      cloudBackupJson &&
-      backupUpdatedAt &&
-      backupUpdatedAt > localVaultUpdatedAt + 1 &&
-      lastCloudPullTsRef.current !== backupUpdatedAt
-    ) {
-      lastCloudPullTsRef.current = backupUpdatedAt;
+    if (cloudBackupJson) {
+      const reconcileKey = `${cloudBackupJson.length}:${backupUpdatedAt ?? 0}:${accounts.length}:${localVaultUpdatedAt}`;
+      if (lastCloudPullTsRef.current === reconcileKey as unknown as number) return;
+      (lastCloudPullTsRef as { current: unknown }).current = reconcileKey;
       void syncFromNewerCloudBackup(cloudBackupJson).then((res) => {
-        if (res === "pin_required") {
-          setCloudPullPinNeeded(true);
-        } else {
-          setCloudPullPinNeeded(false);
+        if (res.status === "pin_required") {
+          if (backupUpdatedAt && backupUpdatedAt > localVaultUpdatedAt + 1) {
+            setCloudPullPinNeeded(true);
+          }
+          return;
+        }
+        setCloudPullPinNeeded(false);
+        if (res.status === "push_merged" && res.envelopeJson && sessionToken) {
+          void uploadEncryptedBackup(res.envelopeJson)
+            .then(() => {
+              showToast(`Synced ${res.accountCount ?? accounts.length} accounts to Telegram Cloud`);
+            })
+            .catch(() => undefined);
         }
       });
       return;
@@ -1052,11 +1075,13 @@ function WalletShell({
     cloudBackupJson,
     backupUpdatedAt,
     localVaultUpdatedAt,
+    accounts.length,
     hasEncryptedBackup,
     sessionToken,
     syncFromNewerCloudBackup,
     exportAgVaultJson,
     uploadEncryptedBackup,
+    showToast,
   ]);
 
   const handleCloudPullConfirmSubmit = async (e: FormEvent) => {
@@ -1082,6 +1107,16 @@ function WalletShell({
     setCloudSyncBusy(true);
     setCloudSyncError(null);
     try {
+      const latestCloud = await refreshCloudBackup().catch(() => null);
+      if (latestCloud) {
+        const merged = await syncFromNewerCloudBackup(latestCloud);
+        if (merged.status === "push_merged" && merged.envelopeJson) {
+          await uploadEncryptedBackup(merged.envelopeJson);
+          triggerTelegramHaptic("success");
+          showToast(`Merged & synced ${merged.accountCount ?? accounts.length} accounts to Telegram`);
+          return;
+        }
+      }
       const json = await exportAgVaultJson();
       await uploadEncryptedBackup(json);
       triggerTelegramHaptic("success");
@@ -1689,14 +1724,6 @@ function WalletShell({
                                     <button
                                       type="button"
                                       className="aw-mini-chip"
-                                      onClick={() => openTokenExplorer(explorerTarget)}
-                                    >
-                                      <IconChart size={11} />
-                                      <span>Inspect</span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      className="aw-mini-chip"
                                       onClick={() =>
                                         openSendWith({
                                           assetCode: b.assetCode,
@@ -2000,8 +2027,8 @@ function WalletShell({
                     }
                   >
                     <CollectiblesSheet
-                      onInspectAsset={(target) => openTokenExplorer(target)}
-                      onSendAsset={(prefill) => openSendWith(prefill)}
+                      onBack={() => selectTab("wallet")}
+                      onSelectClassicNft={(nft) => openNftDetail(nft)}
                     />
                   </Suspense>
                 )}
@@ -2366,14 +2393,23 @@ function WalletShell({
                                         <button
                                           type="button"
                                           className="aw-mini-chip"
-                                          onClick={() =>
-                                            openTokenExplorer({
-                                              assetCode: b.assetCode,
-                                              assetIssuer: b.assetIssuer,
-                                            })
-                                          }
+                                          onClick={() => {
+                                            if (b.assetIssuer && b.balance.trim() === "0.0000001") {
+                                              openNftDetail({
+                                                assetCode: b.assetCode,
+                                                assetIssuer: b.assetIssuer,
+                                              });
+                                            } else {
+                                              openTokenExplorer({
+                                                assetCode: b.assetCode,
+                                                assetIssuer: b.assetIssuer,
+                                              });
+                                            }
+                                          }}
                                         >
-                                          Inspect Token ↗
+                                          {b.assetIssuer && b.balance.trim() === "0.0000001"
+                                            ? "View Art ↗"
+                                            : "Inspect Token ↗"}
                                         </button>
                                       </div>
                                       {b.assetIssuer && (
@@ -3273,6 +3309,7 @@ function WalletShell({
               initialAssetIssuer={sendPrefill.assetIssuer}
               initialDestination={sendPrefill.destination}
               initialMemo={sendPrefill.memo}
+              initialAmount={sendPrefill.amount}
               onClose={() => setActiveDrawer(null)}
             />
           )}
@@ -3298,6 +3335,19 @@ function WalletShell({
                     : { fromAsset: "XLM", toAsset: assetId },
                 )
               }
+              onInspectAddress={(addr) =>
+                openChainInspector({ kind: "account", address: addr })
+              }
+            />
+          )}
+          {activeDrawer === "nftDetail" && nftDetailTarget && (
+            <NftDetailSheet
+              target={nftDetailTarget}
+              onSelectNft={(next) => setNftDetailTarget(next)}
+              onInspectAddress={(addr) =>
+                openChainInspector({ kind: "account", address: addr })
+              }
+              onSendNft={(prefill) => openSendWith(prefill)}
             />
           )}
           {activeDrawer === "inspect" && inspectTarget && (

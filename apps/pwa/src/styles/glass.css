@@ -653,6 +653,107 @@ select:focus-visible {
   text-overflow: ellipsis;
 }
 
+.aw-nft-card--interactive {
+  width: 100%;
+  font-family: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease;
+}
+
+.aw-nft-card--interactive:hover {
+  transform: translateY(-2px);
+  border-color: var(--aw-nebula-lavender);
+  background: rgba(14, 26, 68, 0.85);
+}
+
+.aw-nft-detail-hero {
+  border-radius: 20px;
+  overflow: hidden;
+  background: rgba(6, 14, 36, 0.88);
+  border: 1px solid rgba(165, 139, 224, 0.28);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.aw-nft-detail-img-btn {
+  display: block;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.aw-nft-detail-img-btn img {
+  display: block;
+  width: 100%;
+  max-height: 340px;
+  object-fit: contain;
+}
+
+.aw-nft-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  background: rgba(4, 8, 22, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  cursor: zoom-out;
+}
+
+.aw-nft-lightbox img {
+  max-width: 100%;
+  max-height: 90vh;
+  border-radius: 16px;
+  object-fit: contain;
+}
+
+.aw-collection-thumb {
+  flex: 0 0 auto;
+  width: 88px;
+  display: grid;
+  gap: 5px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid rgba(165, 139, 224, 0.24);
+  background: rgba(8, 17, 46, 0.65);
+  color: var(--aw-ink-primary);
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.aw-collection-thumb-img {
+  width: 74px;
+  height: 74px;
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(6, 14, 36, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.aw-collection-thumb-img img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.aw-collection-thumb-label {
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: center;
+}
+
 .aw-sorobit-grid {
   display: grid;
   gap: 14px;

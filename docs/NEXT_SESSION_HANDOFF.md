@@ -1,6 +1,6 @@
 # AstroWallet — Next Session Handoff Guide
 
-> **Current Status:** Migrated to a **Telegram-Exclusive Multichain Mini App (`Stellar + TON`, Telegram ToS Clause 7.3 compliant)** with **D1 security hardening (`0001`–`0004`)**, **Zero-Knowledge `AGVAULT` cloud backup sync**, **ClaimEscrowContract V2.2 (`__constructor` + `11` Rust unit tests)**, **client-side `/v1/relay/submit` fee-bump integration (`walletAuth` + `intentAuth`)**, **Stellar Token Explorer with live SEP-1 `stellar.toml` logos/metadata + native XLM ledger protocol telemetry + Auto-Quoting Swap with 3-tier anti-scam shield**, **ASTRO Ecosystem `AstroID` SSO & Universal Signer Federation (`/v1/identity/resolve`, `/v1/intents/external`, `IntentSheet` `sign_xdr` + Boomerang return)**, **IntentSheet pre-flight activation/trustline/balance guards + fee previews**, **4-hour auto-lock + Telegram mobile anti-jitter layout containment**, **unified `https://astrowallet-soroban.pages.dev` origin with `[env.mainnet]` multi-RPC failover**, and **141 Vitest tests across 25 files** (`97` source files clean on `pnpm secret-scan`, `cargo clippy -D warnings` clean, `pnpm --filter @astrowallet/pwa build` passing). **Mainnet remains blocked** until the remaining Pre-Mainnet blockers in [`AUDIT_2026-11.md`](./AUDIT_2026-11.md) are resolved.
+> **Current Status:** Commit `8277f14` deployed live on Cloudflare Testnet (`astrowallet-server` version `fb8c828c-3aa7-4170-a182-059778b857b5`, Pages `https://0095ebe6.astrowallet-soroban.pages.dev`). Closed ecosystem audit gaps with server-to-server Boomerang callback to `ASTRODEX`, expanded `RELAY_ALLOWED_CONTRACTS` (Launchpad + Soroswap), O(1) indexed D1 `getUserByLinkedAddress`, `SOURCE_ACCOUNT_MISMATCH` + Mainnet fail-closed simulation in `@astrowallet/security-shield`, and `relaySubmitter` wired into `createSorobanDevClient`. **151 Vitest tests across 28 files** (`109` source files clean on `pnpm secret-scan`), **11/11 Rust tests** in `claim-escrow`, clean builds/typechecks/lints. **Mainnet remains blocked** until Gate 1 blockers in [`AUDIT_2026-11.md`](./AUDIT_2026-11.md) are resolved.
 
 ---
 
@@ -8,10 +8,10 @@
 
 | Component | Live Value |
 | :--- | :--- |
-| **GitHub Repository** | `https://github.com/NunaLabsDev/astrowallet` (`main` branch) |
-| **Telegram Mini App Entry (`/app` + `/intent/*`)** | [`t.me/AstroWalletAppBot/wallet`](https://t.me/AstroWalletAppBot/wallet) (`https://astrowallet-soroban.pages.dev/app`, zero public landing showcase under ToS §7.3) |
+| **GitHub Repository** | `https://github.com/NunaLabsDev/astrowallet` (`main` branch, commit `8277f14`) |
+| **Telegram Mini App Entry (`/app` + `/intent/*`)** | [`t.me/AstroWalletAppBot/wallet`](https://t.me/AstroWalletAppBot/wallet) (`https://astrowallet-soroban.pages.dev/app`, latest preview `https://0095ebe6.astrowallet-soroban.pages.dev`, zero public landing showcase under ToS §7.3) |
 | **Telegram Super-Bot** | `@AstroWalletAppBot` (`https://astrowallet-soroban.pages.dev/tg/webhook`) |
-| **Worker Service Name (`workers_dev = false`)** | `astrowallet-server` (bound via `ASTROWALLET_SERVER` to Pages Functions) |
+| **Worker Service Name (`workers_dev = false`)** | `astrowallet-server` (Version `fb8c828c-3aa7-4170-a182-059778b857b5`; bound via `ASTROWALLET_SERVER` to Pages Functions) |
 | **Health Check** | `https://astrowallet-soroban.pages.dev/health` (`HTTP 200`, `{"status":"ok","network":"testnet"}`) |
 | **Explorer Base URL (`VITE_EXPLORER_BASE_URL`)** | `https://stellar.expert/explorer/testnet` |
 | **Cloudflare D1 Database** | `astrowallet` (`12b7f77d-5467-44a6-a4b3-11ccd63a315c`; migrations `0001_init.sql`..`0005_astro_connect.sql` — verify remote `0005` via `wrangler d1 migrations list astrowallet --remote`) |
@@ -20,7 +20,7 @@
 | **Claim-Link Escrow V2 WASM Hash (Testnet Live)** | `33ecebddb590eedcf1059a969122c4edf3a9fe092912356d19bd827ce17f61fb` *(NEVER assign to `VITE_SMART_ACCOUNT_WASM_HASH`)* |
 | **Sorobits SEP-50 Contract (Testnet)** | `CBVETCPLVAMNUUQRUJGH54XHVQT5ZOVB4FGGP2IGOGAZLUIYBBV7G3I3` |
 | **SEP-42 Asset List URL (Testnet Live)** | `https://api.stellar.expert/explorer/testnet/asset-list/top50` |
-| **Relay Allowlist (`RELAY_ALLOWED_CONTRACTS`)** | Claim Escrow (`CDEOJ4...H36BQ`), Testnet XLM SAC (`CDLZFC...GCYSC`), Testnet USDC SAC (`CBIELT...QDAMA`), Sorobits SEP-50 (`CBVETC...7G3I3`) |
+| **Relay Allowlist (`RELAY_ALLOWED_CONTRACTS`)** | Claim Escrow (`CDEOJ4...H36BQ`), Testnet XLM SAC (`CDLZFC...GCYSC`), Testnet USDC SAC (`CBIELT...QDAMA`), Sorobits SEP-50 (`CBVETC...7G3I3`), AstroGate Launchpad (`CB5VMD...FAPK`), Soroswap Router (`CCJUD5...7BRD`), Soroswap Factory (`CDP3HM...JTBY`) |
 | **Smart Account WASM (`VITE_SMART_ACCOUNT_WASM_HASH`)** | Intentionally unset until an audited OpenZeppelin Smart Account contract matching our SDK constructor is integrated & uploaded |
 | **Local Secrets Directory (git-ignored)** | `~/.secrets/astrowallet/` (`telegram-bot.env`, `contracts.env` — mode `600`) |
 
@@ -40,18 +40,22 @@
 - **ASTRO Ecosystem `AstroID` SSO & Universal Signer Federation (`identity.ts`, `intents.ts`, `IntentSheet.tsx`, `TokenExplorerSheet.tsx`):** Added public read-only `GET /v1/identity/resolve` (never exposing `encryptedVaultBackup`), `POST /v1/intents/external` (`X-Ecosystem-Secret` + `xdrSha256` verification + 4-field HMAC signature), `sign_xdr` Clear-Sign review + Soroban confirmation fallback, Boomerang **"Return to AstroDex" / "Return to AstroGate"** CTAs, and `"Pro Chart & Scan on AstroDex"` deep link inside `TokenExplorerSheet`.
 - **AstroConnect v1 Open Standard (`packages/connect-sdk`, `routes/connect.ts`, `routes/discovery.ts`, `ConnectRequestSheet.tsx`, `0005_astro_connect.sql`):** Permissionless Telegram-native wallet bridge (`auth` SEP-53 Sign-In, `sign_message`, `sign_xdr` in `submit` or `sign_only` mode) with scoped CORS, `X-Connect-Token` polling, `official`/`verified`/`external` trust tiers, safe Telegram Boomerang return, `/openapi.json` & `/llms.txt`, `@astrowallet/connect` SDK + `StellarWalletsKit` adapter, and developer docs ([`ASTRO_CONNECT_SPEC.md`](./ASTRO_CONNECT_SPEC.md) & [`DEVELOPER_QUICKSTART.md`](./DEVELOPER_QUICKSTART.md)).
 
+- **Audit Remediation & Ecosystem Integration (`8277f14`):** Added server-to-server Boomerang confirmation callback (`ASTRODEX` Service Binding / `ASTRODEX_API_BASE_URL` with `X-Ecosystem-Secret`), indexed D1 O(1) lookup (`getUserByLinkedAddress`), `SOURCE_ACCOUNT_MISMATCH` + Mainnet fail-closed simulation + `assembledXdr` in `@astrowallet/security-shield`, auto-selected derived `sourceAddress` in `IntentSheet`, and `relaySubmitter` wired into `createSorobanDevClient.submitRawSignedXdr`.
+
 ---
 
 ## 3. Remaining Steps for Next Session / Pre-Mainnet
 
-1. **Provision `[env.mainnet]` D1/KV/Secrets & TON Failover (P0-8):**
-   - `PWA_ORIGIN`, `ALLOWED_ORIGINS`, `TG_BOT_USERNAME`, `TG_MINI_APP_SHORT_NAME`, and Mainnet multi-endpoint `STELLAR_RPC_URLS`/`HORIZON_URLS` failover are anchored to `https://astrowallet-soroban.pages.dev` in `apps/server/wrangler.toml`. Remaining infra steps: replace `REPLACE_WITH_MAINNET_*` D1/KV IDs, add secondary failover URL to `VITE_TON_RPC_URLS`, and verify D1 migration `0004` remotely on Testnet.
-2. **OpenZeppelin Smart Account Integration (`VITE_SMART_ACCOUNT_WASM_HASH`) & New-User Bootstrapping:**
-   - Pin an audited OpenZeppelin `stellar-contracts` WASM hash in `VITE_SMART_ACCOUNT_WASM_HASH`, wire WebAuthn `secp256r1` contract signing, and add sponsored bootstrapping (CAP-33 / `C...`) so unfunded recipients can claim Claim Links without pre-funded XLM.
+> **Design Constraint (`@astrowallet/connect-sdk`):** Keep `AstroWallet` and `@astrowallet/connect-sdk` **100% general-purpose and protocol-agnostic** so external and internal Telegram dApps (Stellar & TON) integrate via standard `AstroID` + `AstroConnect v1` + `Scan & Shield` without embedding Launchpad, DEX, or NFT marketplace domain logic inside the wallet.
+
+1. **Consolidate Universal `@astrowallet/connect-sdk` (Next Session Step 1):**
+   - Package universal `AstroID` auto-resolution, `AstroConnect v1` / Boomerang signer helpers, and generic `Scan & Shield` verification for both external Telegram dApps and ASTRO pillars (`ASTROdex`, `AstroGate`, future Pillar 4 Sorobits Market).
+2. **Provision `[env.mainnet]` D1/KV/Secrets & Channel Accounts Pool (Gate 1 P0-8):**
+   - Replace `REPLACE_WITH_MAINNET_*` D1/KV IDs, add secondary failover URL to `VITE_TON_RPC_URLS`, verify D1 migrations remotely on Testnet, and add sponsored `G...` bootstrapping + Channel Accounts queue on `/v1/relay/submit` to prevent `tx_bad_seq`.
 3. **External Audit & Production Hardening:**
-   - Enroll `contracts/claim-escrow/src/lib.rs` (V2.1) in the Soroban Security Audit Bank and verify Testnet redeploy parity; tighten `_headers` `connect-src` from `https:` to explicit allowlisted origins; add optional high-value tx re-auth prompt.
-4. **Physical Device QA & 2026 Parity Features:**
-   - Run live end-to-end Telegram iOS/Android device QA (`/connect`, `/pay`, Claim Link fund/claim/cancel, `/split`, `/swap`, TON Connect v2); expand SEP-41 non-SAC balances, fiat pricing, and i18n (`es`/`en`).
+   - Enroll `contracts/claim-escrow/src/lib.rs` (V2.2) before Mainnet; tighten `_headers` `connect-src` from `https:` to explicit allowlisted origins; add high-value tx PIN/biometric re-auth prompt.
+4. **OpenZeppelin Smart Account Integration (`VITE_SMART_ACCOUNT_WASM_HASH`) & Physical QA:**
+   - Pin an audited OpenZeppelin `stellar-contracts` WASM hash in `VITE_SMART_ACCOUNT_WASM_HASH` and run live iOS/Android Telegram QA.
 
 ---
 

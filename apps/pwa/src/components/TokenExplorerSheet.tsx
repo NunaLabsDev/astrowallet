@@ -2,11 +2,6 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import type { ClassicAddress } from "@astrowallet/domain";
 import type { VerifiedAssetEntry } from "@astrowallet/security-shield";
 import {
-  discoverLiquidHorizonAssets,
-  fetchTokenOnChainDetails,
-  fetchTokenOrderbookAgainstXlm,
-  fetchTokenPriceHistoryAgainstXlm,
-  fetchTokenRecentTrades,
   searchHorizonAssets,
   type StellarTokenDetails,
   type TokenCatalogItem,
@@ -16,6 +11,13 @@ import {
   type TokenPriceTimeframe,
   type TokenRecentTradeRecord,
 } from "@astrowallet/stellar-core";
+import {
+  fetchCachedLiquidAssets,
+  fetchCachedMarketHistory,
+  fetchCachedTokenBundle,
+  readCachedEntry,
+  type TokenBundleResult,
+} from "../state/market-cache.js";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
 import {
@@ -232,13 +234,18 @@ export function TokenExplorerSheet({
     setInspectorTab("overview");
   }, [initialToken]);
 
-  // Pre-load live liquid tokens on Horizon so Testnet/Mainnet functional tokens are visible immediately
+  // Pre-load live liquid tokens via 3-tier SWR cache (DeviceStorage + Edge Cache + Horizon)
   useEffect(() => {
     let cancelled = false;
-    void discoverLiquidHorizonAssets({
+    const cacheKey = `liquid:${config.network}:15`;
+    void readCachedEntry<TokenCatalogItem[]>(cacheKey, 24 * 60 * 60 * 1000).then((hit) => {
+      if (!cancelled && hit) setLiquidDiscovery(hit.data);
+    });
+    void fetchCachedLiquidAssets({
+      apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
       horizonUrls: config.horizonUrls,
       limit: 15,
-      apiBaseUrl: config.apiBaseUrl,
     })
       .then((items) => {
         if (!cancelled) setLiquidDiscovery(items);
@@ -247,7 +254,7 @@ export function TokenExplorerSheet({
     return () => {
       cancelled = true;
     };
-  }, [config.horizonUrls, config.apiBaseUrl]);
+  }, [config.horizonUrls, config.apiBaseUrl, config.network]);
 
   const verifiedMap = useMemo(() => {
     const map = new Map<string, VerifiedAssetEntry>();
@@ -289,44 +296,44 @@ export function TokenExplorerSheet({
     }
 
     let cancelled = false;
-    setLoadingDetails(true);
     setDetailError(null);
 
     const isNativeXlm =
       selectedToken.assetCode.trim().toUpperCase() === "XLM" && !selectedToken.assetIssuer;
     const counterAsset = isNativeXlm ? verifiedUsdcCounter : undefined;
+    const cacheKey = `token:${config.network}:${selectedToken.assetCode}:${selectedToken.assetIssuer ?? "native"}:${counterAsset?.code ?? "XLM"}`;
 
-    void Promise.all([
-      fetchTokenOnChainDetails({
-        horizonUrls: config.horizonUrls,
-        networkPassphrase: config.networkPassphrase,
-        assetCode: selectedToken.assetCode,
-        assetIssuer: selectedToken.assetIssuer as ClassicAddress | undefined,
-        apiBaseUrl: config.apiBaseUrl,
-      }),
-      fetchTokenOrderbookAgainstXlm({
-        horizonUrls: config.horizonUrls,
-        assetCode: selectedToken.assetCode,
-        assetIssuer: selectedToken.assetIssuer as ClassicAddress | undefined,
-        counterAsset,
-        limit: 5,
-      }).catch(() => null),
-      fetchTokenRecentTrades({
-        horizonUrls: config.horizonUrls,
-        assetCode: selectedToken.assetCode,
-        assetIssuer: selectedToken.assetIssuer as ClassicAddress | undefined,
-        counterAsset,
-        limit: 15,
-      }).catch(() => []),
-    ])
-      .then(([det, ob, trades]) => {
+    let hasWarmCache = false;
+    void readCachedEntry<TokenBundleResult>(cacheKey, 24 * 60 * 60 * 1000).then((hit) => {
+      if (cancelled) return;
+      if (hit) {
+        hasWarmCache = true;
+        setDetails(hit.data.details);
+        setOrderbook(hit.data.orderbook);
+        setRecentTrades(hit.data.recentTrades);
+        setLoadingDetails(false);
+      } else {
+        setLoadingDetails(true);
+      }
+    });
+
+    void fetchCachedTokenBundle({
+      apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
+      horizonUrls: config.horizonUrls,
+      networkPassphrase: config.networkPassphrase,
+      assetCode: selectedToken.assetCode,
+      assetIssuer: selectedToken.assetIssuer as ClassicAddress | undefined,
+      counterAsset,
+    })
+      .then((bundle) => {
         if (cancelled) return;
-        setDetails(det);
-        setOrderbook(ob);
-        setRecentTrades(trades);
+        setDetails(bundle.details);
+        setOrderbook(bundle.orderbook);
+        setRecentTrades(bundle.recentTrades);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (cancelled || hasWarmCache) return;
         setDetailError(err instanceof Error ? err.message : "Failed to load on-chain token details");
       })
       .finally(() => {
@@ -336,7 +343,14 @@ export function TokenExplorerSheet({
     return () => {
       cancelled = true;
     };
-  }, [selectedToken, config.horizonUrls, config.networkPassphrase, config.apiBaseUrl, verifiedUsdcCounter]);
+  }, [
+    selectedToken,
+    config.horizonUrls,
+    config.networkPassphrase,
+    config.apiBaseUrl,
+    config.network,
+    verifiedUsdcCounter,
+  ]);
 
   useEffect(() => {
     if (!selectedToken) {
@@ -345,12 +359,26 @@ export function TokenExplorerSheet({
     }
 
     let cancelled = false;
-    setLoadingChart(true);
     const isNativeXlm =
       selectedToken.assetCode.trim().toUpperCase() === "XLM" && !selectedToken.assetIssuer;
     const counterAsset = isNativeXlm ? verifiedUsdcCounter : undefined;
+    const cacheKey = `hist:${config.network}:${selectedToken.assetCode}:${selectedToken.assetIssuer ?? "native"}:${timeframe}:${counterAsset?.code ?? "XLM"}`;
 
-    void fetchTokenPriceHistoryAgainstXlm({
+    let hasWarmCache = false;
+    void readCachedEntry<TokenPriceHistoryResult>(cacheKey, 24 * 60 * 60 * 1000).then((hit) => {
+      if (cancelled) return;
+      if (hit) {
+        hasWarmCache = true;
+        setPriceHistory(hit.data);
+        setLoadingChart(false);
+      } else {
+        setLoadingChart(true);
+      }
+    });
+
+    void fetchCachedMarketHistory({
+      apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
       horizonUrls: config.horizonUrls,
       assetCode: selectedToken.assetCode,
       assetIssuer: selectedToken.assetIssuer as ClassicAddress | undefined,
@@ -361,7 +389,7 @@ export function TokenExplorerSheet({
         if (!cancelled) setPriceHistory(hist);
       })
       .catch(() => {
-        if (!cancelled) setPriceHistory(null);
+        if (!cancelled && !hasWarmCache) setPriceHistory(null);
       })
       .finally(() => {
         if (!cancelled) setLoadingChart(false);
@@ -370,7 +398,14 @@ export function TokenExplorerSheet({
     return () => {
       cancelled = true;
     };
-  }, [selectedToken, timeframe, config.horizonUrls, verifiedUsdcCounter]);
+  }, [
+    selectedToken,
+    timeframe,
+    config.horizonUrls,
+    config.apiBaseUrl,
+    config.network,
+    verifiedUsdcCounter,
+  ]);
 
   const handleHorizonSearch = async (e?: FormEvent) => {
     if (e) e.preventDefault();

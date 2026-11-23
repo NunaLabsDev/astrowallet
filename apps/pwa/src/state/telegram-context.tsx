@@ -103,8 +103,10 @@ export function TelegramProvider({
   const sessionTokenRef = useRef<string | null>(null);
   const sessionExpiresAtRef = useRef<number | null>(null);
   const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
+  const networkRef = useRef(config.network);
   sessionTokenRef.current = sessionToken;
   sessionExpiresAtRef.current = sessionExpiresAt;
+  networkRef.current = config.network;
 
   const refreshSessionToken = useCallback(
     async (tokenOverride?: string | null): Promise<string | null> => {
@@ -118,7 +120,10 @@ export function TelegramProvider({
           const base = config.apiBaseUrl.replace(/\/+$/, "");
           const res = await fetch(`${base}/v1/tg/refresh`, {
             method: "POST",
-            headers: { Authorization: `Bearer ${current}` },
+            headers: {
+              Authorization: `Bearer ${current}`,
+              "X-Astro-Network": networkRef.current,
+            },
           });
           if (!res.ok) return current;
           const data = (await res.json()) as {
@@ -169,7 +174,11 @@ export function TelegramProvider({
   }, [sessionToken, sessionExpiresAt, refreshSessionToken]);
 
   const loadCloudBackupWithToken = useCallback(
-    async (token: string | null, serverHintHasBackup: boolean): Promise<string | null> => {
+    async (
+      token: string | null,
+      serverHintHasBackup: boolean,
+      targetNetwork: string = networkRef.current,
+    ): Promise<string | null> => {
       setCheckingCloudBackup(true);
       setCloudBackupError(null);
       try {
@@ -182,7 +191,10 @@ export function TelegramProvider({
         const fetchServer: Promise<ServerFetchResult> =
           token && serverHintHasBackup
             ? fetch(`${base}/v1/tg/vault-backup`, {
-                headers: { Authorization: `Bearer ${token}` },
+                headers: {
+                  Authorization: `Bearer ${token}`,
+                  "X-Astro-Network": targetNetwork,
+                },
               })
                 .then(async (res): Promise<ServerFetchResult> => {
                   if (!res.ok) {
@@ -213,7 +225,7 @@ export function TelegramProvider({
                 }))
             : Promise.resolve({ kind: "empty" });
 
-        const fetchTgCloud = tgCloudStorageGet(cloudStorageKey(config.network)).then((raw) => {
+        const fetchTgCloud = tgCloudStorageGet(cloudStorageKey(targetNetwork)).then((raw) => {
           const valid = parseEnvelopeCandidate(raw);
           return valid ? { envelope: valid, updatedAt: valid.updatedAt } : null;
         });
@@ -250,7 +262,7 @@ export function TelegramProvider({
         setCheckingCloudBackup(false);
       }
     },
-    [config.apiBaseUrl, config.network],
+    [config.apiBaseUrl],
   );
 
   const authenticate = useCallback(async () => {
@@ -286,7 +298,10 @@ export function TelegramProvider({
       const base = config.apiBaseUrl.replace(/\/+$/, "");
       const res = await fetch(`${base}/v1/tg/auth`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Astro-Network": networkRef.current,
+        },
         body: JSON.stringify({ initData: wa.initData }),
       });
       const body = (await res.json()) as {
@@ -343,7 +358,10 @@ export function TelegramProvider({
     try {
       const base = config.apiBaseUrl.replace(/\/+$/, "");
       const res = await fetch(`${base}/v1/tg/me`, {
-        headers: { Authorization: `Bearer ${activeToken}` },
+        headers: {
+          Authorization: `Bearer ${activeToken}`,
+          "X-Astro-Network": networkRef.current,
+        },
       });
       if (!res.ok) return;
       const body = (await res.json()) as {
@@ -364,6 +382,11 @@ export function TelegramProvider({
       // Ignore transient network errors on background profile refresh
     }
   }, [config.apiBaseUrl, ensureFreshSessionToken]);
+
+  useEffect(() => {
+    if (!sessionToken || authStatus !== "verified") return;
+    void refreshLinkedAccounts();
+  }, [config.network, sessionToken, authStatus, refreshLinkedAccounts]);
 
   const refreshCloudBackup = useCallback(async (): Promise<string | null> => {
     const activeToken = await ensureFreshSessionToken();

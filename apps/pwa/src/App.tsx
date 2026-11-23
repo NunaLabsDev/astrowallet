@@ -3156,7 +3156,7 @@ function MiniAppGate({
 }
 
 export function App() {
-  const env = loadPwaEnv();
+  const env = useMemo(() => loadPwaEnv(), []);
   const [selectedNetwork, setSelectedNetwork] = useState<StellarNetwork | null>(() => {
     if (typeof window === "undefined") return null;
     try {
@@ -3166,6 +3166,13 @@ export function App() {
       return null;
     }
   });
+
+  const effectiveConfig = useMemo(() => {
+    if (!env.ok) return null;
+    return selectedNetwork
+      ? applyPwaNetworkProfile(env.config, selectedNetwork)
+      : env.config;
+  }, [env, selectedNetwork]);
 
   if (!env.ok) {
     return (
@@ -3199,11 +3206,7 @@ export function App() {
     );
   }
 
-  const effectiveConfig = selectedNetwork
-    ? applyPwaNetworkProfile(env.config, selectedNetwork)
-    : env.config;
-
-  const handleSwitchNetwork = (next: StellarNetwork) => {
+  const handleSwitchNetwork = useCallback((next: StellarNetwork) => {
     setSelectedNetwork(next);
     if (typeof window !== "undefined") {
       try {
@@ -3212,12 +3215,14 @@ export function App() {
         // Ignore storage quota errors
       }
     }
-  };
+  }, []);
+
+  const activeConfig = effectiveConfig ?? env.config;
 
   return (
-    <TelegramProvider config={effectiveConfig}>
+    <TelegramProvider config={activeConfig}>
       <MiniAppGate
-        config={effectiveConfig}
+        config={activeConfig}
         onSwitchNetwork={handleSwitchNetwork}
         canSwitchNetwork={Boolean(env.config.altNetworkProfile)}
       />

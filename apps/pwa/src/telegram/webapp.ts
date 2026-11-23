@@ -103,6 +103,7 @@ export interface TelegramWebAppInstance {
   HapticFeedback?: TelegramHapticFeedback;
   BiometricManager?: TelegramBiometricManager;
   SecureStorage?: TelegramDeviceSecureStorage;
+  DeviceStorage?: TelegramDeviceSecureStorage;
   CloudStorage?: TelegramCloudStorage;
 }
 
@@ -339,6 +340,8 @@ export function updateTelegramBiometricToken(token: string): Promise<boolean> {
   });
 }
 
+const DEVICE_STORAGE_TIMEOUT_MS = 1500;
+
 /**
  * Bot API 9.0 device-local SecureStorage helpers (iOS Keychain / Android Keystore only; never CloudStorage).
  */
@@ -346,8 +349,18 @@ export function tgSecureStorageGet(key: string): Promise<string | null> {
   const store = getTelegramWebApp()?.SecureStorage;
   if (!store) return Promise.resolve(null);
   return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(null);
+      }
+    }, DEVICE_STORAGE_TIMEOUT_MS);
     try {
       store.getItem(key, (err, value) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
         if (err || typeof value !== "string") {
           resolve(null);
         } else {
@@ -355,7 +368,11 @@ export function tgSecureStorageGet(key: string): Promise<string | null> {
         }
       });
     } catch {
-      resolve(null);
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(null);
+      }
     }
   });
 }
@@ -364,10 +381,26 @@ export function tgSecureStorageSet(key: string, value: string): Promise<boolean>
   const store = getTelegramWebApp()?.SecureStorage;
   if (!store) return Promise.resolve(false);
   return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    }, DEVICE_STORAGE_TIMEOUT_MS);
     try {
-      store.setItem(key, value, (err, stored) => resolve(!err && Boolean(stored ?? true)));
+      store.setItem(key, value, (err, stored) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(!err && Boolean(stored ?? true));
+      });
     } catch {
-      resolve(false);
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(false);
+      }
     }
   });
 }
@@ -376,10 +409,148 @@ export function tgSecureStorageRemove(key: string): Promise<boolean> {
   const store = getTelegramWebApp()?.SecureStorage;
   if (!store) return Promise.resolve(false);
   return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    }, DEVICE_STORAGE_TIMEOUT_MS);
     try {
-      store.removeItem(key, (err, removed) => resolve(!err && Boolean(removed ?? true)));
+      store.removeItem(key, (err, removed) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(!err && Boolean(removed ?? true));
+      });
     } catch {
-      resolve(false);
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(false);
+      }
+    }
+  });
+}
+
+/**
+ * Bot API 9.0 non-sensitive DeviceStorage helpers (~5MB per bot) with localStorage fallback
+ * for fast client-side market & metadata SWR caching.
+ */
+export function tgDeviceStorageGet(key: string): Promise<string | null> {
+  const store = getTelegramWebApp()?.DeviceStorage;
+  if (!store) {
+    try {
+      return Promise.resolve(
+        typeof window !== "undefined" ? window.localStorage.getItem(key) : null,
+      );
+    } catch {
+      return Promise.resolve(null);
+    }
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        try {
+          resolve(typeof window !== "undefined" ? window.localStorage.getItem(key) : null);
+        } catch {
+          resolve(null);
+        }
+      }
+    }, DEVICE_STORAGE_TIMEOUT_MS);
+    try {
+      store.getItem(key, (err, value) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        if (!err && typeof value === "string") {
+          resolve(value);
+          return;
+        }
+        try {
+          resolve(typeof window !== "undefined" ? window.localStorage.getItem(key) : null);
+        } catch {
+          resolve(null);
+        }
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(null);
+      }
+    }
+  });
+}
+
+export function tgDeviceStorageSet(key: string, value: string): Promise<boolean> {
+  try {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(key, value);
+    }
+  } catch {
+    // Ignore localStorage quota errors
+  }
+  const store = getTelegramWebApp()?.DeviceStorage;
+  if (!store) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    }, DEVICE_STORAGE_TIMEOUT_MS);
+    try {
+      store.setItem(key, value, (err, stored) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(!err && Boolean(stored ?? true));
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(false);
+      }
+    }
+  });
+}
+
+export function tgDeviceStorageRemove(key: string): Promise<boolean> {
+  try {
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(key);
+    }
+  } catch {
+    // Ignore storage errors
+  }
+  const store = getTelegramWebApp()?.DeviceStorage;
+  if (!store) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = globalThis.setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        resolve(false);
+      }
+    }, DEVICE_STORAGE_TIMEOUT_MS);
+    try {
+      store.removeItem(key, (err, removed) => {
+        if (settled) return;
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(!err && Boolean(removed ?? true));
+      });
+    } catch {
+      if (!settled) {
+        settled = true;
+        globalThis.clearTimeout(timer);
+        resolve(false);
+      }
     }
   });
 }

@@ -166,7 +166,10 @@ export function ConnectRequestSheet({
         const base = config.apiBaseUrl.replace(/\/+$/, "");
         const res = await fetch(`${base}/v1/proxy/scan`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-Astro-Network": config.network,
+          },
           body: JSON.stringify({ target: targetXdr }),
         });
         if (!res.ok) return;

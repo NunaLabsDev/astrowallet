@@ -191,7 +191,10 @@ export function SendSheet({
         const base = config.apiBaseUrl.replace(/\/+$/, "");
         const res = await fetch(`${base}/v1/proxy/scan`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "X-Astro-Network": config.network,
+          },
           body: JSON.stringify({ target: parsed.data }),
         });
         if (!res.ok) return;
@@ -210,7 +213,7 @@ export function SendSheet({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [destination, config.apiBaseUrl]);
+  }, [destination, config.apiBaseUrl, config.network]);
 
   // Clean up QR video stream
   useEffect(() => {
@@ -329,6 +332,7 @@ export function SendSheet({
       const base = config.apiBaseUrl.replace(/\/+$/, "");
       const res = await fetch(
         `${base}/v1/proxy/federation?q=${encodeURIComponent(clean)}`,
+        { headers: { "X-Astro-Network": config.network } },
       );
       const rec = (await res.json()) as {
         accountId?: string;
@@ -362,6 +366,11 @@ export function SendSheet({
   const handleSubmit = (e: FormEvent) => {
     e.preventDefault();
     setError(null);
+
+    if (config.network === "mainnet" && scanningDest) {
+      setError("Waiting for destination security & SEP-29 memo check...");
+      return;
+    }
 
     if (destShieldReport?.verdict === "malicious") {
       setError(

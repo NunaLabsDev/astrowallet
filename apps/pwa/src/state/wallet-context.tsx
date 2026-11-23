@@ -94,6 +94,10 @@ import {
   saveTonConnectSession,
   type StoredTonConnectSession,
 } from "./ton-connect-store.js";
+import { readCachedEntry, writeCachedEntry } from "./market-cache.js";
+
+const SESSION_LEASE_TTL_MS = 4 * 60 * 60 * 1000;
+const TG_SESSION_LEASE_KEY = "aw_session_lease_v1";
 
 export type VaultStatus = "loading" | "uninitialized" | "locked" | "unlocked";
 
@@ -374,6 +378,92 @@ export function WalletProvider({
 }) {
   const cleanScopeId = storageScopeId?.trim() || undefined;
   const securePinKey = cleanScopeId ? `${TG_SECURE_PIN_KEY}:${cleanScopeId}` : TG_SECURE_PIN_KEY;
+  const sessionLeaseKey = cleanScopeId
+    ? `${TG_SESSION_LEASE_KEY}:${cleanScopeId}`
+    : TG_SESSION_LEASE_KEY;
+
+  const saveSessionLease = useCallback(
+    async (pinOrPassphrase: string) => {
+      const payload = JSON.stringify({
+        pin: pinOrPassphrase,
+        expiresAt: Date.now() + SESSION_LEASE_TTL_MS,
+      });
+      try {
+        if (typeof window !== "undefined") {
+          window.sessionStorage.setItem(sessionLeaseKey, payload);
+        }
+      } catch {
+        // Ignore sessionStorage quota errors
+      }
+      await tgSecureStorageSet(sessionLeaseKey, payload).catch(() => false);
+    },
+    [sessionLeaseKey],
+  );
+
+  const loadValidSessionLease = useCallback(async (): Promise<{
+    pin: string;
+    expiresAt: number;
+  } | null> => {
+    const parseLease = (raw: string | null) => {
+      if (!raw) return null;
+      try {
+        const parsed = JSON.parse(raw) as { pin?: unknown; expiresAt?: unknown };
+        if (
+          typeof parsed.pin === "string" &&
+          parsed.pin.length > 0 &&
+          typeof parsed.expiresAt === "number" &&
+          Date.now() < parsed.expiresAt
+        ) {
+          return { pin: parsed.pin, expiresAt: parsed.expiresAt };
+        }
+      } catch {
+        // Ignore malformed lease
+      }
+      return null;
+    };
+
+    try {
+      if (typeof window !== "undefined") {
+        const memLease = parseLease(window.sessionStorage.getItem(sessionLeaseKey));
+        if (memLease) return memLease;
+      }
+    } catch {
+      // Ignore sessionStorage errors
+    }
+
+    const secLease = parseLease(await tgSecureStorageGet(sessionLeaseKey).catch(() => null));
+    if (secLease) {
+      try {
+        if (typeof window !== "undefined") {
+          window.sessionStorage.setItem(sessionLeaseKey, JSON.stringify(secLease));
+        }
+      } catch {
+        // Ignore
+      }
+      return secLease;
+    }
+
+    try {
+      if (typeof window !== "undefined") {
+        window.sessionStorage.removeItem(sessionLeaseKey);
+      }
+    } catch {
+      // Ignore
+    }
+    void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
+    return null;
+  }, [sessionLeaseKey]);
+
+  const clearSessionLease = useCallback(() => {
+    try {
+      if (typeof window !== "undefined") {
+        window.sessionStorage.removeItem(sessionLeaseKey);
+      }
+    } catch {
+      // Ignore
+    }
+    void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
+  }, [sessionLeaseKey]);
   const relaySubmitter = useMemo(
     () =>
       config.apiBaseUrl
@@ -587,13 +677,41 @@ export function WalletProvider({
       setContacts(storedContacts);
       setTonConnectSessions(storedTcSessions);
       setLocalVaultUpdatedAt(vaultEnvelope?.updatedAt ?? null);
-      setVaultStatus(vaultEnvelope ? "locked" : "uninitialized");
+      if (!vaultEnvelope) {
+        setVaultStatus("uninitialized");
+        return;
+      }
+      const lease = await loadValidSessionLease();
+      if (lease && !cancelled) {
+        try {
+          const decrypted = await decryptVaultPayload(vaultEnvelope, lease.pin, {
+            deriveKeyFn: deriveKeyInWorker,
+          });
+          if (!cancelled) {
+            sessionVault.set(decrypted.mnemonic);
+            for (const acc of decrypted.accounts) {
+              if (acc.importedSecret) {
+                sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+              }
+            }
+            setAccountMetaList(decrypted.accounts);
+            setActiveIndex(decrypted.accounts[0]?.index ?? 0);
+            setVaultStatus("unlocked");
+            return;
+          }
+        } catch {
+          clearSessionLease();
+        }
+      }
+      if (!cancelled) {
+        setVaultStatus("locked");
+      }
     }
     void init();
     return () => {
       cancelled = true;
     };
-  }, [cleanScopeId, securePinKey]);
+  }, [cleanScopeId, securePinKey, loadValidSessionLease, clearSessionLease]);
 
   useEffect(() => {
     let cancelled = false;
@@ -601,19 +719,28 @@ export function WalletProvider({
       setVerifiedAssets([]);
       return undefined;
     }
+    const cacheKey = `sep42:${config.network}`;
+    void readCachedEntry<VerifiedAssetEntry[]>(cacheKey, 24 * 60 * 60 * 1000).then((hit) => {
+      if (!cancelled && hit) {
+        setVerifiedAssets(hit.data);
+      }
+    });
     void fetchSep42VerifiedAssets(config.sep42AssetListUrls)
       .then((assets) => {
-        if (!cancelled) setVerifiedAssets(assets);
+        if (!cancelled) {
+          setVerifiedAssets(assets);
+          writeCachedEntry(cacheKey, assets, 15 * 60 * 1000);
+        }
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [config.sep42AssetListUrls]);
+  }, [config.sep42AssetListUrls, config.network]);
 
   useEffect(() => {
     const balances = accountState?.balances;
-    if (!balances || balances.length === 0) {
+    if (!balances || balances.length === 0 || !activeAccount) {
       setTokenMetaMap({});
       return undefined;
     }
@@ -635,6 +762,15 @@ export function WalletProvider({
       return undefined;
     }
     let cancelled = false;
+    const cacheKey = `tomlmap:${config.network}:${activeAccount.address}`;
+    void readCachedEntry<Readonly<Record<string, HeldTokenTomlMetadata>>>(
+      cacheKey,
+      24 * 60 * 60 * 1000,
+    ).then((hit) => {
+      if (!cancelled && hit) {
+        setTokenMetaMap(hit.data);
+      }
+    });
     void fetchHeldAssetsTomlMetadata({
       horizonUrls: config.horizonUrls,
       assets: assetsToResolve,
@@ -643,13 +779,21 @@ export function WalletProvider({
       .then((resolved) => {
         if (!cancelled) {
           setTokenMetaMap(resolved);
+          writeCachedEntry(cacheKey, resolved, 15 * 60 * 1000);
         }
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
     };
-  }, [accountState?.balances, verifiedAssets, config.horizonUrls, config.apiBaseUrl]);
+  }, [
+    accountState?.balances,
+    verifiedAssets,
+    config.horizonUrls,
+    config.apiBaseUrl,
+    config.network,
+    activeAccount,
+  ]);
 
   const refreshChainState = useCallback(async () => {
     if (!activeAccount) return;
@@ -658,8 +802,17 @@ export function WalletProvider({
     setLoadingChain(true);
     setChainError(null);
     try {
-      const [state, payments, trades, claimables, offers] = await Promise.all([
-        stellarClient.fetchAccountState(targetAddress),
+      const state = await stellarClient.fetchAccountState(targetAddress);
+      if (seq !== chainFetchSeqRef.current) return;
+      if (!state.funded) {
+        setAccountState(state);
+        setRecentPayments([]);
+        setRecentTrades([]);
+        setClaimableBalances([]);
+        setOpenOffers([]);
+        return;
+      }
+      const [payments, trades, claimables, offers] = await Promise.all([
         stellarClient.fetchRecentPayments(targetAddress, 25),
         stellarClient.fetchRecentTrades(targetAddress, 20),
         stellarClient.fetchClaimableBalances(targetAddress, 20),
@@ -1209,10 +1362,11 @@ export function WalletProvider({
       setAccountMetaList(initialAccounts);
       setActiveIndex(0);
       setVaultStatus("unlocked");
+      void saveSessionLease(pinOrPassphrase);
       showToast("Sovereign SEP-0005 Vault created locally");
       return { envelopeJson: serializeAgVaultBackup(envelope) };
     },
-    [cleanScopeId, showToast],
+    [cleanScopeId, saveSessionLease, showToast],
   );
 
   const unlockWithPin = useCallback(
@@ -1234,8 +1388,9 @@ export function WalletProvider({
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setLocalVaultUpdatedAt(envelope.updatedAt);
       setVaultStatus("unlocked");
+      void saveSessionLease(pinOrPassphrase);
     },
-    [cleanScopeId],
+    [cleanScopeId, saveSessionLease],
   );
 
   const unlockWithBiometric = useCallback(async () => {
@@ -1658,13 +1813,15 @@ export function WalletProvider({
   const lockVault = useCallback(() => {
     setPendingTonConnectTx(null);
     sessionVault.clear();
+    clearSessionLease();
     setAccountState(null);
     setTonState(null);
     setRecentPayments([]);
+    setRecentTrades([]);
     setClaimableBalances([]);
     setOpenOffers([]);
     setVaultStatus("locked");
-  }, []);
+  }, [clearSessionLease]);
 
   // Auto-lock after 4 hours of inactivity or > 4 hours in background tab
   useEffect(() => {
@@ -1674,6 +1831,7 @@ export function WalletProvider({
 
     const INACTIVITY_MS = 4 * 60 * 60 * 1000;
     const BACKGROUND_LOCK_MS = 4 * 60 * 60 * 1000;
+    let lastLeaseExtendAt = Date.now();
 
     let timer = window.setTimeout(() => {
       lockVault();
@@ -1686,6 +1844,15 @@ export function WalletProvider({
         lockVault();
         showToast("Vault auto-locked after 4 hours of inactivity", "info");
       }, INACTIVITY_MS);
+      const now = Date.now();
+      if (now - lastLeaseExtendAt > 5 * 60 * 1000) {
+        lastLeaseExtendAt = now;
+        void loadValidSessionLease().then((lease) => {
+          if (lease) {
+            void saveSessionLease(lease.pin);
+          }
+        });
+      }
     };
 
     let hiddenAt: number | null = null;
@@ -1719,6 +1886,7 @@ export function WalletProvider({
 
   const wipeLocalVault = useCallback(async () => {
     setPendingTonConnectTx(null);
+    clearSessionLease();
     await updateTelegramBiometricToken("").catch(() => false);
     await tgSecureStorageRemove(securePinKey).catch(() => false);
     await clearAllTonConnectSessions(cleanScopeId).catch(() => undefined);

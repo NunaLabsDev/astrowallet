@@ -3037,4 +3037,71 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       memo: "hi",
     });
   });
+
+  it("caches /v1/proxy/market/history and /v1/proxy/market/token in KV with MISS -> KV-HIT", async () => {
+    const repo = createMemoryRepo();
+    const kvStore = new Map<string, string>();
+    const mockCache = {
+      get: async (k: string) => kvStore.get(k) ?? null,
+      put: async (k: string, v: string) => {
+        kvStore.set(k, v);
+      },
+    };
+    const envWithCache = { ...TEST_ENV, CACHE: mockCache };
+    const issuer = Keypair.random().publicKey();
+    let horizonCalls = 0;
+
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input) => {
+        horizonCalls += 1;
+        const url = String(input);
+        if (url.includes("/trade_aggregations")) {
+          return new Response(
+            JSON.stringify({
+              _embedded: {
+                records: [
+                  {
+                    timestamp: "1759996400000",
+                    open: "10.0",
+                    high: "10.5",
+                    low: "9.9",
+                    close: "10.2",
+                    base_volume: "50.0",
+                  },
+                ],
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ _embedded: { records: [] } }), { status: 200 });
+      },
+    });
+
+    const first = await app.request(
+      `/v1/proxy/market/history?code=USDC&issuer=${issuer}&timeframe=1y`,
+      {},
+      envWithCache,
+    );
+    expect(first.status).toBe(200);
+    expect(first.headers.get("X-Astro-Cache")).toBe("MISS");
+    const firstBody = (await first.json()) as { latestPriceXlm?: number };
+    expect(firstBody.latestPriceXlm).toBe(10.2);
+    expect(horizonCalls).toBe(1);
+
+    const second = await app.request(
+      `/v1/proxy/market/history?code=USDC&issuer=${issuer}&timeframe=1y`,
+      {},
+      envWithCache,
+    );
+    expect(second.status).toBe(200);
+    expect(second.headers.get("X-Astro-Cache")).toBe("KV-HIT");
+    expect(horizonCalls).toBe(1);
+
+    const tokenRes = await app.request("/v1/proxy/market/token?code=XLM", {}, envWithCache);
+    expect(tokenRes.status).toBe(200);
+    const tokenBody = (await tokenRes.json()) as { details?: { assetCode?: string } };
+    expect(tokenBody.details?.assetCode).toBe("XLM");
+  });
 });

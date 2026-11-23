@@ -4,7 +4,9 @@ import {
   parseSoroswapQuoteOutput,
 } from "@astrowallet/defi";
 import {
+  ClassicAddressSchema,
   StellarAddressSchema,
+  type ClassicAddress,
   type ServerConfig,
 } from "@astrowallet/domain";
 import {
@@ -14,6 +16,14 @@ import {
   fetchSep42VerifiedAssets,
   type DirectoryTagEntry,
 } from "@astrowallet/security-shield";
+import {
+  fetchMarketLiquidAssets,
+  fetchMarketOrderbook,
+  fetchMarketPriceHistory,
+  fetchMarketRecentTrades,
+  fetchMarketTokenDetails,
+  type MarketTimeframe,
+} from "../market-horizon.js";
 import type { KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { z } from "zod";
@@ -539,6 +549,256 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       return c.json({ error: result.error }, result.status);
     }
     return c.json(result.body);
+  });
+
+  async function serveEdgeCachedJson<T>(
+    c: {
+      env: { CACHE?: KVNamespace };
+      executionCtx?: { waitUntil(p: Promise<unknown>): void };
+      header(name: string, value: string): void;
+      json(data: unknown, status?: number): Response;
+    },
+    opts: {
+      cacheKey: string;
+      freshTtlSec: number;
+      staleTtlSec: number;
+      compute: () => Promise<T>;
+    },
+  ): Promise<Response> {
+    const kvKey = `mkt:${opts.cacheKey}`;
+    const edgeCache =
+      typeof caches !== "undefined" && "default" in caches
+        ? (caches as unknown as { default: Cache }).default
+        : null;
+    const edgeReq = edgeCache
+      ? new Request(`https://cache.astrowallet.internal/${encodeURIComponent(kvKey)}`)
+      : null;
+
+    const persist = async (data: T): Promise<void> => {
+      const payload = JSON.stringify({ data, cachedAt: Date.now() });
+      const totalTtl = Math.max(60, opts.freshTtlSec + opts.staleTtlSec);
+      if (c.env.CACHE) {
+        await c.env.CACHE.put(kvKey, payload, { expirationTtl: totalTtl }).catch(() => {});
+      }
+      if (edgeCache && edgeReq) {
+        const cacheResp = new Response(payload, {
+          headers: {
+            "Content-Type": "application/json",
+            "Cache-Control": `public, max-age=${opts.freshTtlSec}, stale-while-revalidate=${opts.staleTtlSec}`,
+          },
+        });
+        await edgeCache.put(edgeReq, cacheResp).catch(() => {});
+      }
+    };
+
+    const scheduleBackground = (p: Promise<unknown>): boolean => {
+      try {
+        c.executionCtx?.waitUntil(p);
+        return true;
+      } catch {
+        // Ignore in Node/Vitest environments without Workers executionCtx
+        return false;
+      }
+    };
+
+    if (edgeCache && edgeReq) {
+      const hit = await edgeCache.match(edgeReq).catch(() => undefined);
+      if (hit) {
+        const parsed = (await hit.json().catch(() => null)) as {
+          data?: T;
+          cachedAt?: number;
+        } | null;
+        if (parsed && parsed.data !== undefined) {
+          const ageSec = parsed.cachedAt ? (Date.now() - parsed.cachedAt) / 1000 : 0;
+          const isStale = ageSec > opts.freshTtlSec;
+          if (isStale) {
+            scheduleBackground(opts.compute().then(persist).catch(() => {}));
+          }
+          c.header("X-Astro-Cache", isStale ? "EDGE-STALE" : "EDGE-HIT");
+          c.header(
+            "Cache-Control",
+            `public, max-age=${opts.freshTtlSec}, stale-while-revalidate=${opts.staleTtlSec}`,
+          );
+          return c.json(parsed.data, 200);
+        }
+      }
+    }
+
+    if (c.env.CACHE) {
+      const kvRaw = await c.env.CACHE.get(kvKey).catch(() => null);
+      if (kvRaw) {
+        try {
+          const parsed = JSON.parse(kvRaw) as { data?: T; cachedAt?: number };
+          if (parsed && parsed.data !== undefined) {
+            const ageSec = parsed.cachedAt ? (Date.now() - parsed.cachedAt) / 1000 : 0;
+            const isStale = ageSec > opts.freshTtlSec;
+            if (isStale) {
+              scheduleBackground(opts.compute().then(persist).catch(() => {}));
+            } else if (edgeCache && edgeReq) {
+              scheduleBackground(persist(parsed.data));
+            }
+            c.header("X-Astro-Cache", isStale ? "KV-STALE" : "KV-HIT");
+            c.header(
+              "Cache-Control",
+              `public, max-age=${opts.freshTtlSec}, stale-while-revalidate=${opts.staleTtlSec}`,
+            );
+            return c.json(parsed.data, 200);
+          }
+        } catch {
+          // Ignore corrupted KV cache entry
+        }
+      }
+    }
+
+    const fresh = await opts.compute();
+    if (!scheduleBackground(persist(fresh))) {
+      await persist(fresh);
+    }
+    c.header("X-Astro-Cache", "MISS");
+    c.header(
+      "Cache-Control",
+      `public, max-age=${opts.freshTtlSec}, stale-while-revalidate=${opts.staleTtlSec}`,
+    );
+    return c.json(fresh, 200);
+  }
+
+  router.get("/market/history", async (c) => {
+    const config = c.get("config");
+    const code = (c.req.query("code") ?? "").trim().toUpperCase();
+    const rawIssuer = (c.req.query("issuer") ?? "").trim();
+    const rawTf = (c.req.query("timeframe") ?? "24h").trim().toLowerCase();
+    const counterCode = (c.req.query("counterCode") ?? "").trim().toUpperCase();
+    const rawCounterIssuer = (c.req.query("counterIssuer") ?? "").trim();
+
+    if (!code || !/^[A-Z0-9]{1,12}$/.test(code)) {
+      return c.json({ error: "Valid asset code is required" }, 400);
+    }
+    const issuerParse = rawIssuer ? ClassicAddressSchema.safeParse(rawIssuer) : null;
+    if (issuerParse && !issuerParse.success) {
+      return c.json({ error: "Invalid asset issuer address" }, 400);
+    }
+    const counterIssuerParse = rawCounterIssuer
+      ? ClassicAddressSchema.safeParse(rawCounterIssuer)
+      : null;
+    if (counterIssuerParse && !counterIssuerParse.success) {
+      return c.json({ error: "Invalid counter asset issuer address" }, 400);
+    }
+
+    const timeframe: MarketTimeframe =
+      rawTf === "7d" || rawTf === "30d" || rawTf === "1y" || rawTf === "all" ? rawTf : "24h";
+    const bucketMs =
+      timeframe === "24h" ? 60_000 : timeframe === "7d" ? 300_000 : 900_000;
+    const roundedNowMs = Math.floor(Date.now() / bucketMs) * bucketMs;
+    const freshTtlSec = timeframe === "24h" ? 60 : timeframe === "7d" ? 300 : 900;
+    const staleTtlSec = timeframe === "24h" ? 900 : timeframe === "7d" ? 3600 : 21600;
+
+    return serveEdgeCachedJson(c, {
+      cacheKey: `hist:${config.network}:${code}:${rawIssuer || "native"}:${timeframe}:${counterCode || "XLM"}:${rawCounterIssuer || "native"}:${roundedNowMs}`,
+      freshTtlSec,
+      staleTtlSec,
+      compute: () =>
+        fetchMarketPriceHistory({
+          horizonUrls: config.horizonUrls,
+          assetCode: code,
+          assetIssuer: issuerParse?.data as ClassicAddress | undefined,
+          timeframe,
+          ...(counterCode
+            ? {
+                counterAsset: {
+                  code: counterCode,
+                  issuer: counterIssuerParse?.data as ClassicAddress | undefined,
+                },
+              }
+            : {}),
+          nowMs: roundedNowMs,
+          fetchFn,
+        }),
+    });
+  });
+
+  router.get("/market/token", async (c) => {
+    const config = c.get("config");
+    const code = (c.req.query("code") ?? "").trim().toUpperCase();
+    const rawIssuer = (c.req.query("issuer") ?? "").trim();
+    const counterCode = (c.req.query("counterCode") ?? "").trim().toUpperCase();
+    const rawCounterIssuer = (c.req.query("counterIssuer") ?? "").trim();
+
+    if (!code || !/^[A-Z0-9]{1,12}$/.test(code)) {
+      return c.json({ error: "Valid asset code is required" }, 400);
+    }
+    const issuerParse = rawIssuer ? ClassicAddressSchema.safeParse(rawIssuer) : null;
+    if (issuerParse && !issuerParse.success) {
+      return c.json({ error: "Invalid asset issuer address" }, 400);
+    }
+    const counterIssuerParse = rawCounterIssuer
+      ? ClassicAddressSchema.safeParse(rawCounterIssuer)
+      : null;
+    if (counterIssuerParse && !counterIssuerParse.success) {
+      return c.json({ error: "Invalid counter asset issuer address" }, 400);
+    }
+
+    const counterAsset = counterCode
+      ? {
+          code: counterCode,
+          issuer: counterIssuerParse?.data as ClassicAddress | undefined,
+        }
+      : undefined;
+
+    return serveEdgeCachedJson(c, {
+      cacheKey: `tok:${config.network}:${code}:${rawIssuer || "native"}:${counterCode || "XLM"}:${rawCounterIssuer || "native"}`,
+      freshTtlSec: 30,
+      staleTtlSec: 300,
+      compute: async () => {
+        const [details, orderbook, recentTrades] = await Promise.all([
+          fetchMarketTokenDetails({
+            horizonUrls: config.horizonUrls,
+            networkPassphrase: config.networkPassphrase,
+            assetCode: code,
+            assetIssuer: issuerParse?.data as ClassicAddress | undefined,
+            fetchFn,
+          }),
+          fetchMarketOrderbook({
+            horizonUrls: config.horizonUrls,
+            assetCode: code,
+            assetIssuer: issuerParse?.data as ClassicAddress | undefined,
+            counterAsset,
+            limit: 5,
+            fetchFn,
+          }).catch(() => null),
+          fetchMarketRecentTrades({
+            horizonUrls: config.horizonUrls,
+            assetCode: code,
+            assetIssuer: issuerParse?.data as ClassicAddress | undefined,
+            counterAsset,
+            limit: 15,
+            fetchFn,
+          }).catch(() => []),
+        ]);
+        return { details, orderbook, recentTrades };
+      },
+    });
+  });
+
+  router.get("/market/liquid", async (c) => {
+    const config = c.get("config");
+    const rawLimit = Number(c.req.query("limit") ?? "15");
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(Math.max(Math.trunc(rawLimit), 1), 30)
+      : 15;
+
+    return serveEdgeCachedJson(c, {
+      cacheKey: `liq:${config.network}:${limit}`,
+      freshTtlSec: 300,
+      staleTtlSec: 1800,
+      compute: async () => {
+        const items = await fetchMarketLiquidAssets({
+          horizonUrls: config.horizonUrls,
+          limit,
+          fetchFn,
+        });
+        return { items };
+      },
+    });
   });
 
   return router;

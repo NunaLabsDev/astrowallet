@@ -293,6 +293,7 @@ export function stroops7ToDecimal(stroops: bigint | string): string {
  */
 export function createSoroswapProxyAdapter(input: {
   apiBaseUrl: string;
+  network?: string | undefined;
   fetchFn?: typeof fetch | undefined;
 }): SwapPort {
   const fetchFn = input.fetchFn ?? fetch;
@@ -303,7 +304,10 @@ export function createSoroswapProxyAdapter(input: {
     async getQuote(request: SwapQuoteRequest): Promise<SwapQuote> {
       const res = await fetchFn(`${cleanBase}/v1/proxy/soroswap/quote`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(input.network ? { "X-Astro-Network": input.network } : {}),
+        },
         body: JSON.stringify(request),
       });
       if (!res.ok) {

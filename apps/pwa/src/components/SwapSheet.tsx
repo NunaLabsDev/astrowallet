@@ -12,12 +12,12 @@ import {
 import type { ClassicAddress, SwapQuote } from "@astrowallet/domain";
 import type { VerifiedAssetEntry } from "@astrowallet/security-shield";
 import {
-  discoverLiquidHorizonAssets,
   fetchTokenOnChainDetails,
   type HeldTokenTomlMetadata,
   type StellarTokenDetails,
   type TokenCatalogItem,
 } from "@astrowallet/stellar-core";
+import { fetchCachedLiquidAssets, readCachedEntry } from "../state/market-cache.js";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
@@ -246,13 +246,18 @@ export function SwapSheet({
 
   const balances = accountState?.balances ?? [];
 
-  // Discover live functional tokens with active pools / trustlines on Testnet/Mainnet
+  // Discover live functional tokens with active pools / trustlines via 3-tier SWR cache
   useEffect(() => {
     let cancelled = false;
-    void discoverLiquidHorizonAssets({
+    const cacheKey = `liquid:${config.network}:12`;
+    void readCachedEntry<TokenCatalogItem[]>(cacheKey, 24 * 60 * 60 * 1000).then((hit) => {
+      if (!cancelled && hit) setLiquidAssets(hit.data);
+    });
+    void fetchCachedLiquidAssets({
+      apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
       horizonUrls: config.horizonUrls,
       limit: 12,
-      apiBaseUrl: config.apiBaseUrl,
     })
       .then((items) => {
         if (!cancelled) {
@@ -263,7 +268,7 @@ export function SwapSheet({
     return () => {
       cancelled = true;
     };
-  }, [config.horizonUrls, config.apiBaseUrl]);
+  }, [config.horizonUrls, config.apiBaseUrl, config.network]);
 
   // Auto-pick a functional default destination token when Swap opens without initialToAsset
   useEffect(() => {
@@ -460,6 +465,7 @@ export function SwapSheet({
       const engine = createCompositeSwapEngine({
         soroswapAdapter: createSoroswapProxyAdapter({
           apiBaseUrl: config.apiBaseUrl,
+          network: config.network,
         }),
         horizonAdapter: createHorizonPathSwapAdapter({
           horizonUrls: config.horizonUrls,
@@ -555,6 +561,7 @@ export function SwapSheet({
           const engine = createCompositeSwapEngine({
             soroswapAdapter: createSoroswapProxyAdapter({
               apiBaseUrl: config.apiBaseUrl,
+              network: config.network,
             }),
             horizonAdapter: createHorizonPathSwapAdapter({
               horizonUrls: config.horizonUrls,

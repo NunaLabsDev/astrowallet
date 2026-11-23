@@ -1,0 +1,599 @@
+import type { ClassicAddress, ContractAddress } from "@astrowallet/domain";
+import { Asset, StrKey } from "@stellar/stellar-sdk";
+import type { FetchLike } from "./stellar-verifier.js";
+
+export type MarketTimeframe = "24h" | "7d" | "30d" | "1y" | "all";
+
+async function fetchHorizonJson<T>(
+  horizonUrls: readonly string[],
+  pathAndQuery: string,
+  fetchFn: FetchLike = fetch,
+): Promise<T | null> {
+  let lastErr: unknown;
+  for (const rawBase of horizonUrls) {
+    const base = rawBase.replace(/\/+$/, "");
+    try {
+      const res = await fetchFn(`${base}${pathAndQuery}`, {
+        headers: { Accept: "application/json" },
+      });
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        lastErr = new Error(`Horizon returned HTTP ${res.status}`);
+        continue;
+      }
+      return (await res.json()) as T;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  if (lastErr instanceof Error) throw lastErr;
+  return null;
+}
+
+function resolveAssetParams(
+  prefix: string,
+  assetCode: string,
+  assetIssuer?: string,
+): Record<string, string> {
+  const code = assetCode.trim();
+  if (code.toUpperCase() === "XLM" && !assetIssuer) {
+    return { [`${prefix}_asset_type`]: "native" };
+  }
+  return {
+    [`${prefix}_asset_type`]: code.length <= 4 ? "credit_alphanum4" : "credit_alphanum12",
+    [`${prefix}_asset_code`]: code,
+    ...(assetIssuer ? { [`${prefix}_asset_issuer`]: assetIssuer } : {}),
+  };
+}
+
+function parseFinite(raw: unknown): number | null {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw === "string") {
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+function parseTradePrice(price?: { n?: string | number; d?: string | number }): number | null {
+  if (!price) return null;
+  const n = parseFinite(price.n);
+  const d = parseFinite(price.d);
+  if (n === null || d === null || d <= 0) return null;
+  const val = n / d;
+  return Number.isFinite(val) && val > 0 ? val : null;
+}
+
+export async function fetchMarketPriceHistory(input: {
+  horizonUrls: readonly string[];
+  assetCode: string;
+  assetIssuer?: ClassicAddress | undefined;
+  timeframe: MarketTimeframe;
+  counterAsset?: { code: string; issuer?: ClassicAddress | undefined } | undefined;
+  nowMs: number;
+  fetchFn?: FetchLike | undefined;
+}) {
+  const fetchFn = input.fetchFn ?? fetch;
+  const isBaseNative = input.assetCode.trim().toUpperCase() === "XLM" && !input.assetIssuer;
+  const quoteCode = input.counterAsset?.code ?? "XLM";
+  const quoteIssuer = input.counterAsset?.issuer;
+  const isQuoteNative = quoteCode.toUpperCase() === "XLM" && !quoteIssuer;
+
+  if (isBaseNative && isQuoteNative) {
+    return {
+      timeframe: input.timeframe,
+      quoteCode: "XLM",
+      candles: [],
+      latestPriceXlm: 1,
+      changePct: 0,
+      high: 1,
+      low: 1,
+      volumeBase: 0,
+      source: "parity" as const,
+    };
+  }
+
+  const tfConfig: Record<MarketTimeframe, { lookbackMs: number; resolutionMs: number; limit: number }> = {
+    "24h": { lookbackMs: 24 * 60 * 60 * 1000, resolutionMs: 3_600_000, limit: 24 },
+    "7d": { lookbackMs: 7 * 24 * 60 * 60 * 1000, resolutionMs: 14_400_000, limit: 42 },
+    "30d": { lookbackMs: 30 * 24 * 60 * 60 * 1000, resolutionMs: 86_400_000, limit: 30 },
+    "1y": { lookbackMs: 365 * 24 * 60 * 60 * 1000, resolutionMs: 86_400_000, limit: 200 },
+    "all": { lookbackMs: 10 * 365 * 24 * 60 * 60 * 1000, resolutionMs: 604_800_000, limit: 200 },
+  };
+  const cfg = tfConfig[input.timeframe];
+  const baseParams = resolveAssetParams("base", input.assetCode, input.assetIssuer);
+  const counterParams = resolveAssetParams("counter", quoteCode, quoteIssuer);
+
+  async function queryAgg(lookbackMs: number, resolutionMs: number, limit: number) {
+    const params = new URLSearchParams({
+      ...baseParams,
+      ...counterParams,
+      start_time: String(Math.max(0, input.nowMs - lookbackMs)),
+      end_time: String(input.nowMs),
+      resolution: String(resolutionMs),
+      limit: String(limit),
+      order: "desc",
+    });
+    const body = await fetchHorizonJson<{
+      _embedded?: {
+        records?: Array<{
+          timestamp?: string;
+          open?: string;
+          high?: string;
+          low?: string;
+          close?: string;
+          base_volume?: string;
+        }>;
+      };
+    }>(input.horizonUrls, `/trade_aggregations?${params.toString()}`, fetchFn);
+
+    return (body?._embedded?.records ?? [])
+      .map((rec) => {
+        const ts = parseFinite(rec.timestamp);
+        const open = parseFinite(rec.open);
+        const high = parseFinite(rec.high);
+        const low = parseFinite(rec.low);
+        const close = parseFinite(rec.close);
+        const baseVolume = parseFinite(rec.base_volume) ?? 0;
+        if (ts === null || open === null || high === null || low === null || close === null || close <= 0) {
+          return null;
+        }
+        return { timestamp: ts, open, high, low, close, baseVolume };
+      })
+      .filter((c): c is NonNullable<typeof c> => c !== null)
+      .reverse();
+  }
+
+  try {
+    let candles = await queryAgg(cfg.lookbackMs, cfg.resolutionMs, cfg.limit);
+    if (input.timeframe === "all" && candles.length < 2) {
+      const daily = await queryAgg(365 * 24 * 60 * 60 * 1000, 86_400_000, 200);
+      if (daily.length > candles.length) candles = daily;
+    }
+    if (candles.length > 0) {
+      const first = candles[0]!;
+      const last = candles[candles.length - 1]!;
+      return {
+        timeframe: input.timeframe,
+        quoteCode,
+        ...(quoteIssuer ? { quoteIssuer } : {}),
+        candles,
+        latestPriceXlm: last.close,
+        changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
+        high: Math.max(...candles.map((c) => c.high)),
+        low: Math.min(...candles.map((c) => c.low)),
+        volumeBase: candles.reduce((s, c) => s + c.baseVolume, 0),
+        source: "trade_aggregations" as const,
+      };
+    }
+  } catch {
+    // Fall through to trades / order_book
+  }
+
+  try {
+    const tradeParams = new URLSearchParams({
+      ...baseParams,
+      ...counterParams,
+      limit: "20",
+      order: "desc",
+    });
+    const tradesBody = await fetchHorizonJson<{
+      _embedded?: {
+        records?: Array<{
+          ledger_close_time?: string;
+          base_amount?: string;
+          price?: { n?: string | number; d?: string | number };
+        }>;
+      };
+    }>(input.horizonUrls, `/trades?${tradeParams.toString()}`, fetchFn);
+
+    const points = (tradesBody?._embedded?.records ?? [])
+      .map((t) => {
+        const p = parseTradePrice(t.price);
+        const ts = t.ledger_close_time ? Date.parse(t.ledger_close_time) : NaN;
+        if (p === null || !Number.isFinite(ts)) return null;
+        return {
+          timestamp: ts,
+          open: p,
+          high: p,
+          low: p,
+          close: p,
+          baseVolume: parseFinite(t.base_amount) ?? 0,
+        };
+      })
+      .filter((c): c is NonNullable<typeof c> => c !== null)
+      .reverse();
+
+    if (points.length > 0) {
+      const first = points[0]!;
+      const last = points[points.length - 1]!;
+      return {
+        timeframe: input.timeframe,
+        quoteCode,
+        ...(quoteIssuer ? { quoteIssuer } : {}),
+        candles: points,
+        latestPriceXlm: last.close,
+        changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
+        high: Math.max(...points.map((c) => c.high)),
+        low: Math.min(...points.map((c) => c.low)),
+        volumeBase: points.reduce((s, c) => s + c.baseVolume, 0),
+        source: "trades" as const,
+      };
+    }
+  } catch {
+    // Fall through to order_book
+  }
+
+  const ob = await fetchMarketOrderbook({
+    horizonUrls: input.horizonUrls,
+    assetCode: input.assetCode,
+    assetIssuer: input.assetIssuer,
+    counterAsset: input.counterAsset,
+    limit: 5,
+    fetchFn,
+  }).catch(() => null);
+  const midNum = ob?.midPriceXlm ? parseFinite(ob.midPriceXlm) : null;
+  return {
+    timeframe: input.timeframe,
+    quoteCode,
+    ...(quoteIssuer ? { quoteIssuer } : {}),
+    candles: [],
+    latestPriceXlm: midNum,
+    changePct: null,
+    high: midNum,
+    low: midNum,
+    volumeBase: 0,
+    source: "order_book" as const,
+  };
+}
+
+export async function fetchMarketOrderbook(input: {
+  horizonUrls: readonly string[];
+  assetCode: string;
+  assetIssuer?: ClassicAddress | undefined;
+  counterAsset?: { code: string; issuer?: ClassicAddress | undefined } | undefined;
+  limit?: number | undefined;
+  fetchFn?: FetchLike | undefined;
+}) {
+  const fetchFn = input.fetchFn ?? fetch;
+  const limit = Math.min(Math.max(input.limit ?? 5, 1), 20);
+  const quoteCode = input.counterAsset?.code ?? "XLM";
+  const quoteIssuer = input.counterAsset?.issuer;
+  const isBaseNative = input.assetCode.trim().toUpperCase() === "XLM" && !input.assetIssuer;
+  const isQuoteNative = quoteCode.toUpperCase() === "XLM" && !quoteIssuer;
+
+  if (isBaseNative && isQuoteNative) {
+    return { quoteCode, quoteIssuer, bids: [], asks: [], midPriceXlm: "1", spreadPct: "0.00" };
+  }
+
+  const params = new URLSearchParams({
+    ...resolveAssetParams("selling", input.assetCode, input.assetIssuer),
+    ...resolveAssetParams("buying", quoteCode, quoteIssuer),
+    limit: String(limit),
+  });
+  const body = await fetchHorizonJson<{
+    bids?: Array<{ price?: string; amount?: string }>;
+    asks?: Array<{ price?: string; amount?: string }>;
+  }>(input.horizonUrls, `/order_book?${params.toString()}`, fetchFn);
+
+  const bids = (body?.bids ?? [])
+    .filter((b): b is { price: string; amount: string } => Boolean(b.price && b.amount))
+    .slice(0, limit);
+  const asks = (body?.asks ?? [])
+    .filter((a): a is { price: string; amount: string } => Boolean(a.price && a.amount))
+    .slice(0, limit);
+
+  const topBid = parseFinite(bids[0]?.price);
+  const topAsk = parseFinite(asks[0]?.price);
+  let midPriceXlm: string | null = null;
+  let spreadPct: string | null = null;
+  if (topBid !== null && topAsk !== null && topBid > 0 && topAsk > 0) {
+    const mid = (topBid + topAsk) / 2;
+    midPriceXlm = mid.toPrecision(6);
+    if (mid > 0) spreadPct = Math.max(0, ((topAsk - topBid) / mid) * 100).toFixed(2);
+  } else if (topBid !== null && topBid > 0) {
+    midPriceXlm = topBid.toPrecision(6);
+  } else if (topAsk !== null && topAsk > 0) {
+    midPriceXlm = topAsk.toPrecision(6);
+  }
+
+  return { quoteCode, quoteIssuer, bids, asks, midPriceXlm, spreadPct };
+}
+
+export async function fetchMarketRecentTrades(input: {
+  horizonUrls: readonly string[];
+  assetCode: string;
+  assetIssuer?: ClassicAddress | undefined;
+  counterAsset?: { code: string; issuer?: ClassicAddress | undefined } | undefined;
+  limit?: number | undefined;
+  fetchFn?: FetchLike | undefined;
+}) {
+  const fetchFn = input.fetchFn ?? fetch;
+  const quoteCode = input.counterAsset?.code ?? "XLM";
+  const quoteIssuer = input.counterAsset?.issuer;
+  const isBaseNative = input.assetCode.trim().toUpperCase() === "XLM" && !input.assetIssuer;
+  const isQuoteNative = quoteCode.toUpperCase() === "XLM" && !quoteIssuer;
+  if (isBaseNative && isQuoteNative) return [];
+
+  const params = new URLSearchParams({
+    ...resolveAssetParams("base", input.assetCode, input.assetIssuer),
+    ...resolveAssetParams("counter", quoteCode, quoteIssuer),
+    limit: String(Math.min(Math.max(input.limit ?? 15, 1), 50)),
+    order: "desc",
+  });
+
+  const body = await fetchHorizonJson<{
+    _embedded?: {
+      records?: Array<{
+        id?: string;
+        ledger_close_time?: string;
+        base_amount?: string;
+        counter_amount?: string;
+        base_account?: string;
+        counter_account?: string;
+        base_is_seller?: boolean;
+        price?: { n?: string | number; d?: string | number };
+      }>;
+    };
+  }>(input.horizonUrls, `/trades?${params.toString()}`, fetchFn);
+
+  const out = [];
+  for (const rec of body?._embedded?.records ?? []) {
+    const p = parseTradePrice(rec.price);
+    if (p === null || !rec.id || !rec.ledger_close_time) continue;
+    out.push({
+      id: rec.id,
+      timestamp: rec.ledger_close_time,
+      price: p.toPrecision(6),
+      baseAmount: rec.base_amount ?? "0",
+      counterAmount: rec.counter_amount ?? "0",
+      baseAccount: rec.base_account,
+      counterAccount: rec.counter_account,
+      isBuy: !rec.base_is_seller,
+    });
+  }
+  return out;
+}
+
+export async function fetchMarketTokenDetails(input: {
+  horizonUrls: readonly string[];
+  networkPassphrase: string;
+  assetCode: string;
+  assetIssuer?: ClassicAddress | undefined;
+  fetchFn?: FetchLike | undefined;
+}) {
+  const fetchFn = input.fetchFn ?? fetch;
+  const cleanCode = input.assetCode.trim();
+  const isNative = cleanCode.toUpperCase() === "XLM" && !input.assetIssuer;
+  const asset = isNative ? Asset.native() : new Asset(cleanCode, input.assetIssuer ?? "");
+  const sacContractId = asset.contractId(input.networkPassphrase) as ContractAddress;
+
+  if (isNative) {
+    let totalCoins = "0";
+    let latestLedgerSequence: number | undefined;
+    let baseFeeStroops: number | undefined;
+    let baseReserveStroops: number | undefined;
+    let maxTxSetSize: number | undefined;
+    let protocolVersion: number | undefined;
+    try {
+      const ledgerBody = await fetchHorizonJson<{
+        _embedded?: {
+          records?: Array<{
+            sequence?: number;
+            total_coins?: string;
+            base_fee_in_stroops?: number;
+            base_reserve_in_stroops?: number;
+            max_tx_set_size?: number;
+            protocol_version?: number;
+          }>;
+        };
+      }>(input.horizonUrls, "/ledgers?order=desc&limit=1", fetchFn);
+      const rec = ledgerBody?._embedded?.records?.[0];
+      totalCoins = rec?.total_coins ?? "0";
+      latestLedgerSequence = rec?.sequence;
+      baseFeeStroops = rec?.base_fee_in_stroops;
+      baseReserveStroops = rec?.base_reserve_in_stroops;
+      maxTxSetSize = rec?.max_tx_set_size;
+      protocolVersion = rec?.protocol_version;
+    } catch {
+      // Non-fatal
+    }
+    return {
+      assetCode: "XLM",
+      isNative: true,
+      sacContractId,
+      homeDomain: "stellar.org",
+      name: "Stellar Lumens",
+      description:
+        "Native protocol asset of the Stellar network securing ledger base reserves, Soroban execution, and fees.",
+      orgName: "Stellar Development Foundation",
+      orgUrl: "https://stellar.org",
+      supplyAmount: totalCoins,
+      numAccounts: 0,
+      ...(latestLedgerSequence !== undefined ? { latestLedgerSequence } : {}),
+      ...(baseFeeStroops !== undefined ? { baseFeeStroops } : {}),
+      ...(baseReserveStroops !== undefined ? { baseReserveStroops } : {}),
+      ...(maxTxSetSize !== undefined ? { maxTxSetSize } : {}),
+      ...(protocolVersion !== undefined ? { protocolVersion } : {}),
+      flags: {
+        authRequired: false,
+        authRevocable: false,
+        authImmutable: true,
+        authClawbackEnabled: false,
+      },
+    };
+  }
+
+  const assetParams = new URLSearchParams({
+    asset_code: cleanCode,
+    asset_issuer: input.assetIssuer ?? "",
+    limit: "1",
+  });
+  const [assetBody, issuerAccount] = await Promise.all([
+    fetchHorizonJson<{
+      _embedded?: {
+        records?: Array<{
+          amount?: string;
+          balances?: { authorized?: string };
+          accounts?: {
+            authorized?: number;
+            authorized_to_maintain_liabilities?: number;
+            unauthorized?: number;
+          };
+          num_claimable_balances?: number;
+          num_liquidity_pools?: number;
+          num_contracts?: number;
+          contracts_amount?: string;
+          claimable_balances_amount?: string;
+          liquidity_pools_amount?: string;
+          flags?: {
+            auth_required?: boolean;
+            auth_revocable?: boolean;
+            auth_immutable?: boolean;
+            auth_clawback_enabled?: boolean;
+          };
+        }>;
+      };
+    }>(input.horizonUrls, `/assets?${assetParams.toString()}`, fetchFn).catch(() => null),
+    fetchHorizonJson<{
+      home_domain?: string;
+      flags?: {
+        auth_required?: boolean;
+        auth_revocable?: boolean;
+        auth_immutable?: boolean;
+        auth_clawback_enabled?: boolean;
+      };
+    }>(input.horizonUrls, `/accounts/${encodeURIComponent(input.assetIssuer ?? "")}`, fetchFn).catch(
+      () => null,
+    ),
+  ]);
+
+  const record = assetBody?._embedded?.records?.[0];
+  const flagsSource = record?.flags ?? issuerAccount?.flags;
+  return {
+    assetCode: cleanCode,
+    assetIssuer: input.assetIssuer,
+    isNative: false,
+    sacContractId,
+    homeDomain: issuerAccount?.home_domain?.trim() || undefined,
+    supplyAmount: record?.balances?.authorized ?? record?.amount ?? "0",
+    numAccounts: record?.accounts?.authorized ?? 0,
+    ...(typeof record?.accounts?.authorized_to_maintain_liabilities === "number"
+      ? {
+          authorizedToMaintainLiabilitiesAccounts:
+            record.accounts.authorized_to_maintain_liabilities,
+        }
+      : {}),
+    ...(typeof record?.accounts?.unauthorized === "number"
+      ? { unauthorizedAccounts: record.accounts.unauthorized }
+      : {}),
+    ...(typeof record?.num_claimable_balances === "number"
+      ? { numClaimableBalances: record.num_claimable_balances }
+      : {}),
+    ...(typeof record?.num_liquidity_pools === "number"
+      ? { numLiquidityPools: record.num_liquidity_pools }
+      : {}),
+    ...(typeof record?.num_contracts === "number" ? { numContracts: record.num_contracts } : {}),
+    ...(record?.contracts_amount ? { contractsAmount: record.contracts_amount } : {}),
+    claimableBalancesAmount: record?.claimable_balances_amount,
+    liquidityPoolsAmount: record?.liquidity_pools_amount,
+    flags: {
+      authRequired: Boolean(flagsSource?.auth_required),
+      authRevocable: Boolean(flagsSource?.auth_revocable),
+      authImmutable: Boolean(flagsSource?.auth_immutable),
+      authClawbackEnabled: Boolean(flagsSource?.auth_clawback_enabled),
+    },
+  };
+}
+
+export async function fetchMarketLiquidAssets(input: {
+  horizonUrls: readonly string[];
+  limit?: number | undefined;
+  fetchFn?: FetchLike | undefined;
+}) {
+  const fetchFn = input.fetchFn ?? fetch;
+  const limit = Math.min(Math.max(input.limit ?? 15, 1), 30);
+  const [poolsBody, assetsBody] = await Promise.all([
+    fetchHorizonJson<{
+      _embedded?: {
+        records?: Array<{
+          total_shares?: string;
+          reserves?: Array<{ asset?: string; amount?: string }>;
+        }>;
+      };
+    }>(input.horizonUrls, `/liquidity_pools?limit=${limit}&order=desc`, fetchFn).catch(() => null),
+    fetchHorizonJson<{
+      _embedded?: {
+        records?: Array<{
+          asset_code?: string;
+          asset_issuer?: string;
+          amount?: string;
+          balances?: { authorized?: string };
+          accounts?: { authorized?: number };
+        }>;
+      };
+    }>(input.horizonUrls, `/assets?limit=${limit}&order=desc`, fetchFn).catch(() => null),
+  ]);
+
+  const discovered = new Map<
+    string,
+    {
+      assetCode: string;
+      assetIssuer?: ClassicAddress;
+      numAccounts?: number;
+      supplyAmount?: string;
+      isVerified: boolean;
+      hasTrustline: boolean;
+      hasLiquidityPool?: boolean | undefined;
+      poolReserveAmount?: string | undefined;
+    }
+  >();
+
+  for (const pool of poolsBody?._embedded?.records ?? []) {
+    if ((parseFinite(pool.total_shares) ?? 0) <= 0) continue;
+    for (const reserve of pool.reserves ?? []) {
+      const rawAsset = reserve.asset?.trim();
+      if (!rawAsset || rawAsset === "native" || !rawAsset.includes(":")) continue;
+      const [rawCode, rawIssuer] = rawAsset.split(":");
+      const code = rawCode?.trim();
+      const issuer = rawIssuer?.trim();
+      if (!code || !issuer || !StrKey.isValidEd25519PublicKey(issuer)) continue;
+      const reserveNum = parseFinite(reserve.amount) ?? 0;
+      if (reserveNum <= 0) continue;
+      const key = `${code.toUpperCase()}:${issuer}`;
+      const prev = discovered.get(key);
+      if (!prev || reserveNum > (parseFinite(prev.poolReserveAmount) ?? 0)) {
+        discovered.set(key, {
+          assetCode: code,
+          assetIssuer: issuer as ClassicAddress,
+          isVerified: false,
+          hasTrustline: false,
+          hasLiquidityPool: true,
+          ...(reserve.amount ? { poolReserveAmount: reserve.amount } : {}),
+        });
+      }
+    }
+  }
+
+  for (const rec of assetsBody?._embedded?.records ?? []) {
+    if (!rec.asset_code || !rec.asset_issuer || !StrKey.isValidEd25519PublicKey(rec.asset_issuer)) {
+      continue;
+    }
+    const key = `${rec.asset_code.toUpperCase()}:${rec.asset_issuer}`;
+    const existing = discovered.get(key);
+    const authorized = rec.accounts?.authorized ?? 0;
+    if (!existing && authorized <= 0) continue;
+    discovered.set(key, {
+      assetCode: rec.asset_code,
+      assetIssuer: rec.asset_issuer as ClassicAddress,
+      numAccounts: authorized,
+      supplyAmount: rec.balances?.authorized ?? rec.amount ?? "0",
+      isVerified: false,
+      hasTrustline: false,
+      ...(existing?.hasLiquidityPool ? { hasLiquidityPool: true } : {}),
+      ...(existing?.poolReserveAmount ? { poolReserveAmount: existing.poolReserveAmount } : {}),
+    });
+  }
+
+  return Array.from(discovered.values()).slice(0, limit);
+}

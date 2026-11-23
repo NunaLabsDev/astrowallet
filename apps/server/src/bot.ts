@@ -356,9 +356,10 @@ export function createTelegramBot(
   }
 
   bot.command("start", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     const keyboard = appendMiniAppButton(
       new InlineKeyboard(),
-      "🛡️ Open AstroWallet Mini App",
+      "🛡️ Open AstroWallet",
       {
         isPrivateChat: ctx.chat?.type === "private",
         config,
@@ -366,26 +367,13 @@ export function createTelegramBot(
       },
     )
       .row()
-      .url("⚡ Open AstroDex", "https://t.me/AstroDexBot/dex")
-      .url("🚀 Open AstroGate", "https://t.me/AstroGateSorobanBot/app")
-      .row()
-      .url("💬 @AstroSoroban", "https://t.me/AstroSoroban")
-      .url("📡 @AstroGateFeed", "https://t.me/AstroGateFeed");
+      .url("⚡ AstroDex", "https://t.me/AstroDexBot/dex")
+      .url("🚀 AstroGate", "https://t.me/AstroGateSorobanBot/app");
 
     const caption = [
-      `<b>AstroWallet [${networkBadge}] — Telegram Multichain Wallet</b>`,
-      "Non-custodial Stellar (G.../C...) &amp; TON wallet running inside Telegram.",
-      "",
-      "• /connect — Link or verify your SEP-0005 accounts",
-      "• /accounts · /unlink — Switch default or unlink accounts",
-      "• /balance — Live balances across linked accounts",
-      "• /pay &lt;amount&gt; &lt;asset&gt; &lt;@user|address&gt; [memo]",
-      "• /request &lt;amount&gt; &lt;asset&gt; [note]",
-      "• /split &lt;amount&gt; &lt;asset&gt; &lt;count&gt;",
-      "• /scan &lt;address|xdr&gt; — Pre-sign Scan &amp; Shield analyzer",
-      "• /swap &lt;amount&gt; &lt;from&gt; &lt;to&gt; — Soroswap / Path quote",
-      "• /reserve — Classic XLM reserve &amp; LumenWipe reclaimer",
-      "• /alerts [on|off] · /help — Alerts &amp; command guide",
+      `<b>AstroWallet</b> · <code>${networkBadge}</code>`,
+      "Non-custodial Stellar &amp; TON wallet inside Telegram.",
+      "Tap below to open your wallet, or run /help for quick commands.",
     ].join("\n");
 
     const bannerUrl = `${config.pwaOrigin.replace(/\/+$/, "")}/telegram/astrowallet-bot-banner.png`;
@@ -402,15 +390,16 @@ export function createTelegramBot(
 
   bot.command("help", async (ctx) => {
     if (!isExplicitBotMentionInGroup(ctx)) return;
-    const botHandle = ctx.me?.username ? `@${ctx.me.username}` : "the bot";
+    const botHandle = ctx.me?.username ? `@${ctx.me.username}` : "@AstroWalletAppBot";
     await ctx.reply(
       [
-        `<b>AstroWallet [${networkBadge}] Help</b>`,
-        "Your SEP-0005 seed phrase never leaves Telegram on your device. Sign transactions inside the Mini App with your PIN or biometrics.",
+        `<b>AstroWallet</b> · <code>${networkBadge}</code>`,
+        "Keys stay on your device — sign every transaction with PIN or biometrics.",
         "",
-        "<b>Commands:</b>",
-        "/connect, /unlink, /accounts, /balance, /pay, /request, /split, /scan, /swap, /reserve, /alerts",
-        `<b>Inline Mode:</b> Type <code>${botHandle} pay 10 XLM @friend</code> in any chat.`,
+        "<b>Wallet:</b> /balance · /accounts · /connect · /unlink",
+        "<b>Pay &amp; Trade:</b> /pay · /request · /split · /swap",
+        "<b>Tools:</b> /scan · /reserve · /alerts",
+        `<i>Inline:</i> <code>${botHandle} pay 10 XLM @friend</code>`,
       ].join("\n"),
       { parse_mode: "HTML" },
     );

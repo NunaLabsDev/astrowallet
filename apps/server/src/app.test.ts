@@ -3000,4 +3000,41 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(replayBoot.status).toBe(409);
   });
+
+  it("proxies SEP-0002 Federation via /v1/proxy/federation and blocks SSRF domains", async () => {
+    const repo = createMemoryRepo();
+    const targetAddr = Keypair.random().publicKey();
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url === "https://example.org/.well-known/stellar.toml") {
+          return new Response('FEDERATION_SERVER = "https://fed.example.org/federation"\n', {
+            status: 200,
+          });
+        }
+        if (url.startsWith("https://fed.example.org/federation?q=alice*example.org")) {
+          return new Response(
+            JSON.stringify({ account_id: targetAddr, memo_type: "text", memo: "hi" }),
+            { status: 200 },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    const badFormat = await app.request("/v1/proxy/federation?q=invalid", {}, TEST_ENV);
+    expect(badFormat.status).toBe(400);
+
+    const ssrfRes = await app.request("/v1/proxy/federation?q=alice*localhost", {}, TEST_ENV);
+    expect(ssrfRes.status).toBe(400);
+
+    const okRes = await app.request("/v1/proxy/federation?q=alice*example.org", {}, TEST_ENV);
+    expect(okRes.status).toBe(200);
+    expect(await okRes.json()).toEqual({
+      accountId: targetAddr,
+      memoType: "text",
+      memo: "hi",
+    });
+  });
 });

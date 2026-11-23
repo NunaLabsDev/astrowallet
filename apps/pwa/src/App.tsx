@@ -13,7 +13,13 @@ import {
   deriveCounterfactualSmartAccount,
   evaluateCloudBackupSecretStrength,
 } from "@astrowallet/stellar-core";
-import { formatNanoTon } from "@astrowallet/ton-core";
+
+function formatNanoTonDisplay(nano: string | bigint): string {
+  const val = typeof nano === "bigint" ? nano : BigInt(nano || "0");
+  const whole = val / 1_000_000_000n;
+  const frac = (val % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : `${whole}`;
+}
 import { AccountSwitcher } from "./components/AccountSwitcher.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
 import { AstroWalletLogo } from "./components/AstroWalletLogo.js";
@@ -2649,7 +2655,7 @@ function WalletShell({
                 <div key={`${m.address}-${idx}`} className="aw-list-row" style={{ flexWrap: "wrap" }}>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontWeight: 700, fontSize: 13 }} className="tabular-nums">
-                      {formatNanoTon(m.amountNano)} TON
+                      {formatNanoTonDisplay(m.amountNano)} TON
                     </div>
                     <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)", wordBreak: "break-all" }}>
                       To: <code>{m.address}</code>

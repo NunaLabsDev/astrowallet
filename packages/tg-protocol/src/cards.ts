@@ -27,16 +27,12 @@ export function formatConnectPrompt(
 ): string {
   const badge = escapeTelegramHtml(network.toUpperCase());
   const lines = [
-    `<b>Link AstroWallet [${badge}]</b>`,
-    "",
-    "Tap below to prove ownership of one or more SEP-0005 accounts using your device PIN or Fingerprint.",
-    `• Non-custodial: your seed phrase never leaves your phone.`,
-    `• Link expires in ${expiresMinutes} minutes.`,
+    `<b>Link AstroWallet</b> · <code>${badge}</code>`,
+    "Tap below to verify your wallet with PIN or biometrics (seed phrase stays on your device).",
+    `Expires in ${expiresMinutes}m.`,
   ];
   if (confirmCode) {
-    lines.push(
-      `• Verification code: <code>${escapeTelegramHtml(confirmCode)}</code> (enter in AstroWallet PWA to prove this DM belongs to you).`,
-    );
+    lines.push(`Code: <code>${escapeTelegramHtml(confirmCode)}</code>`);
   }
   return lines.join("\n");
 }
@@ -80,10 +76,9 @@ export function formatPaymentIntentCard(input: PaymentIntentCardInput): string {
     lines.push(`<b>Memo:</b> <code>${escapeTelegramHtml(input.memo)}</code>`);
   }
   if (input.txHash) {
-    lines.push(`<b>Tx Hash:</b> <code>${escapeTelegramHtml(shortenAddress(input.txHash))}</code>`);
-    lines.push(`<code>${escapeTelegramHtml(input.txHash)}</code>`);
+    lines.push(`<b>Tx:</b> <code>${escapeTelegramHtml(shortenAddress(input.txHash))}</code>`);
   } else if (input.status === "pending") {
-    lines.push("", "Authorize in AstroWallet PWA with PIN or Fingerprint.");
+    lines.push("", "Approve in AstroWallet with PIN or biometrics.");
   }
 
   return lines.join("\n");

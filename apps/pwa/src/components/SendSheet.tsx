@@ -6,7 +6,6 @@ import {
 } from "@astrowallet/domain";
 import {
   parseSep7Uri,
-  resolveFederationAddress,
   type TypedMemoInput,
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
@@ -295,7 +294,19 @@ export function SendSheet({
     setResolvingFed(true);
     setError(null);
     try {
-      const rec = await resolveFederationAddress(clean);
+      const base = config.apiBaseUrl.replace(/\/+$/, "");
+      const res = await fetch(
+        `${base}/v1/proxy/federation?q=${encodeURIComponent(clean)}`,
+      );
+      const rec = (await res.json()) as {
+        accountId?: string;
+        memoType?: string;
+        memo?: string;
+        error?: string;
+      };
+      if (!res.ok || !rec.accountId) {
+        throw new Error(rec.error ?? "Unable to resolve Stellar Federation address");
+      }
       setDestination(rec.accountId);
       if (rec.memo) {
         setMemoKind(rec.memoType === "id" ? "id" : "text");

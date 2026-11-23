@@ -62,19 +62,16 @@ import {
   type TypedMemoInput,
   type VaultAccountMetadata,
 } from "@astrowallet/stellar-core";
-import {
-  TonConnectCryptoSession,
-  buildSignedTonTransfer,
-  buildTonConnectEventsUrl,
-  buildTonConnectSuccessEvent,
-  createTonClient,
-  deriveTonAccount,
-  parseTonConnectUri,
-  sendTonConnectBridgeMessage,
-  signTonProof,
-  validateTonConnectSendTxRequest,
-  type TonAccountChainState,
-} from "@astrowallet/ton-core";
+import type { TonAccountChainState } from "@astrowallet/ton-core";
+
+function loadTonCoreRaw() {
+  return import("@astrowallet/ton-core");
+}
+let tonCorePromise: ReturnType<typeof loadTonCoreRaw> | null = null;
+function loadTonCore() {
+  tonCorePromise ??= loadTonCoreRaw();
+  return tonCorePromise;
+}
 import {
   authenticateTelegramBiometric,
   getTelegramWebApp,
@@ -476,14 +473,13 @@ export function WalletProvider({
   const chainFetchSeqRef = useRef(0);
   const tonFetchSeqRef = useRef(0);
 
-  const tonClient = useMemo(
-    () =>
-      createTonClient({
-        network: config.tonNetwork,
-        rpcUrls: config.tonRpcUrls,
-      }),
-    [config.tonNetwork, config.tonRpcUrls],
-  );
+  const getTonClient = useCallback(async () => {
+    const { createTonClient } = await loadTonCore();
+    return createTonClient({
+      network: config.tonNetwork,
+      rpcUrls: config.tonRpcUrls,
+    });
+  }, [config.tonNetwork, config.tonRpcUrls]);
 
   const showToast = useCallback(
     (message: string, kind: "success" | "info" | "error" = "success") => {
@@ -510,27 +506,40 @@ export function WalletProvider({
     [accounts, activeIndex],
   );
 
-  const tonAccount = useMemo<TonAccountSummary | null>(() => {
+  const [tonAccount, setTonAccount] = useState<TonAccountSummary | null>(null);
+
+  useEffect(() => {
     if (vaultStatus !== "unlocked" || !sessionVault.has()) {
-      return null;
+      setTonAccount(null);
+      return undefined;
     }
-    try {
-      return sessionVault.withMnemonic((mnemonic) => {
-        const derived = deriveTonAccount(
-          mnemonic,
-          activeAccount?.derivationIndex ?? activeIndex ?? 0,
-          config.tonNetwork,
-          "v4r2",
-        );
-        try {
-          return derived.toSummary();
-        } finally {
-          derived.zeroize();
+    let cancelled = false;
+    void loadTonCore()
+      .then(({ deriveTonAccount }) => {
+        if (cancelled || !sessionVault.has()) return;
+        const summary = sessionVault.withMnemonic((mnemonic) => {
+          const derived = deriveTonAccount(
+            mnemonic,
+            activeAccount?.derivationIndex ?? activeIndex ?? 0,
+            config.tonNetwork,
+            "v4r2",
+          );
+          try {
+            return derived.toSummary();
+          } finally {
+            derived.zeroize();
+          }
+        });
+        if (!cancelled) {
+          setTonAccount(summary);
         }
+      })
+      .catch(() => {
+        if (!cancelled) setTonAccount(null);
       });
-    } catch {
-      return null;
-    }
+    return () => {
+      cancelled = true;
+    };
   }, [vaultStatus, activeAccount, activeIndex, config.tonNetwork]);
 
   useEffect(() => {
@@ -675,6 +684,7 @@ export function WalletProvider({
     setLoadingTonChain(true);
     setTonChainError(null);
     try {
+      const tonClient = await getTonClient();
       const state = await tonClient.getAccountState(tonAccount.friendlyAddress);
       if (seq !== tonFetchSeqRef.current) return;
       setTonState(state);
@@ -686,7 +696,7 @@ export function WalletProvider({
         setLoadingTonChain(false);
       }
     }
-  }, [tonAccount, tonClient, config.tonRpcUrls.length]);
+  }, [tonAccount, getTonClient, config.tonRpcUrls.length]);
 
   useEffect(() => {
     if (vaultStatus === "unlocked" && tonAccount && config.tonRpcUrls.length > 0) {
@@ -711,6 +721,10 @@ export function WalletProvider({
       if (config.tonRpcUrls.length === 0) {
         throw new Error("VITE_TON_RPC_URLS is not configured");
       }
+      const [{ deriveTonAccount }, tonClient] = await Promise.all([
+        loadTonCore(),
+        getTonClient(),
+      ]);
       const res = await sessionVault.withMnemonic(async (mnemonic) => {
         const derived = deriveTonAccount(
           mnemonic,
@@ -733,7 +747,7 @@ export function WalletProvider({
       showToast(`Broadcasted ${params.amountTon} TON cleanly`);
       return res;
     },
-    [activeAccount, activeIndex, config.tonNetwork, config.tonRpcUrls.length, tonClient, refreshTonState, showToast],
+    [activeAccount, activeIndex, config.tonNetwork, config.tonRpcUrls.length, getTonClient, refreshTonState, showToast],
   );
 
   const pairTonConnectUri = useCallback(
@@ -745,6 +759,14 @@ export function WalletProvider({
         throw new Error("VITE_TON_BRIDGE_URL is not configured");
       }
 
+      const {
+        TonConnectCryptoSession,
+        buildTonConnectSuccessEvent,
+        deriveTonAccount,
+        parseTonConnectUri,
+        sendTonConnectBridgeMessage,
+        signTonProof,
+      } = await loadTonCore();
       const parsed = parseTonConnectUri(uri);
       const manifestOrigin = new URL(parsed.manifestUrl);
       let dappName = manifestOrigin.hostname;
@@ -847,6 +869,7 @@ export function WalletProvider({
 
   const disconnectTonConnectSession = useCallback(
     async (walletClientId: string) => {
+      const { TonConnectCryptoSession, sendTonConnectBridgeMessage } = await loadTonCore();
       const target = tonConnectSessionsRef.current.find(
         (s) => s.walletClientId === walletClientId,
       );
@@ -883,6 +906,12 @@ export function WalletProvider({
         (s) => s.walletClientId === req.walletClientId,
       );
       if (!sessRecord || !config.tonBridgeUrl) return;
+      const {
+        TonConnectCryptoSession,
+        buildSignedTonTransfer,
+        deriveTonAccount,
+        sendTonConnectBridgeMessage,
+      } = await loadTonCore();
       const cryptoSess = new TonConnectCryptoSession(sessRecord.walletSecretHex);
 
       if (!approved) {
@@ -905,6 +934,7 @@ export function WalletProvider({
         throw new Error("Unlock your vault to sign TON Connect transactions");
       }
 
+      const tonClient = await getTonClient();
       const bocBase64 = await sessionVault.withMnemonic(async (mnemonic) => {
         const derived = deriveTonAccount(
           mnemonic,
@@ -949,7 +979,7 @@ export function WalletProvider({
       config.tonNetwork,
       activeAccount,
       activeIndex,
-      tonClient,
+      getTonClient,
       refreshTonState,
       showToast,
     ],
@@ -966,94 +996,108 @@ export function WalletProvider({
       return undefined;
     }
 
-    const clientIds = tonConnectSessions.map((s) => s.walletClientId);
-    const lastEventId = tonConnectSessions.find((s) => s.lastEventId)?.lastEventId;
-    const eventsUrl = buildTonConnectEventsUrl(config.tonBridgeUrl, clientIds, lastEventId);
-    const source = new EventSource(eventsUrl);
+    let source: EventSource | null = null;
+    let cancelled = false;
 
-    source.onmessage = (evt: MessageEvent<string>) => {
-      try {
-        const packet = JSON.parse(evt.data) as { from?: string; message?: string };
-        if (!packet.from || !packet.message) return;
-        const matched = tonConnectSessionsRef.current.find(
-          (s) => s.dappClientId === packet.from,
-        );
-        if (!matched) return;
+    void loadTonCore().then(
+      ({
+        TonConnectCryptoSession,
+        buildTonConnectEventsUrl,
+        sendTonConnectBridgeMessage,
+        validateTonConnectSendTxRequest,
+      }) => {
+        if (cancelled) return;
+        const clientIds = tonConnectSessions.map((s) => s.walletClientId);
+        const lastEventId = tonConnectSessions.find((s) => s.lastEventId)?.lastEventId;
+        const eventsUrl = buildTonConnectEventsUrl(config.tonBridgeUrl!, clientIds, lastEventId);
+        source = new EventSource(eventsUrl);
 
-        if (evt.lastEventId) {
-          const updated = { ...matched, lastEventId: evt.lastEventId };
-          void saveTonConnectSession(updated).catch(() => undefined);
-        }
+        source.onmessage = (evt: MessageEvent<string>) => {
+          try {
+            const packet = JSON.parse(evt.data) as { from?: string; message?: string };
+            if (!packet.from || !packet.message) return;
+            const matched = tonConnectSessionsRef.current.find(
+              (s) => s.dappClientId === packet.from,
+            );
+            if (!matched) return;
 
-        const cryptoSess = new TonConnectCryptoSession(matched.walletSecretHex);
-        const decrypted = cryptoSess.decrypt(packet.message, matched.dappClientId);
-        const rpc = JSON.parse(decrypted) as {
-          id?: string;
-          method?: string;
-          params?: unknown[];
-        };
+            if (evt.lastEventId) {
+              const updated = { ...matched, lastEventId: evt.lastEventId };
+              void saveTonConnectSession(updated).catch(() => undefined);
+            }
 
-        if (rpc.method === "disconnect") {
-          void removeTonConnectSession(matched.walletClientId);
-          setTonConnectSessions((prev) =>
-            prev.filter((s) => s.walletClientId !== matched.walletClientId),
-          );
-          showToast(`${matched.dappName} disconnected`, "info");
-          return;
-        }
+            const cryptoSess = new TonConnectCryptoSession(matched.walletSecretHex);
+            const decrypted = cryptoSess.decrypt(packet.message, matched.dappClientId);
+            const rpc = JSON.parse(decrypted) as {
+              id?: string;
+              method?: string;
+              params?: unknown[];
+            };
 
-        if (rpc.method === "sendTransaction" && rpc.id) {
-          const rawFirst = rpc.params?.[0];
-          const txReq =
-            typeof rawFirst === "string"
-              ? (JSON.parse(rawFirst) as Record<string, unknown>)
-              : (rawFirst as Record<string, unknown> | undefined);
-          if (!txReq) return;
+            if (rpc.method === "disconnect") {
+              void removeTonConnectSession(matched.walletClientId);
+              setTonConnectSessions((prev) =>
+                prev.filter((s) => s.walletClientId !== matched.walletClientId),
+              );
+              showToast(`${matched.dappName} disconnected`, "info");
+              return;
+            }
 
-          const validated = validateTonConnectSendTxRequest(
-            {
-              id: rpc.id,
-              validUntil:
-                typeof txReq.validUntil === "number" ? txReq.validUntil : undefined,
-              network: typeof txReq.network === "string" ? txReq.network : undefined,
-              from: typeof txReq.from === "string" ? txReq.from : undefined,
-              messages: Array.isArray(txReq.messages) ? txReq.messages : [],
-            },
-            config.tonNetwork,
-          );
+            if (rpc.method === "sendTransaction" && rpc.id) {
+              const rawFirst = rpc.params?.[0];
+              const txReq =
+                typeof rawFirst === "string"
+                  ? (JSON.parse(rawFirst) as Record<string, unknown>)
+                  : (rawFirst as Record<string, unknown> | undefined);
+              if (!txReq) return;
 
-          if (!validated.ok) {
-            const errJson = JSON.stringify({
-              id: rpc.id,
-              error: { code: validated.code, message: validated.message },
-            });
-            void sendTonConnectBridgeMessage({
-              bridgeUrl: config.tonBridgeUrl!,
-              clientId: matched.walletClientId,
-              to: matched.dappClientId,
-              payloadBase64: cryptoSess.encrypt(errJson, matched.dappClientId),
-            }).catch(() => undefined);
-            return;
+              const validated = validateTonConnectSendTxRequest(
+                {
+                  id: rpc.id,
+                  validUntil:
+                    typeof txReq.validUntil === "number" ? txReq.validUntil : undefined,
+                  network: typeof txReq.network === "string" ? txReq.network : undefined,
+                  from: typeof txReq.from === "string" ? txReq.from : undefined,
+                  messages: Array.isArray(txReq.messages) ? txReq.messages : [],
+                },
+                config.tonNetwork,
+              );
+
+              if (!validated.ok) {
+                const errJson = JSON.stringify({
+                  id: rpc.id,
+                  error: { code: validated.code, message: validated.message },
+                });
+                void sendTonConnectBridgeMessage({
+                  bridgeUrl: config.tonBridgeUrl!,
+                  clientId: matched.walletClientId,
+                  to: matched.dappClientId,
+                  payloadBase64: cryptoSess.encrypt(errJson, matched.dappClientId),
+                }).catch(() => undefined);
+                return;
+              }
+
+              triggerTelegramHaptic("warning");
+              setPendingTonConnectTx({
+                requestId: rpc.id,
+                walletClientId: matched.walletClientId,
+                dappClientId: matched.dappClientId,
+                dappName: matched.dappName,
+                dappUrl: matched.dappUrl,
+                validUntil: validated.validUntil,
+                messages: validated.messages,
+              });
+            }
+          } catch {
+            // Ignore malformed bridge events
           }
-
-          triggerTelegramHaptic("warning");
-          setPendingTonConnectTx({
-            requestId: rpc.id,
-            walletClientId: matched.walletClientId,
-            dappClientId: matched.dappClientId,
-            dappName: matched.dappName,
-            dappUrl: matched.dappUrl,
-            validUntil: validated.validUntil,
-            messages: validated.messages,
-          });
-        }
-      } catch {
-        // Ignore malformed bridge events
-      }
-    };
+        };
+      },
+    );
 
     return () => {
-      source.close();
+      cancelled = true;
+      source?.close();
     };
   }, [vaultStatus, config.tonBridgeUrl, config.tonNetwork, tonConnectSessions, showToast]);
 

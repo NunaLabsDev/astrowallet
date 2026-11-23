@@ -257,17 +257,19 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     );
   });
 
-  router.get("/stellar-toml", async (c) => {
-    const domain = (c.req.query("domain") ?? "").trim().toLowerCase();
+  async function fetchSafeStellarToml(
+    domain: string,
+    cache: KVNamespace | undefined,
+  ): Promise<{ ok: true; text: string } | { ok: false; status: 400 | 413 | 502; error: string }> {
     if (!isSafePublicDomain(domain)) {
-      return c.json({ error: "Invalid public issuer domain" }, 400);
+      return { ok: false, status: 400, error: "Invalid public issuer domain" };
     }
 
     const cacheKey = `toml:${domain}`;
-    if (c.env.CACHE) {
-      const cached = await c.env.CACHE.get(cacheKey);
+    if (cache) {
+      const cached = await cache.get(cacheKey);
       if (cached) {
-        return c.text(cached, 200);
+        return { ok: true, text: cached };
       }
     }
 
@@ -291,7 +293,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             nextUrl.protocol !== "https:" ||
             !isSafePublicDomain(nextUrl.hostname.toLowerCase())
           ) {
-            return c.json({ error: "Unsafe stellar.toml redirect blocked" }, 502);
+            return { ok: false, status: 502, error: "Unsafe stellar.toml redirect blocked" };
           }
           currentUrl = nextUrl.toString();
           continue;
@@ -300,15 +302,15 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         break;
       }
     } catch {
-      return c.json({ error: `Unable to fetch stellar.toml from ${domain}` }, 502);
+      return { ok: false, status: 502, error: `Unable to fetch stellar.toml from ${domain}` };
     }
     if (!res || !res.ok) {
-      return c.json({ error: `Unable to fetch stellar.toml from ${domain}` }, 502);
+      return { ok: false, status: 502, error: `Unable to fetch stellar.toml from ${domain}` };
     }
 
     const declaredLength = Number(res.headers.get("Content-Length") ?? "0");
     if (Number.isFinite(declaredLength) && declaredLength > STELLAR_TOML_MAX_BYTES) {
-      return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
+      return { ok: false, status: 413, error: "stellar.toml exceeds the 128 KB limit" };
     }
 
     let text: string;
@@ -323,7 +325,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         totalBytes += value.byteLength;
         if (totalBytes > STELLAR_TOML_MAX_BYTES) {
           await reader.cancel().catch(() => {});
-          return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
+          return { ok: false, status: 413, error: "stellar.toml exceeds the 128 KB limit" };
         }
         chunks.push(value);
       }
@@ -337,13 +339,79 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     } else {
       text = await res.text();
       if (new TextEncoder().encode(text).length > STELLAR_TOML_MAX_BYTES) {
-        return c.json({ error: "stellar.toml exceeds the 128 KB limit" }, 413);
+        return { ok: false, status: 413, error: "stellar.toml exceeds the 128 KB limit" };
       }
     }
-    if (c.env.CACHE) {
-      await c.env.CACHE.put(cacheKey, text, { expirationTtl: 900 });
+    if (cache) {
+      await cache.put(cacheKey, text, { expirationTtl: 900 });
     }
-    return c.text(text, 200);
+    return { ok: true, text };
+  }
+
+  router.get("/stellar-toml", async (c) => {
+    const domain = (c.req.query("domain") ?? "").trim().toLowerCase();
+    const tomlRes = await fetchSafeStellarToml(domain, c.env.CACHE);
+    if (!tomlRes.ok) {
+      return c.json({ error: tomlRes.error }, tomlRes.status);
+    }
+    return c.text(tomlRes.text, 200);
+  });
+
+  router.get("/federation", async (c) => {
+    const q = (c.req.query("q") ?? "").trim();
+    const match = /^([^*\s]{1,64})\*([a-z0-9.-]+)$/i.exec(q);
+    if (!match?.[1] || !match[2]) {
+      return c.json({ error: "Expected SEP-0002 address in user*domain format" }, 400);
+    }
+    const domain = match[2].toLowerCase();
+    const tomlRes = await fetchSafeStellarToml(domain, c.env.CACHE);
+    if (!tomlRes.ok) {
+      return c.json({ error: tomlRes.error }, tomlRes.status);
+    }
+    const fedMatch = /^\s*FEDERATION_SERVER\s*=\s*"([^"]+)"/m.exec(tomlRes.text);
+    if (!fedMatch?.[1]) {
+      return c.json({ error: `No FEDERATION_SERVER found in ${domain}/stellar.toml` }, 404);
+    }
+    let fedUrl: URL;
+    try {
+      fedUrl = new URL(fedMatch[1].trim());
+    } catch {
+      return c.json({ error: "Invalid FEDERATION_SERVER URL" }, 502);
+    }
+    if (fedUrl.protocol !== "https:" || !isSafePublicDomain(fedUrl.hostname.toLowerCase())) {
+      return c.json({ error: "Unsafe FEDERATION_SERVER URL blocked" }, 502);
+    }
+    fedUrl.searchParams.set("q", q);
+    fedUrl.searchParams.set("type", "name");
+
+    try {
+      const res = await fetchFn(fedUrl.toString(), {
+        headers: { Accept: "application/json" },
+        redirect: "manual",
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) {
+        return c.json({ error: `Federation lookup failed (${res.status})` }, 502);
+      }
+      const data = (await res.json()) as {
+        account_id?: string;
+        memo_type?: string;
+        memo?: string | number;
+      };
+      const parsedAddr = StellarAddressSchema.safeParse(data.account_id);
+      if (!parsedAddr.success) {
+        return c.json({ error: "Federation server returned invalid Stellar address" }, 502);
+      }
+      return c.json({
+        accountId: parsedAddr.data,
+        ...(typeof data.memo_type === "string" && data.memo_type
+          ? { memoType: data.memo_type }
+          : {}),
+        ...(data.memo !== undefined && data.memo !== null ? { memo: String(data.memo) } : {}),
+      });
+    } catch {
+      return c.json({ error: `Unable to reach federation server for ${domain}` }, 502);
+    }
   });
 
   router.post("/soroswap/quote", async (c) => {

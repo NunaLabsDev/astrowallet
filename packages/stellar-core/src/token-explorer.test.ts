@@ -3,6 +3,7 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import {
   discoverLiquidHorizonAssets,
+  fetchHeldAssetsTomlMetadata,
   fetchTokenOnChainDetails,
   fetchTokenOrderbookAgainstXlm,
   fetchTokenPriceHistoryAgainstXlm,
@@ -388,5 +389,74 @@ anchor_asset = "USD"
     expect(issuedWithToml.orgName).toBe("Circle Internet Financial");
     expect(issuedWithToml.isAssetAnchored).toBe(true);
     expect(issuedWithToml.anchorAsset).toBe("USD");
+  });
+
+  it("enforces strict [[CURRENCIES]] matching (no ORG_LOGO or unlisted fallback) and resolves held-asset stellar.toml metadata", async () => {
+    const tomlWithOrgLogoOnly = `
+[DOCUMENTATION]
+ORG_NAME = "Example Org"
+ORG_LOGO = "https://example.org/org-logo.png"
+
+[[CURRENCIES]]
+code = "EURC"
+issuer = "${ISSUER_USDC}"
+name = "Euro Coin"
+`;
+    expect(parseStellarTomlForAsset(tomlWithOrgLogoOnly, "USDC", ISSUER_USDC)).toBeNull();
+
+    const matchedNoCurrencyImage = parseStellarTomlForAsset(
+      tomlWithOrgLogoOnly,
+      "EURC",
+      ISSUER_USDC,
+    );
+    expect(matchedNoCurrencyImage).toMatchObject({
+      code: "EURC",
+      issuer: ISSUER_USDC,
+      name: "Euro Coin",
+      orgName: "Example Org",
+    });
+    expect(matchedNoCurrencyImage?.image).toBeUndefined();
+
+    const issuerNoImage = Keypair.random().publicKey() as ClassicAddress;
+    const heldMeta = await fetchHeldAssetsTomlMetadata({
+      horizonUrls: ["https://horizon-test.example"],
+      assets: [
+        { assetCode: "XLM" },
+        { assetCode: "USDC", assetIssuer: ISSUER_USDC },
+        { assetCode: "EURC", assetIssuer: issuerNoImage },
+      ],
+      apiBaseUrl: "https://api-test.example",
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url.includes(`/accounts/${ISSUER_USDC}`)) {
+          return new Response(JSON.stringify({ home_domain: "circle.com" }), { status: 200 });
+        }
+        if (url.includes(`/accounts/${issuerNoImage}`)) {
+          return new Response(JSON.stringify({}), { status: 200 });
+        }
+        if (url.includes("domain=circle.com")) {
+          return new Response(
+            `[[CURRENCIES]]\ncode = "USDC"\nissuer = "${ISSUER_USDC}"\nname = "USD Coin"\nimage = "https://circle.com/usdc.png"\n`,
+            { status: 200 },
+          );
+        }
+        return new Response("", { status: 404 });
+      },
+    });
+
+    expect(heldMeta[`USDC:${ISSUER_USDC}`]).toMatchObject({
+      assetCode: "USDC",
+      assetIssuer: ISSUER_USDC,
+      homeDomain: "circle.com",
+      name: "USD Coin",
+      image: "https://circle.com/usdc.png",
+      tomlMatched: true,
+    });
+    expect(heldMeta[`EURC:${issuerNoImage}`]).toMatchObject({
+      assetCode: "EURC",
+      assetIssuer: issuerNoImage,
+      tomlMatched: false,
+    });
+    expect(heldMeta[`EURC:${issuerNoImage}`]?.image).toBeUndefined();
   });
 });

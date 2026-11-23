@@ -339,11 +339,11 @@ export function TonWalletSheet() {
 
             {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
 
-            <div style={{ display: "flex", gap: 8 }}>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <button
                 type="button"
                 className="aw-btn-secondary"
-                style={{ flex: 1 }}
+                style={{ flex: "1 1 100px" }}
                 disabled={busy}
                 onClick={() => {
                   setErrorMsg(null);

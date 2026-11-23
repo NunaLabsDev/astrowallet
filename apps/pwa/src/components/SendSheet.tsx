@@ -18,6 +18,8 @@ import {
   validateTransferAmount,
 } from "./flow-validators.js";
 import { HighValueReauthGate } from "./HighValueReauthGate.js";
+import { TokenBadge } from "./TokenBadge.js";
+import { classifyTokenTrust } from "./token-catalog.js";
 import {
   IconCheck,
   IconClose,
@@ -84,6 +86,8 @@ export function SendSheet({
     accounts,
     accountState,
     contacts,
+    verifiedAssets,
+    tokenMetaMap,
     sendPayment,
     saveContact,
     showToast,
@@ -133,6 +137,34 @@ export function SendSheet({
       },
     [availableAssets, selectedAssetKey],
   );
+
+  const selectedAssetTrust = useMemo(
+    () =>
+      classifyTokenTrust({
+        assetCode: selectedBalance.assetCode,
+        assetIssuer: selectedBalance.assetIssuer,
+        verifiedAssets,
+      }),
+    [selectedBalance.assetCode, selectedBalance.assetIssuer, verifiedAssets],
+  );
+
+  const selectedAssetToml = selectedBalance.assetIssuer
+    ? tokenMetaMap[`${selectedBalance.assetCode.toUpperCase()}:${selectedBalance.assetIssuer}`]
+    : undefined;
+  const selectedAssetVerified = selectedBalance.assetIssuer
+    ? verifiedAssets.find(
+        (v) =>
+          v.code.toUpperCase() === selectedBalance.assetCode.toUpperCase() &&
+          v.issuer === selectedBalance.assetIssuer,
+      )
+    : undefined;
+  const selectedAssetIcon = selectedAssetToml?.image ?? selectedAssetVerified?.icon;
+  const selectedAssetFallbackIcon =
+    selectedAssetVerified?.icon && selectedAssetVerified.icon !== selectedAssetIcon
+      ? selectedAssetVerified.icon
+      : undefined;
+  const isSelectedNative =
+    selectedBalance.assetCode.toUpperCase() === "XLM" && !selectedBalance.assetIssuer;
 
   const maxSpendableNumber = useMemo(() => {
     const isNative = selectedBalance.assetCode === "XLM" && !selectedBalance.assetIssuer;
@@ -533,7 +565,7 @@ export function SendSheet({
         </div>
       ) : reviewPending ? (
         <div className="aw-review-card">
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
             <span style={{ fontWeight: 700, fontSize: 15 }}>Review Stellar Transfer</span>
             <span
               className={`glass-pill ${
@@ -544,8 +576,21 @@ export function SendSheet({
             </span>
           </div>
 
-          <div className="aw-review-amount tabular-nums">
-            {reviewPending.amount} <span>{reviewPending.assetCode}</span>
+          <div
+            className="aw-review-amount tabular-nums"
+            style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, flexWrap: "wrap" }}
+          >
+            <TokenBadge
+              code={reviewPending.assetCode}
+              icon={selectedAssetIcon}
+              fallbackIcon={selectedAssetFallbackIcon}
+              isNative={!reviewPending.assetIssuer && reviewPending.assetCode.toUpperCase() === "XLM"}
+              size={30}
+              trustStatus={selectedAssetTrust.status}
+            />
+            <span>
+              {reviewPending.amount} <span>{reviewPending.assetCode}</span>
+            </span>
           </div>
 
           <div className="aw-review-rows">
@@ -607,11 +652,11 @@ export function SendSheet({
             </div>
           )}
 
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="button"
               className="aw-btn-secondary"
-              style={{ flex: 1 }}
+              style={{ flex: "1 1 100px" }}
               disabled={busy}
               onClick={() => {
                 setError(null);
@@ -624,7 +669,7 @@ export function SendSheet({
             <button
               type="button"
               className="aw-btn-primary"
-              style={{ flex: 2 }}
+              style={{ flex: "2 1 160px" }}
               disabled={
                 busy ||
                 (requiresHighValueReauth({
@@ -806,9 +851,19 @@ export function SendSheet({
           {/* Asset Selector & Amount */}
           <div className="aw-two-col-inputs">
             <div>
-              <label className="aw-label" htmlFor="send-asset-select">
-                Asset to Send
-              </label>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6 }}>
+                <TokenBadge
+                  code={selectedBalance.assetCode}
+                  icon={selectedAssetIcon}
+                  fallbackIcon={selectedAssetFallbackIcon}
+                  isNative={isSelectedNative}
+                  size={20}
+                  trustStatus={selectedAssetTrust.status}
+                />
+                <label className="aw-label" htmlFor="send-asset-select" style={{ marginBottom: 0 }}>
+                  Asset to Send
+                </label>
+              </div>
               <select
                 id="send-asset-select"
                 className="aw-input"

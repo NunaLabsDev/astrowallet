@@ -18,6 +18,7 @@ export interface StellarTomlCurrencyMeta {
   name?: string | undefined;
   desc?: string | undefined;
   image?: string | undefined;
+  linkedTomlUrl?: string | undefined;
   conditions?: string | undefined;
   isAssetAnchored?: boolean | undefined;
   anchorAsset?: string | undefined;
@@ -302,7 +303,6 @@ export function parseStellarTomlForAsset(
   let section: "root" | "documentation" | "currency" | "other" = "root";
   let orgName: string | undefined;
   let orgUrl: string | undefined;
-  let orgLogo: string | undefined;
   const currencies: Array<Record<string, string | boolean>> = [];
   let currentCurrency: Record<string, string | boolean> | null = null;
 
@@ -310,7 +310,7 @@ export function parseStellarTomlForAsset(
     const cleanLine = stripTomlInlineComment(rawLine).trim();
     if (!cleanLine) continue;
 
-    if (cleanLine === "[[CURRENCIES]]") {
+    if (cleanLine.toUpperCase() === "[[CURRENCIES]]") {
       currentCurrency = {};
       currencies.push(currentCurrency);
       section = "currency";
@@ -338,8 +338,6 @@ export function parseStellarTomlForAsset(
         orgName = val.trim() || orgName;
       } else if (key === "ORG_URL" && typeof val === "string") {
         orgUrl = cleanHttpsUrl(val) ?? orgUrl;
-      } else if (key === "ORG_LOGO" && typeof val === "string") {
-        orgLogo = cleanHttpsUrl(val) ?? orgLogo;
       }
     }
   }
@@ -352,35 +350,67 @@ export function parseStellarTomlForAsset(
     return true;
   });
 
-  if (!matched && !orgName && !orgLogo) {
+  if (!matched) {
     return null;
   }
 
-  const currencyImage =
-    matched && typeof matched.image === "string" ? cleanHttpsUrl(matched.image) : undefined;
-  const resolvedImage = currencyImage ?? orgLogo;
+  const resolvedImage =
+    typeof matched.image === "string" ? cleanHttpsUrl(matched.image) : undefined;
+  const linkedTomlUrl =
+    typeof matched.toml === "string" ? cleanHttpsUrl(matched.toml) : undefined;
 
   return {
     code: targetCode,
-    ...(matched && typeof matched.issuer === "string" ? { issuer: matched.issuer.trim() } : {}),
-    ...(matched && typeof matched.name === "string" && matched.name.trim()
+    ...(typeof matched.issuer === "string" ? { issuer: matched.issuer.trim() } : {}),
+    ...(typeof matched.name === "string" && matched.name.trim()
       ? { name: matched.name.trim() }
       : {}),
-    ...(matched && typeof matched.desc === "string" && matched.desc.trim()
+    ...(typeof matched.desc === "string" && matched.desc.trim()
       ? { desc: matched.desc.trim() }
       : {}),
     ...(resolvedImage ? { image: resolvedImage } : {}),
-    ...(matched && typeof matched.conditions === "string" && matched.conditions.trim()
+    ...(linkedTomlUrl ? { linkedTomlUrl } : {}),
+    ...(typeof matched.conditions === "string" && matched.conditions.trim()
       ? { conditions: matched.conditions.trim() }
       : {}),
-    ...(matched && typeof matched.is_asset_anchored === "boolean"
+    ...(typeof matched.is_asset_anchored === "boolean"
       ? { isAssetAnchored: matched.is_asset_anchored }
       : {}),
-    ...(matched && typeof matched.anchor_asset === "string" && matched.anchor_asset.trim()
+    ...(typeof matched.anchor_asset === "string" && matched.anchor_asset.trim()
       ? { anchorAsset: matched.anchor_asset.trim() }
       : {}),
     ...(orgName ? { orgName } : {}),
     ...(orgUrl ? { orgUrl } : {}),
+  };
+}
+
+function parseLinkedCurrencyTomlFields(tomlText: string): Partial<StellarTomlCurrencyMeta> {
+  const fields: Record<string, string | boolean> = {};
+  for (const rawLine of tomlText.split(/\r?\n/)) {
+    const cleanLine = stripTomlInlineComment(rawLine).trim();
+    if (!cleanLine || cleanLine.startsWith("[")) continue;
+    const eqIdx = cleanLine.indexOf("=");
+    if (eqIdx <= 0) continue;
+    const key = cleanLine.slice(0, eqIdx).trim();
+    const val = parseTomlScalarValue(cleanLine.slice(eqIdx + 1));
+    if (val !== undefined) {
+      fields[key] = val;
+    }
+  }
+  const image = typeof fields.image === "string" ? cleanHttpsUrl(fields.image) : undefined;
+  return {
+    ...(typeof fields.name === "string" && fields.name.trim() ? { name: fields.name.trim() } : {}),
+    ...(typeof fields.desc === "string" && fields.desc.trim() ? { desc: fields.desc.trim() } : {}),
+    ...(image ? { image } : {}),
+    ...(typeof fields.conditions === "string" && fields.conditions.trim()
+      ? { conditions: fields.conditions.trim() }
+      : {}),
+    ...(typeof fields.is_asset_anchored === "boolean"
+      ? { isAssetAnchored: fields.is_asset_anchored }
+      : {}),
+    ...(typeof fields.anchor_asset === "string" && fields.anchor_asset.trim()
+      ? { anchorAsset: fields.anchor_asset.trim() }
+      : {}),
   };
 }
 
@@ -459,9 +489,148 @@ export async function fetchAssetStellarTomlMeta(input: {
     });
   }
 
-  return tomlText
+  const parsed = tomlText
     ? parseStellarTomlForAsset(tomlText, input.assetCode, input.assetIssuer)
     : null;
+
+  if (parsed?.linkedTomlUrl && !parsed.image) {
+    try {
+      const linkedRes = await fetchFn(parsed.linkedTomlUrl, {
+        headers: { Accept: "text/plain" },
+      });
+      if (linkedRes.ok) {
+        const linkedText = await linkedRes.text();
+        const linkedMeta =
+          parseStellarTomlForAsset(linkedText, input.assetCode, input.assetIssuer) ??
+          parseLinkedCurrencyTomlFields(linkedText);
+        return {
+          ...parsed,
+          name: parsed.name ?? linkedMeta.name,
+          desc: parsed.desc ?? linkedMeta.desc,
+          image: parsed.image ?? linkedMeta.image,
+          conditions: parsed.conditions ?? linkedMeta.conditions,
+          isAssetAnchored: parsed.isAssetAnchored ?? linkedMeta.isAssetAnchored,
+          anchorAsset: parsed.anchorAsset ?? linkedMeta.anchorAsset,
+        };
+      }
+    } catch {
+      // Non-fatal if linked currency TOML is unreachable
+    }
+  }
+
+  return parsed;
+}
+
+const issuerHomeDomainCache = new Map<string, { expiresAt: number; domain: string | null }>();
+
+export interface HeldTokenTomlMetadata {
+  assetCode: string;
+  assetIssuer: ClassicAddress;
+  homeDomain?: string | undefined;
+  name?: string | undefined;
+  desc?: string | undefined;
+  image?: string | undefined;
+  orgName?: string | undefined;
+  orgUrl?: string | undefined;
+  tomlMatched: boolean;
+}
+
+/**
+ * Resolves live SEP-1 `stellar.toml` metadata and real currency logos for held Stellar assets.
+ */
+export async function fetchHeldAssetsTomlMetadata(input: {
+  horizonUrls: readonly string[];
+  assets: ReadonlyArray<{
+    assetCode: string;
+    assetIssuer?: string | undefined;
+    knownDomain?: string | undefined;
+  }>;
+  apiBaseUrl?: string | undefined;
+  fetchFn?: typeof fetch | undefined;
+}): Promise<Record<string, HeldTokenTomlMetadata>> {
+  const fetchFn = input.fetchFn ?? fetch;
+  const useCache = !input.fetchFn;
+  const deduped = new Map<
+    string,
+    { assetCode: string; assetIssuer: ClassicAddress; knownDomain?: string | undefined }
+  >();
+
+  for (const item of input.assets) {
+    const code = item.assetCode.trim();
+    const issuer = item.assetIssuer?.trim();
+    if (!code || (code.toUpperCase() === "XLM" && !issuer)) continue;
+    if (!issuer || !StrKey.isValidEd25519PublicKey(issuer)) continue;
+    const key = `${code.toUpperCase()}:${issuer}`;
+    if (!deduped.has(key)) {
+      deduped.set(key, {
+        assetCode: code,
+        assetIssuer: issuer as ClassicAddress,
+        knownDomain: item.knownDomain?.trim() || undefined,
+      });
+    }
+  }
+
+  const out: Record<string, HeldTokenTomlMetadata> = {};
+  await Promise.all(
+    Array.from(deduped.entries()).map(async ([key, asset]) => {
+      let homeDomain = asset.knownDomain;
+      if (!homeDomain) {
+        const now = Date.now();
+        const cached = useCache ? issuerHomeDomainCache.get(asset.assetIssuer) : undefined;
+        if (cached && cached.expiresAt > now) {
+          homeDomain = cached.domain ?? undefined;
+        } else {
+          try {
+            const acc = await fetchJsonWithHorizonFailover<{ home_domain?: string }>(
+              input.horizonUrls,
+              `/accounts/${encodeURIComponent(asset.assetIssuer)}`,
+              fetchFn,
+            );
+            homeDomain = acc?.home_domain?.trim() || undefined;
+            if (useCache) {
+              issuerHomeDomainCache.set(asset.assetIssuer, {
+                expiresAt: now + STELLAR_TOML_CACHE_TTL_MS,
+                domain: homeDomain ?? null,
+              });
+            }
+          } catch {
+            homeDomain = undefined;
+          }
+        }
+      }
+
+      if (!homeDomain) {
+        out[key] = {
+          assetCode: asset.assetCode,
+          assetIssuer: asset.assetIssuer,
+          tomlMatched: false,
+        };
+        return;
+      }
+
+      const meta = await fetchAssetStellarTomlMeta({
+        domain: homeDomain,
+        assetCode: asset.assetCode,
+        assetIssuer: asset.assetIssuer,
+        apiBaseUrl: input.apiBaseUrl,
+        fetchFn,
+      }).catch(() => null);
+
+      out[key] = {
+        assetCode: asset.assetCode,
+        assetIssuer: asset.assetIssuer,
+        homeDomain,
+        ...(meta?.name ? { name: meta.name } : {}),
+        ...(meta?.desc ? { desc: meta.desc } : {}),
+        ...(meta?.image ? { image: meta.image } : {}),
+        ...(meta?.orgName ? { orgName: meta.orgName } : {}),
+        ...(meta?.orgUrl ? { orgUrl: meta.orgUrl } : {}),
+        tomlMatched: Boolean(meta),
+      };
+    }),
+  );
+
+  return out;
 }
 
 async function enrichCatalogItemsWithToml(
@@ -470,7 +639,7 @@ async function enrichCatalogItemsWithToml(
   fetchFn: typeof fetch,
 ): Promise<TokenCatalogItem[]> {
   if (!apiBaseUrl) return items;
-  const candidates = items.filter((item) => Boolean(item.domain)).slice(0, 8);
+  const candidates = items.filter((item) => Boolean(item.domain)).slice(0, 16);
   if (candidates.length === 0) return items;
 
   const enrichedMap = new Map<string, StellarTomlCurrencyMeta | null>();
@@ -493,8 +662,8 @@ async function enrichCatalogItemsWithToml(
     if (!meta) return item;
     return {
       ...item,
-      ...(meta.name || meta.orgName ? { name: item.name ?? meta.name ?? meta.orgName } : {}),
-      ...(meta.image ? { icon: item.icon ?? meta.image } : {}),
+      ...(meta.name || meta.orgName ? { name: meta.name ?? item.name ?? meta.orgName } : {}),
+      ...(meta.image ? { icon: meta.image } : {}),
     };
   });
 }

@@ -20,6 +20,15 @@ function formatNanoTonDisplay(nano: string | bigint): string {
   const frac = (val % 1_000_000_000n).toString().padStart(9, "0").replace(/0+$/, "");
   return frac ? `${whole}.${frac}` : `${whole}`;
 }
+
+function formatAssetBalance(raw: string): string {
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num === 0) return "0.00";
+  if (Math.abs(num) >= 1) {
+    return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  }
+  return num.toFixed(7).replace(/\.?0+$/, "");
+}
 import { AccountSwitcher } from "./components/AccountSwitcher.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
 import { AstroWalletLogo } from "./components/AstroWalletLogo.js";
@@ -407,6 +416,7 @@ function WalletShell({
     fingerprintSupported,
     fingerprintEnrolled,
     verifiedAssets,
+    tokenMetaMap,
     tonAccount,
     tonConnectSessions,
     pendingTonConnectTx,
@@ -1344,129 +1354,123 @@ function WalletShell({
                         {accountState?.balances && accountState.balances.length > 0 ? (
                           <div style={{ display: "grid", gap: 8 }}>
                             {accountState.balances.map((b) => {
+                              const isNativeAsset = b.assetCode === "XLM" && !b.assetIssuer;
                               const matchedVerified = verifiedAssets.find(
                                 (v) =>
                                   v.code.toUpperCase() === b.assetCode.toUpperCase() &&
                                   v.issuer === b.assetIssuer,
                               );
+                              const tomlMeta = b.assetIssuer
+                                ? tokenMetaMap[`${b.assetCode.toUpperCase()}:${b.assetIssuer}`]
+                                : undefined;
+                              const resolvedIcon = tomlMeta?.image ?? matchedVerified?.icon;
+                              const resolvedFallbackIcon =
+                                tomlMeta?.image &&
+                                matchedVerified?.icon &&
+                                matchedVerified.icon !== tomlMeta.image
+                                  ? matchedVerified.icon
+                                  : undefined;
+                              const resolvedName = tomlMeta?.name ?? matchedVerified?.name;
+                              const resolvedDomain = tomlMeta?.homeDomain ?? matchedVerified?.domain;
                               const trust = classifyTokenTrust({
                                 assetCode: b.assetCode,
                                 assetIssuer: b.assetIssuer,
                                 verifiedAssets,
                               });
+                              const explorerTarget: SelectedTokenTarget = {
+                                assetCode: b.assetCode,
+                                assetIssuer: b.assetIssuer,
+                                name: resolvedName,
+                                domain: resolvedDomain,
+                                icon: resolvedIcon,
+                              };
                               return (
                                 <div
                                   key={`${b.assetCode}:${b.assetIssuer ?? "native"}`}
-                                  className="aw-list-row"
+                                  className="aw-balance-row"
                                 >
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      openTokenExplorer({
-                                        assetCode: b.assetCode,
-                                        assetIssuer: b.assetIssuer,
-                                        name: matchedVerified?.name,
-                                        domain: matchedVerified?.domain,
-                                        icon: matchedVerified?.icon,
-                                      })
-                                    }
-                                    style={{
-                                      display: "flex",
-                                      alignItems: "center",
-                                      gap: 10,
-                                      background: "transparent",
-                                      border: "none",
-                                      padding: 0,
-                                      color: "inherit",
-                                      fontFamily: "inherit",
-                                      cursor: "pointer",
-                                      textAlign: "left",
-                                      minWidth: 0,
-                                      flex: "1 1 160px",
-                                    }}
-                                  >
-                                    <TokenBadge
-                                      code={b.assetCode}
-                                      icon={matchedVerified?.icon}
-                                      size={36}
-                                      trustStatus={trust.status}
-                                    />
-                                    <div style={{ minWidth: 0 }}>
-                                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                                        <span style={{ fontWeight: 700, fontSize: 14 }}>{b.assetCode}</span>
-                                        {(b.isVerifiedAsset || trust.status === "official") && (
-                                          <span className="glass-pill glass-pill--trust" style={{ padding: "1px 6px", fontSize: 10 }}>
-                                            ✓ Official
-                                          </span>
-                                        )}
+                                  <div className="aw-balance-row-top">
+                                    <button
+                                      type="button"
+                                      className="aw-balance-row-main"
+                                      onClick={() => openTokenExplorer(explorerTarget)}
+                                    >
+                                      <TokenBadge
+                                        code={b.assetCode}
+                                        icon={resolvedIcon}
+                                        fallbackIcon={resolvedFallbackIcon}
+                                        isNative={isNativeAsset}
+                                        size={36}
+                                        trustStatus={trust.status}
+                                      />
+                                      <div style={{ minWidth: 0, flex: 1 }}>
+                                        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                                          <span style={{ fontWeight: 700, fontSize: 14 }}>{b.assetCode}</span>
+                                          {(b.isVerifiedAsset || trust.status === "official") && (
+                                            <span className="glass-pill glass-pill--trust" style={{ padding: "1px 6px", fontSize: 10 }}>
+                                              ✓ Official
+                                            </span>
+                                          )}
+                                        </div>
+                                        <div
+                                          style={{
+                                            fontSize: 11,
+                                            color: "var(--aw-ink-secondary)",
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap",
+                                          }}
+                                        >
+                                          {resolvedDomain
+                                            ? resolvedName
+                                              ? `${resolvedName} · ${resolvedDomain}`
+                                              : resolvedDomain
+                                            : b.assetIssuer
+                                              ? `${b.assetIssuer.slice(0, 6)}…${b.assetIssuer.slice(-4)}`
+                                              : "Native Stellar Lumen"}
+                                        </div>
                                       </div>
-                                      <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)", overflowWrap: "anywhere" }}>
-                                        {matchedVerified?.domain
-                                          ? matchedVerified.domain
-                                          : b.assetIssuer
-                                            ? `${b.assetIssuer.slice(0, 6)}…${b.assetIssuer.slice(-4)}`
-                                            : "Native Stellar Lumen"}
-                                      </div>
-                                    </div>
-                                  </button>
+                                    </button>
 
-                                <div
-                                  style={{
-                                    display: "flex",
-                                    alignItems: "center",
-                                    gap: 8,
-                                    marginLeft: "auto",
-                                    minWidth: 0,
-                                    maxWidth: "100%",
-                                    flexWrap: "wrap",
-                                    justifyContent: "flex-end",
-                                  }}
-                                >
-                                  <div style={{ textAlign: "right", minWidth: 0, maxWidth: "100%" }}>
-                                    <div className="tabular-nums" style={{ fontWeight: 700, fontSize: 14 }}>
-                                      {Number(b.balance).toFixed(4)}
-                                    </div>
-                                    <div style={{ display: "flex", gap: 4, justifyContent: "flex-end", flexWrap: "wrap", marginTop: 4 }}>
-                                      <button
-                                        type="button"
-                                        className="aw-mini-chip"
-                                        onClick={() =>
-                                          openTokenExplorer({
-                                            assetCode: b.assetCode,
-                                            assetIssuer: b.assetIssuer,
-                                          })
-                                        }
-                                      >
-                                        <IconChart size={11} />
-                                        <span>Inspect</span>
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="aw-mini-chip"
-                                        onClick={() =>
-                                          openSendWith({
-                                            assetCode: b.assetCode,
-                                            assetIssuer: b.assetIssuer,
-                                          })
-                                        }
-                                      >
-                                        Send
-                                      </button>
-                                      <button
-                                        type="button"
-                                        className="aw-mini-chip"
-                                        onClick={() =>
-                                          openSwapWith(
-                                            b.assetIssuer ? `${b.assetCode}:${b.assetIssuer}` : b.assetCode,
-                                          )
-                                        }
-                                      >
-                                        Swap
-                                      </button>
+                                    <div className="aw-balance-row-amount tabular-nums">
+                                      {formatAssetBalance(b.balance)}
                                     </div>
                                   </div>
+
+                                  <div className="aw-balance-row-actions">
+                                    <button
+                                      type="button"
+                                      className="aw-mini-chip"
+                                      onClick={() => openTokenExplorer(explorerTarget)}
+                                    >
+                                      <IconChart size={11} />
+                                      <span>Inspect</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="aw-mini-chip"
+                                      onClick={() =>
+                                        openSendWith({
+                                          assetCode: b.assetCode,
+                                          assetIssuer: b.assetIssuer,
+                                        })
+                                      }
+                                    >
+                                      Send
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="aw-mini-chip"
+                                      onClick={() =>
+                                        openSwapWith(
+                                          b.assetIssuer ? `${b.assetCode}:${b.assetIssuer}` : b.assetCode,
+                                        )
+                                      }
+                                    >
+                                      Swap
+                                    </button>
+                                  </div>
                                 </div>
-                              </div>
                               );
                             })}
                           </div>
@@ -1916,15 +1920,15 @@ function WalletShell({
                           return (
                             <div key={acc.id} style={{ display: "grid", gap: 8 }}>
                               <div className="aw-list-row">
-                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: "1 1 160px" }}>
                                   <AstroNavigatorAvatar
                                     seedKey={acc.address}
                                     kind={acc.kind}
                                     state="float"
                                     size={36}
                                   />
-                                  <div>
-                                    <div style={{ fontWeight: 700, fontSize: 13 }}>{acc.label}</div>
+                                  <div style={{ minWidth: 0 }}>
+                                    <div style={{ fontWeight: 700, fontSize: 13, overflowWrap: "anywhere" }}>{acc.label}</div>
                                     <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
                                       <code>
                                         {acc.address.slice(0, 10)}…{acc.address.slice(-8)}
@@ -1978,7 +1982,7 @@ function WalletShell({
                                       {renameError}
                                     </div>
                                   )}
-                                  <div style={{ display: "flex", gap: 8 }}>
+                                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                                     <button
                                       type="submit"
                                       className="aw-btn-primary"
@@ -2016,7 +2020,7 @@ function WalletShell({
                             protects your vault universally.
                           </div>
                         ) : fingerprintEnrolled ? (
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                             <span style={{ fontSize: 12, color: "var(--aw-safe-emerald)" }}>
                               Fingerprint enrolled on this device
                             </span>
@@ -2336,7 +2340,7 @@ function WalletShell({
 
                     {/* Address Book / Contacts Manager */}
                     <section className="glass-card" style={{ display: "grid", gap: 12 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                         <div>
                           <div style={{ fontWeight: 700, fontSize: 15 }}>
                             Local Address Book ({contacts.length})
@@ -2398,8 +2402,8 @@ function WalletShell({
                         <div style={{ display: "grid", gap: 8 }}>
                           {contacts.map((c) => (
                             <div key={c.id} className="aw-list-row">
-                              <div>
-                                <div style={{ fontWeight: 700, fontSize: 13 }}>{c.label}</div>
+                              <div style={{ minWidth: 0, flex: "1 1 160px" }}>
+                                <div style={{ fontWeight: 700, fontSize: 13, overflowWrap: "anywhere" }}>{c.label}</div>
                                 <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
                                   <code>
                                     {c.address.slice(0, 8)}…{c.address.slice(-6)}
@@ -2407,7 +2411,7 @@ function WalletShell({
                                   {c.defaultMemo ? ` · Memo: ${c.defaultMemo}` : ""}
                                 </div>
                               </div>
-                              <div style={{ display: "flex", gap: 6 }}>
+                              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                                 <button
                                   type="button"
                                   className="aw-mini-chip"

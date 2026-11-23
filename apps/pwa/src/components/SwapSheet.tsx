@@ -14,6 +14,7 @@ import type { VerifiedAssetEntry } from "@astrowallet/security-shield";
 import {
   discoverLiquidHorizonAssets,
   fetchTokenOnChainDetails,
+  type HeldTokenTomlMetadata,
   type StellarTokenDetails,
   type TokenCatalogItem,
 } from "@astrowallet/stellar-core";
@@ -61,6 +62,7 @@ function TokenSwapPreviewCard({
   roleLabel,
   parsed,
   verifiedEntry,
+  tomlMeta,
   trust,
   details,
   balance,
@@ -69,6 +71,7 @@ function TokenSwapPreviewCard({
   roleLabel: string;
   parsed: ParsedSwapAsset | null;
   verifiedEntry?: VerifiedAssetEntry | undefined;
+  tomlMeta?: HeldTokenTomlMetadata | undefined;
   trust: TokenTrustVerdict | null;
   details: StellarTokenDetails | null;
   balance?: string | undefined;
@@ -86,13 +89,19 @@ function TokenSwapPreviewCard({
 
   const isNative = parsed.code.toUpperCase() === "XLM" && !parsed.issuer;
   const domain =
-    details?.homeDomain ?? verifiedEntry?.domain ?? (isNative ? "stellar.org" : undefined);
+    details?.homeDomain ??
+    tomlMeta?.homeDomain ??
+    verifiedEntry?.domain ??
+    (isNative ? "stellar.org" : undefined);
   const name =
-    verifiedEntry?.name ??
     details?.name ??
+    tomlMeta?.name ??
+    verifiedEntry?.name ??
     details?.orgName ??
     (isNative ? "Stellar Lumens" : undefined);
-  const iconUrl = verifiedEntry?.icon ?? details?.image;
+  const iconUrl = details?.image ?? tomlMeta?.image ?? verifiedEntry?.icon;
+  const fallbackIconUrl =
+    verifiedEntry?.icon && verifiedEntry.icon !== iconUrl ? verifiedEntry.icon : undefined;
   const badgeClass =
     trust.status === "official"
       ? "glass-pill glass-pill--trust"
@@ -111,6 +120,8 @@ function TokenSwapPreviewCard({
           <TokenBadge
             code={parsed.code}
             icon={iconUrl}
+            fallbackIcon={fallbackIconUrl}
+            isNative={isNative}
             size={34}
             trustStatus={trust.status}
           />
@@ -194,6 +205,7 @@ export function SwapSheet({
     activeAccount,
     accountState,
     verifiedAssets,
+    tokenMetaMap,
     addOrRemoveTrustline,
     executePathSwap,
     signAndSubmitRawXdrWithShield,
@@ -722,6 +734,11 @@ export function SwapSheet({
           roleLabel="Source"
           parsed={fromParsed}
           verifiedEntry={fromVerified}
+          tomlMeta={
+            fromParsed?.issuer
+              ? tokenMetaMap[`${fromParsed.code.toUpperCase()}:${fromParsed.issuer}`]
+              : undefined
+          }
           trust={fromTrust}
           details={fromDetails}
           balance={fromHolding?.balance}
@@ -845,6 +862,11 @@ export function SwapSheet({
           roleLabel="Destination"
           parsed={toParsed}
           verifiedEntry={toVerified}
+          tomlMeta={
+            toParsed?.issuer
+              ? tokenMetaMap[`${toParsed.code.toUpperCase()}:${toParsed.issuer}`]
+              : undefined
+          }
           trust={toTrust}
           details={toDetails}
           balance={toHolding?.balance}

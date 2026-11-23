@@ -132,7 +132,7 @@ export function AccountSwitcher() {
             onChange={(e) => setPin(e.target.value)}
           />
           {error && <div className="aw-banner aw-banner--danger">{error}</div>}
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button
               type="submit"
               className="aw-btn-primary"

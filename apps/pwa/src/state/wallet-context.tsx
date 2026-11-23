@@ -36,6 +36,7 @@ import {
   disableFingerprintUnlock,
   encryptVaultPayload,
   enrollFingerprintUnlock,
+  fetchHeldAssetsTomlMetadata,
   isFingerprintSupported,
   loadBiometricRecord,
   loadContacts,
@@ -52,6 +53,7 @@ import {
   type ClaimableBalanceRecord,
   type ContactEntry,
   type DevTemplateKind,
+  type HeldTokenTomlMetadata,
   type RecentPaymentRecord,
   type RelayIntentAuth,
   type SdexOfferRecord,
@@ -188,6 +190,7 @@ export interface WalletContextValue {
   fingerprintEnrolled: boolean;
   telegramBioAvailable: boolean;
   verifiedAssets: readonly VerifiedAssetEntry[];
+  tokenMetaMap: Readonly<Record<string, HeldTokenTomlMetadata>>;
   tonAccount: TonAccountSummary | null;
   tonState: TonAccountChainState | null;
   loadingTonChain: boolean;
@@ -460,6 +463,9 @@ export function WalletProvider({
   const [fingerprintEnrolled, setFingerprintEnrolled] = useState<boolean>(false);
   const [telegramBioAvailable, setTelegramBioAvailable] = useState<boolean>(false);
   const [verifiedAssets, setVerifiedAssets] = useState<readonly VerifiedAssetEntry[]>([]);
+  const [tokenMetaMap, setTokenMetaMap] = useState<Readonly<Record<string, HeldTokenTomlMetadata>>>(
+    {},
+  );
 
   const [tonState, setTonState] = useState<TonAccountChainState | null>(null);
   const [loadingTonChain, setLoadingTonChain] = useState<boolean>(false);
@@ -586,6 +592,46 @@ export function WalletProvider({
       cancelled = true;
     };
   }, [config.sep42AssetListUrls]);
+
+  useEffect(() => {
+    const balances = accountState?.balances;
+    if (!balances || balances.length === 0) {
+      setTokenMetaMap({});
+      return undefined;
+    }
+    const assetsToResolve = balances
+      .filter((b) => Boolean(b.assetIssuer) && !(b.assetCode === "XLM" && !b.assetIssuer))
+      .map((b) => {
+        const matched = verifiedAssets.find(
+          (v) =>
+            v.code.toUpperCase() === b.assetCode.toUpperCase() && v.issuer === b.assetIssuer,
+        );
+        return {
+          assetCode: b.assetCode,
+          assetIssuer: b.assetIssuer,
+          knownDomain: matched?.domain,
+        };
+      });
+    if (assetsToResolve.length === 0) {
+      setTokenMetaMap({});
+      return undefined;
+    }
+    let cancelled = false;
+    void fetchHeldAssetsTomlMetadata({
+      horizonUrls: config.horizonUrls,
+      assets: assetsToResolve,
+      apiBaseUrl: config.apiBaseUrl,
+    })
+      .then((resolved) => {
+        if (!cancelled) {
+          setTokenMetaMap(resolved);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [accountState?.balances, verifiedAssets, config.horizonUrls, config.apiBaseUrl]);
 
   const refreshChainState = useCallback(async () => {
     if (!activeAccount) return;
@@ -2016,6 +2062,7 @@ export function WalletProvider({
     fingerprintEnrolled,
     telegramBioAvailable,
     verifiedAssets,
+    tokenMetaMap,
     tonAccount,
     tonState,
     loadingTonChain,

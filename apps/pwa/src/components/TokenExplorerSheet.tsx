@@ -197,6 +197,7 @@ export function TokenExplorerSheet({
     activeAccount,
     accountState,
     verifiedAssets,
+    tokenMetaMap,
     addOrRemoveTrustline,
     reclaimZeroBalanceReserves,
     showToast,
@@ -500,6 +501,15 @@ export function TokenExplorerSheet({
           <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8 }}>
             {catalogItems.map((item) => {
               const k = tokenAssetKey(item.assetCode, item.assetIssuer);
+              const tomlMeta = item.assetIssuer
+                ? tokenMetaMap[`${item.assetCode.toUpperCase()}:${item.assetIssuer}`]
+                : undefined;
+              const isNativeItem = item.assetCode.trim().toUpperCase() === "XLM" && !item.assetIssuer;
+              const rowIcon = tomlMeta?.image ?? item.icon;
+              const rowFallbackIcon =
+                tomlMeta?.image && item.icon && item.icon !== tomlMeta.image ? item.icon : undefined;
+              const rowDomain = item.domain ?? tomlMeta?.homeDomain;
+              const rowName = tomlMeta?.name ?? item.name;
               const trust = classifyTokenTrust({
                 assetCode: item.assetCode,
                 assetIssuer: item.assetIssuer,
@@ -515,16 +525,18 @@ export function TokenExplorerSheet({
                     setSelectedToken({
                       assetCode: item.assetCode,
                       assetIssuer: item.assetIssuer,
-                      name: item.name,
-                      domain: item.domain,
-                      icon: item.icon,
+                      name: rowName,
+                      domain: rowDomain,
+                      icon: rowIcon,
                     });
                   }}
                 >
                   <div className="aw-token-row-left">
                     <TokenBadge
                       code={item.assetCode}
-                      icon={item.icon}
+                      icon={rowIcon}
+                      fallbackIcon={rowFallbackIcon}
+                      isNative={isNativeItem}
                       trustStatus={trust.status}
                     />
                     <div style={{ minWidth: 0, flex: 1, textAlign: "left" }}>
@@ -615,10 +627,21 @@ export function TokenExplorerSheet({
   const hasTrustline = isNativeXlm || Boolean(userHolding);
   const numericBalance = Number(userHolding?.balance ?? "0");
   const isClassic = activeAccount.capabilities.canSignClassicSdex;
-  const displayDomain = details?.homeDomain ?? selectedToken.domain ?? verifiedEntry?.domain;
+  const selectedTomlMeta = selectedToken.assetIssuer
+    ? tokenMetaMap[`${selectedToken.assetCode.toUpperCase()}:${selectedToken.assetIssuer}`]
+    : undefined;
+  const displayDomain =
+    details?.homeDomain ?? selectedTomlMeta?.homeDomain ?? selectedToken.domain ?? verifiedEntry?.domain;
   const displayName =
-    selectedToken.name ?? verifiedEntry?.name ?? details?.name ?? details?.orgName;
-  const displayIcon = selectedToken.icon ?? verifiedEntry?.icon ?? details?.image;
+    details?.name ??
+    selectedTomlMeta?.name ??
+    selectedToken.name ??
+    verifiedEntry?.name ??
+    details?.orgName;
+  const displayIcon =
+    details?.image ?? selectedTomlMeta?.image ?? selectedToken.icon ?? verifiedEntry?.icon;
+  const fallbackIcon =
+    verifiedEntry?.icon && verifiedEntry.icon !== displayIcon ? verifiedEntry.icon : undefined;
   const quoteCode = priceHistory?.quoteCode ?? (isNativeXlm && verifiedUsdcCounter ? "USDC" : "XLM");
   const positiveChange = (priceHistory?.changePct ?? 0) >= 0;
 
@@ -658,6 +681,8 @@ export function TokenExplorerSheet({
           <TokenBadge
             code={selectedToken.assetCode}
             icon={displayIcon}
+            fallbackIcon={fallbackIcon}
+            isNative={isNativeXlm}
             size={46}
             trustStatus={trust.status}
           />
@@ -682,6 +707,11 @@ export function TokenExplorerSheet({
             {details?.description && (
               <div style={{ fontSize: 11, color: "var(--aw-ink-muted)", marginTop: 4 }}>
                 {details.description}
+              </div>
+            )}
+            {!isNativeXlm && !loadingDetails && !displayIcon && !fallbackIcon && (
+              <div style={{ fontSize: 11, color: "var(--aw-ink-muted)", marginTop: 4 }}>
+                No image published in stellar.toml
               </div>
             )}
           </div>

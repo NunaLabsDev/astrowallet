@@ -1,27 +1,39 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 export interface TokenBadgeProps {
   code: string;
   icon?: string | undefined;
+  fallbackIcon?: string | undefined;
+  isNative?: boolean | undefined;
   size?: number | undefined;
   trustStatus?: "official" | "scam_spoof" | "unverified" | undefined;
 }
 
 /**
- * Renders an official SEP-42 / SEP-1 stellar.toml HTTPS token logo, the authentic
- * Stellar Lumens (XLM) vector emblem for native XLM, or a monogram fallback badge.
+ * Renders an official SEP-1 `stellar.toml` / SEP-42 HTTPS token logo, the authentic
+ * Stellar Lumens (XLM) vector emblem for native XLM, or a clear `?` no-image badge
+ * when no real image exists. Never fabricates or substitutes fake token logos.
  */
 export function TokenBadge({
   code,
   icon,
+  fallbackIcon,
+  isNative,
   size = 38,
   trustStatus,
 }: TokenBadgeProps) {
-  const [imgFailed, setImgFailed] = useState(false);
+  const candidates = useMemo(() => {
+    const urls = [icon, fallbackIcon].filter(
+      (u): u is string => typeof u === "string" && u.trim().startsWith("https://"),
+    );
+    return Array.from(new Set(urls.map((u) => u.trim())));
+  }, [icon, fallbackIcon]);
+
+  const [candidateIdx, setCandidateIdx] = useState(0);
 
   useEffect(() => {
-    setImgFailed(false);
-  }, [icon]);
+    setCandidateIdx(0);
+  }, [icon, fallbackIcon]);
 
   const ringColor =
     trustStatus === "scam_spoof"
@@ -30,28 +42,46 @@ export function TokenBadge({
         ? "rgba(16, 185, 129, 0.65)"
         : "rgba(245, 201, 40, 0.45)";
 
-  if (icon && !imgFailed) {
+  const activeUrl = candidates[candidateIdx];
+  if (activeUrl) {
     return (
-      <img
-        src={icon}
-        alt={`${code} logo`}
-        width={size}
-        height={size}
-        onError={() => setImgFailed(true)}
+      <span
         style={{
           width: size,
           height: size,
           borderRadius: "999px",
-          objectFit: "cover",
           border: `1.5px solid ${ringColor}`,
-          background: "rgba(6, 14, 36, 0.85)",
+          background: "rgba(248, 250, 255, 0.08)",
+          overflow: "hidden",
+          display: "inline-flex",
+          alignItems: "center",
+          justifyContent: "center",
           flexShrink: 0,
         }}
-      />
+      >
+        <img
+          src={activeUrl}
+          alt={`${code} logo`}
+          width={size}
+          height={size}
+          referrerPolicy="no-referrer"
+          loading="lazy"
+          onError={() => setCandidateIdx((idx) => idx + 1)}
+          style={{
+            width: "100%",
+            height: "100%",
+            objectFit: "contain",
+            display: "block",
+          }}
+        />
+      </span>
     );
   }
 
-  if (code.trim().toUpperCase() === "XLM" && trustStatus !== "scam_spoof") {
+  if (
+    (isNative || (isNative === undefined && code.trim().toUpperCase() === "XLM")) &&
+    trustStatus !== "scam_spoof"
+  ) {
     return (
       <span
         aria-label="Stellar Lumens XLM"
@@ -92,16 +122,17 @@ export function TokenBadge({
 
   return (
     <span
-      className="aw-asset-badge"
+      className={`aw-token-no-image ${trustStatus === "scam_spoof" ? "aw-token-no-image--danger" : ""}`}
+      title={`${code}: No official image in stellar.toml`}
+      aria-label={`${code} — no token image`}
       style={{
         width: size,
         height: size,
-        fontSize: size >= 44 ? 13 : 11,
-        borderColor: ringColor,
+        fontSize: Math.max(11, Math.round(size * 0.44)),
         flexShrink: 0,
       }}
     >
-      {code.slice(0, 4)}
+      ?
     </span>
   );
 }

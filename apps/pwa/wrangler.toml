@@ -4,4 +4,4 @@ pages_build_output_dir = "dist"
 
 [[services]]
 binding = "ASTROWALLET_SERVER"
-service = "astrowallet-server"
+service = "astrowallet-server-mainnet"

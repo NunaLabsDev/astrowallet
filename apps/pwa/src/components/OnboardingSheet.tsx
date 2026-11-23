@@ -918,7 +918,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
           {phraseRevealed && (
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", justifyContent: "space-between" }}>
-              <div style={{ display: "flex", gap: 6 }}>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                 <button
                   type="button"
                   className="aw-chip-btn"

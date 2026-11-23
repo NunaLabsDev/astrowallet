@@ -112,12 +112,12 @@ workers_dev = false
 [[env.mainnet.d1_databases]]
 binding = "DB"
 database_name = "astrowallet-mainnet"
-database_id = "REPLACE_WITH_MAINNET_D1_ID"
+database_id = "b67e7931-e091-418b-84ad-5c8003d2c421"
 migrations_dir = "migrations"
 
 [[env.mainnet.kv_namespaces]]
 binding = "CACHE"
-id = "REPLACE_WITH_MAINNET_KV_ID"
+id = "a21e4dfbbc9e45d1bdb7a6e3bf9606b3"
 
 [[env.mainnet.durable_objects.bindings]]
 name = "CHAIN_WATCHER"
@@ -130,16 +130,17 @@ class_name = "ChannelPoolDO"
 [env.mainnet.vars]
 STELLAR_NETWORK = "mainnet"
 STELLAR_NETWORK_PASSPHRASE = "Public Global Stellar Network ; September 2015"
-STELLAR_RPC_URLS = "https://mainnet.sorobanrpc.com,https://soroban-rpc.mainnet.stellar.gateway.fm"
-HORIZON_URLS = "https://horizon.stellar.org,https://stellar-mainnet.public.blastapi.io"
+STELLAR_RPC_URLS = "https://mainnet.sorobanrpc.com,https://rpc.lightsail.network,https://soroban-rpc.mainnet.stellar.gateway.fm"
+HORIZON_URLS = "https://horizon.stellar.org"
 PWA_ORIGIN = "https://astrowallet-soroban.pages.dev"
 ALLOWED_ORIGINS = "https://astrowallet-soroban.pages.dev"
 STELLAR_EXPERT_API_BASE = "https://api.stellar.expert"
 OZ_CHANNELS_API_URL = "https://channels.openzeppelin.com"
 SOROSWAP_API_BASE = "https://api.soroswap.finance"
 SEP42_ASSET_LIST_URLS = "https://api.stellar.expert/explorer/public/asset-list/top50"
-ASTRODEX_API_BASE_URL = "https://astrodex.pages.dev"
-ASTROGATE_API_BASE_URL = "https://astrogate.pages.dev"
+# Enable ASTRODEX_API_BASE_URL / ASTROGATE_API_BASE_URL after Mainnet Gates 2 & 3:
+# ASTRODEX_API_BASE_URL = "https://astrodex.pages.dev"
+# ASTROGATE_API_BASE_URL = "https://astrogate.pages.dev"
 # Set CLAIM_ESCROW_CONTRACT_ID & RELAY_ALLOWED_CONTRACTS after Mainnet Gate 1/3 contract deployment:
 # CLAIM_ESCROW_CONTRACT_ID = "C..."
 # RELAY_ALLOWED_CONTRACTS = "C...,CAS3J7GYLGXMF6TDJBBYYSE3HQ6BBSMLNUQ34T6TZMYMW2EVH34XOWMA,..."

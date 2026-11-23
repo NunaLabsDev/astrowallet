@@ -221,6 +221,15 @@ export interface IncomingAlertCardInput {
   network: StellarNetwork;
 }
 
+function formatCompactDecimal(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.includes(".")) return trimmed;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num)) return trimmed;
+  const maxFrac = Math.abs(num) >= 1 ? 4 : 6;
+  return Number(num.toFixed(maxFrac)).toString();
+}
+
 export function formatIncomingAlertCard(input: IncomingAlertCardInput): string {
   const net = escapeTelegramHtml(input.network.toUpperCase());
   const assetDisplay = input.assetIssuer
@@ -233,7 +242,7 @@ export function formatIncomingAlertCard(input: IncomingAlertCardInput): string {
     `📥 <b>Payment Received</b> · <code>${net}</code>`,
     "",
     `<b>Account:</b> ${escapeTelegramHtml(input.addressLabel)} (<code>${escapeTelegramHtml(shortenAddress(input.address))}</code>)`,
-    `<b>Amount:</b> +${escapeTelegramHtml(input.amount)} ${assetDisplay}`,
+    `<b>Amount:</b> +${escapeTelegramHtml(formatCompactDecimal(input.amount))} ${assetDisplay}`,
     `<b>From:</b> <code>${escapeTelegramHtml(shortenAddress(input.fromAddress))}</code>`,
     `<b>Tx:</b> <code>${escapeTelegramHtml(shortenAddress(input.txHash))}</code>`,
   ].join("\n");

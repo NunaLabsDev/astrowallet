@@ -11,6 +11,7 @@ import { sendTelegramMessage } from "../telegram-api.js";
 const POLL_INTERVAL_MS = 5_000;
 const BATCH_SIZE = 15;
 const MIN_NATIVE_ALERT_STROOPS = 500_000n; // 0.05 XLM dust spam filter
+const MIN_ISSUED_ALERT_STROOPS = 10_000n; // 0.001 issued asset dust spam filter
 
 interface WatcherStatus {
   lastLedger: number;
@@ -128,14 +129,16 @@ export class ChainWatcherDO {
           let newestCursor = savedCursor;
           for (const ev of incoming) {
             newestCursor = ev.pagingToken;
-            if (ev.assetCode === "XLM" && !ev.assetIssuer) {
-              try {
-                if (decimalToStroops7(ev.amount) < MIN_NATIVE_ALERT_STROOPS) {
-                  continue;
-                }
-              } catch {
+            const minThreshold =
+              ev.assetCode === "XLM" && !ev.assetIssuer
+                ? MIN_NATIVE_ALERT_STROOPS
+                : MIN_ISSUED_ALERT_STROOPS;
+            try {
+              if (decimalToStroops7(ev.amount) < minThreshold) {
                 continue;
               }
+            } catch {
+              continue;
             }
             const isVerifiedAsset =
               ev.assetCode === "XLM" && !ev.assetIssuer

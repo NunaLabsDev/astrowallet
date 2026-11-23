@@ -632,7 +632,64 @@ export async function fetchMarketTopHoldersAndPools(input: {
     : `${input.assetCode.trim()}:${input.assetIssuer}`;
 
   const holdersPromise: Promise<MarketTopHolder[]> = isNative
-    ? Promise.resolve([])
+    ? fetchHorizonJson<{
+        _embedded?: {
+          records?: Array<{
+            base_account?: string;
+            counter_account?: string;
+          }>;
+        };
+      }>(
+        input.horizonUrls,
+        `/trades?base_asset_type=native&limit=30&order=desc`,
+        fetchFn,
+      )
+        .then(async (body) => {
+          const uniq = new Set<string>();
+          for (const rec of body?._embedded?.records ?? []) {
+            if (rec.base_account && StrKey.isValidEd25519PublicKey(rec.base_account)) {
+              uniq.add(rec.base_account);
+            }
+            if (rec.counter_account && StrKey.isValidEd25519PublicKey(rec.counter_account)) {
+              uniq.add(rec.counter_account);
+            }
+            if (uniq.size >= 12) break;
+          }
+          const addrs = Array.from(uniq).slice(0, 12);
+          if (addrs.length === 0) return [];
+          const supplyNum = parseFinite(input.supplyAmount);
+          const list: MarketTopHolder[] = [];
+          let cursor = 0;
+          await Promise.all(
+            Array.from({ length: Math.min(4, addrs.length) }, async () => {
+              while (cursor < addrs.length) {
+                const addr = addrs[cursor++];
+                if (!addr) break;
+                try {
+                  const acc = await fetchHorizonJson<{
+                    balances?: Array<{ asset_type?: string; balance?: string }>;
+                  }>(input.horizonUrls, `/accounts/${encodeURIComponent(addr)}`, fetchFn);
+                  const xlm = acc?.balances?.find((b) => b.asset_type === "native");
+                  const val = parseFinite(xlm?.balance);
+                  if (!xlm?.balance || val === null || val <= 0) continue;
+                  list.push({
+                    address: addr,
+                    balance: xlm.balance,
+                    sharePct:
+                      supplyNum && supplyNum > 0
+                        ? Math.min(100, (val / supplyNum) * 100)
+                        : null,
+                  });
+                } catch {
+                  // Skip transient account lookup failure
+                }
+              }
+            }),
+          );
+          list.sort((a, b) => (parseFinite(b.balance) ?? 0) - (parseFinite(a.balance) ?? 0));
+          return list.slice(0, 10);
+        })
+        .catch(() => [])
     : fetchHorizonJson<{
         _embedded?: {
           records?: Array<{
@@ -647,7 +704,7 @@ export async function fetchMarketTopHoldersAndPools(input: {
         };
       }>(
         input.horizonUrls,
-        `/accounts?asset=${encodeURIComponent(reserveParam)}&limit=25&order=desc`,
+        `/accounts?asset=${encodeURIComponent(reserveParam)}&limit=50&order=desc`,
         fetchFn,
       )
         .then((body) => {
@@ -672,7 +729,7 @@ export async function fetchMarketTopHoldersAndPools(input: {
             });
           }
           list.sort((a, b) => (parseFinite(b.balance) ?? 0) - (parseFinite(a.balance) ?? 0));
-          return list.slice(0, 10);
+          return list.slice(0, 15);
         })
         .catch(() => []);
 
@@ -687,23 +744,27 @@ export async function fetchMarketTopHoldersAndPools(input: {
     };
   }>(
     input.horizonUrls,
-    `/liquidity_pools?reserves=${encodeURIComponent(reserveParam)}&limit=6&order=desc`,
+    `/liquidity_pools?reserves=${encodeURIComponent(reserveParam)}&limit=25&order=desc`,
     fetchFn,
   )
     .then((body) => {
       const out: MarketLiquidityPoolSummary[] = [];
       for (const p of body?._embedded?.records ?? []) {
         if (!p.id) continue;
+        if ((parseFinite(p.total_shares) ?? 0) <= 0) continue;
+        const reserves = (p.reserves ?? [])
+          .filter((r) => r.asset && r.amount && (parseFinite(r.amount) ?? 0) > 0)
+          .map((r) => ({ asset: r.asset!, amount: r.amount! }));
+        if (reserves.length < 2) continue;
         out.push({
           id: p.id,
           totalTrustlines: p.total_trustlines ?? 0,
           totalShares: p.total_shares ?? "0",
-          reserves: (p.reserves ?? [])
-            .filter((r) => r.asset && r.amount)
-            .map((r) => ({ asset: r.asset!, amount: r.amount! })),
+          reserves,
         });
       }
-      return out;
+      out.sort((a, b) => b.totalTrustlines - a.totalTrustlines);
+      return out.slice(0, 10);
     })
     .catch(() => []);
 

@@ -1,9 +1,14 @@
 import type { ServerConfig } from "@astrowallet/domain";
+import type { KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import type { ServerRepository, TelegramUserRecord } from "../db/repository.js";
 import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
 
 export type IdentityRouteEnv = {
+  Bindings: {
+    CACHE?: KVNamespace;
+    [key: string]: unknown;
+  };
   Variables: {
     config: ServerConfig;
     repo: ServerRepository;
@@ -80,12 +85,39 @@ export function createIdentityRoutes(): Hono<IdentityRouteEnv> {
 
     const primaryAddress = accounts.find((a) => a.isDefault)?.address ?? firstAccount.address;
 
+    let preferredNetwork: "mainnet" | "testnet" | undefined;
+    let activeAddress: string | undefined;
+    if (c.env.CACHE) {
+      try {
+        const rawPref = await c.env.CACHE.get(`eco_pref:${telegramUserId}`);
+        if (rawPref) {
+          const parsedPref = JSON.parse(rawPref) as {
+            preferredNetwork?: unknown;
+            activeAddress?: unknown;
+          };
+          if (parsedPref.preferredNetwork === "mainnet" || parsedPref.preferredNetwork === "testnet") {
+            preferredNetwork = parsedPref.preferredNetwork;
+          }
+          if (
+            typeof parsedPref.activeAddress === "string" &&
+            accounts.some((a) => a.address === parsedPref.activeAddress)
+          ) {
+            activeAddress = parsedPref.activeAddress;
+          }
+        }
+      } catch {
+        // Ignore malformed KV preference entry
+      }
+    }
+
     return c.json({
       ok: true,
       found: true,
       telegramUserId: user?.telegramUserId ?? firstAccount.telegramUserId,
       username: user?.usernameLower,
       primaryAddress,
+      ...(preferredNetwork ? { preferredNetwork } : {}),
+      ...(activeAddress ? { activeAddress } : {}),
       accounts: accounts.map((a) => ({
         address: a.address,
         kind: a.kind,

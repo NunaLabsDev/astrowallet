@@ -877,14 +877,11 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
 
     const timeframe: MarketTimeframe =
       rawTf === "7d" || rawTf === "30d" || rawTf === "1y" || rawTf === "all" ? rawTf : "24h";
-    const bucketMs =
-      timeframe === "24h" ? 60_000 : timeframe === "7d" ? 300_000 : 900_000;
-    const roundedNowMs = Math.floor(Date.now() / bucketMs) * bucketMs;
-    const freshTtlSec = timeframe === "24h" ? 60 : timeframe === "7d" ? 300 : 900;
-    const staleTtlSec = timeframe === "24h" ? 900 : timeframe === "7d" ? 3600 : 21600;
+    const freshTtlSec = timeframe === "24h" ? 90 : timeframe === "7d" ? 300 : 1800;
+    const staleTtlSec = 86_400;
 
     return serveEdgeCachedJson(c, {
-      cacheKey: `hist:${config.network}:${code}:${rawIssuer || "native"}:${timeframe}:${counterCode || "XLM"}:${rawCounterIssuer || "native"}:${roundedNowMs}`,
+      cacheKey: `hist:${config.network}:${code}:${rawIssuer || "native"}:${timeframe}:${counterCode || "XLM"}:${rawCounterIssuer || "native"}`,
       freshTtlSec,
       staleTtlSec,
       compute: () =>
@@ -901,7 +898,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
                 },
               }
             : {}),
-          nowMs: roundedNowMs,
+          nowMs: Date.now(),
           fetchFn,
         }),
     });

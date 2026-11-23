@@ -596,6 +596,28 @@ function WalletShell({
   const [cloudPullError, setCloudPullError] = useState<string | null>(null);
   const lastCloudPullTsRef = useRef<number>(0);
   const lastCloudPushTsRef = useRef<number>(0);
+  const lastEcoPrefKeyRef = useRef<string>("");
+
+  // Sync active network & address preference to AstroWallet KV so AstroDex / AstroGate stay aligned
+  useEffect(() => {
+    if (vaultStatus !== "unlocked" || !sessionToken || !activeAccount) return;
+    const prefKey = `${config.network}:${activeAccount.address}`;
+    if (lastEcoPrefKeyRef.current === prefKey) return;
+    lastEcoPrefKeyRef.current = prefKey;
+    const base = config.apiBaseUrl.replace(/\/+$/, "");
+    void fetch(`${base}/v1/tg/preferences`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${sessionToken}`,
+        "X-Astro-Network": config.network,
+      },
+      body: JSON.stringify({
+        preferredNetwork: config.network,
+        activeAddress: activeAccount.address,
+      }),
+    }).catch(() => undefined);
+  }, [vaultStatus, sessionToken, activeAccount, config.network, config.apiBaseUrl]);
 
   const partitionedBalances = useMemo(
     () => partitionWalletBalances(accountState?.balances ?? []),
@@ -1768,6 +1790,45 @@ function WalletShell({
                                   >
                                     Show More Tokens ({filteredFungible.length - balanceLimit} remaining)
                                   </button>
+                                )}
+                                {(accountState.liquidityPoolPositions?.length ?? 0) > 0 && (
+                                  <div style={{ display: "grid", gap: 8, marginTop: 4 }}>
+                                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                                      <span style={{ fontWeight: 700, fontSize: 13 }}>
+                                        AMM Liquidity Positions ({accountState.liquidityPoolPositions!.length})
+                                      </span>
+                                      {config.astrodexBotUsername && (
+                                        <a
+                                          href={`${
+                                            config.astrodexMiniAppShortName
+                                              ? `https://t.me/${config.astrodexBotUsername}/${config.astrodexMiniAppShortName}`
+                                              : `https://t.me/${config.astrodexBotUsername}`
+                                          }?startapp=${encodeURIComponent(`${config.network}_tab_book`)}`}
+                                          className="aw-mini-chip"
+                                          style={{ textDecoration: "none" }}
+                                        >
+                                          Manage on AstroDex ↗
+                                        </a>
+                                      )}
+                                    </div>
+                                    {accountState.liquidityPoolPositions!.map((lp) => (
+                                      <div key={lp.poolId} className="aw-list-row" style={{ fontSize: 12 }}>
+                                        <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+                                          <div style={{ fontWeight: 700 }}>
+                                            {lp.reserves.map((r) => r.assetCode).join(" / ")} LP
+                                          </div>
+                                          <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                                            {lp.reserves
+                                              .map((r) => `${formatAssetBalance(r.userAmount)} ${r.assetCode}`)
+                                              .join(" + ")}
+                                          </div>
+                                        </div>
+                                        <span className="glass-pill glass-pill--trust tabular-nums">
+                                          {lp.sharePct < 0.01 ? "<0.01%" : `${lp.sharePct.toFixed(2)}%`} share
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
                                 )}
                                 {classicNfts.length > 0 && (
                                   <div className="aw-list-row" style={{ marginTop: 4 }}>

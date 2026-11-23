@@ -58,9 +58,26 @@ export interface AccountDataEntryRecord {
   value: string;
 }
 
+export interface LiquidityPoolReservePosition {
+  assetCode: string;
+  assetIssuer?: string | undefined;
+  poolAmount: string;
+  userAmount: string;
+}
+
+export interface LiquidityPoolSharePosition {
+  poolId: string;
+  sharesBalance: string;
+  totalShares: string;
+  totalTrustlines: number;
+  sharePct: number;
+  reserves: readonly LiquidityPoolReservePosition[];
+}
+
 export interface StellarAccountState {
   funded: boolean;
   balances: AssetBalance[];
+  liquidityPoolPositions?: readonly LiquidityPoolSharePosition[] | undefined;
   subentryCount: number;
   numSponsoring: number;
   numSponsored: number;
@@ -697,9 +714,93 @@ export function createStellarClient(
         },
       );
 
+      const lpRawBalances = (account.balances as Array<{
+        asset_type?: string;
+        balance?: string;
+        liquidity_pool_id?: string;
+      }>).filter(
+        (b) =>
+          b.asset_type === "liquidity_pool_shares" &&
+          typeof b.liquidity_pool_id === "string" &&
+          Number(b.balance ?? "0") > 0,
+      );
+
+      let liquidityPoolPositions: LiquidityPoolSharePosition[] = [];
+      if (lpRawBalances.length > 0) {
+        const targets = lpRawBalances.slice(0, 10);
+        const resolvedPools = await Promise.all(
+          targets.map(async (lpBal): Promise<LiquidityPoolSharePosition | null> => {
+            const poolId = lpBal.liquidity_pool_id!;
+            const userShares = Number(lpBal.balance ?? "0");
+            try {
+              const poolData = await withHorizonFailover(async (server) => {
+                const builder = (
+                  server as unknown as {
+                    liquidityPools?: () => {
+                      liquidityPoolId: (id: string) => { call: () => Promise<unknown> };
+                    };
+                  }
+                ).liquidityPools?.();
+                if (builder) {
+                  return (await builder.liquidityPoolId(poolId).call()) as {
+                    total_shares?: string;
+                    total_trustlines?: number;
+                    reserves?: Array<{ asset?: string; amount?: string }>;
+                  };
+                }
+                const serverBase = (
+                  server as unknown as { serverURL?: { toString(): string } }
+                ).serverURL
+                  ?.toString()
+                  .replace(/\/+$/, "");
+                if (!serverBase) return null;
+                const r = await fetch(`${serverBase}/liquidity_pools/${encodeURIComponent(poolId)}`);
+                if (!r.ok) return null;
+                return (await r.json()) as {
+                  total_shares?: string;
+                  total_trustlines?: number;
+                  reserves?: Array<{ asset?: string; amount?: string }>;
+                };
+              });
+              if (!poolData) return null;
+              const totalSharesNum = Number(poolData.total_shares ?? "0");
+              const ratio = totalSharesNum > 0 ? userShares / totalSharesNum : 0;
+              const reserves: LiquidityPoolReservePosition[] = (poolData.reserves ?? []).map(
+                (r) => {
+                  const rawAsset = r.asset ?? "native";
+                  const [code, issuer] =
+                    rawAsset === "native" ? ["XLM", undefined] : rawAsset.split(":");
+                  const poolAmtNum = Number(r.amount ?? "0");
+                  return {
+                    assetCode: code || "ASSET",
+                    ...(issuer ? { assetIssuer: issuer } : {}),
+                    poolAmount: r.amount ?? "0",
+                    userAmount: (poolAmtNum * ratio).toFixed(7),
+                  };
+                },
+              );
+              return {
+                poolId,
+                sharesBalance: lpBal.balance ?? "0",
+                totalShares: poolData.total_shares ?? "0",
+                totalTrustlines: poolData.total_trustlines ?? 0,
+                sharePct: ratio * 100,
+                reserves,
+              };
+            } catch {
+              return null;
+            }
+          }),
+        );
+        liquidityPoolPositions = resolvedPools.filter(
+          (p): p is LiquidityPoolSharePosition => p !== null,
+        );
+      }
+
       return {
         funded: true,
         balances,
+        ...(liquidityPoolPositions.length > 0 ? { liquidityPoolPositions } : {}),
         subentryCount: reserve.subentryCount,
         numSponsoring: reserve.numSponsoring,
         numSponsored: reserve.numSponsored,

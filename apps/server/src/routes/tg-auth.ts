@@ -12,6 +12,7 @@ import {
   type ConnectChallengePayload,
   type MiniAppSessionClaims,
 } from "@astrowallet/tg-protocol";
+import type { KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
@@ -47,6 +48,10 @@ async function sha256Hex(raw: string): Promise<string> {
 }
 
 export type TgAuthRouteEnv = {
+  Bindings: {
+    CACHE?: KVNamespace;
+    [key: string]: unknown;
+  };
   Variables: {
     config: ServerConfig;
     repo: ServerRepository;
@@ -85,6 +90,14 @@ export async function authenticateMiniAppSession(c: {
   }
   return { ok: true, claims: result.claims };
 }
+
+const EcosystemPreferencesSchema = z.object({
+  preferredNetwork: z.enum(["mainnet", "testnet"]).optional(),
+  activeAddress: z
+    .string()
+    .regex(/^[GC][A-Z2-7]{55}$/)
+    .optional(),
+});
 
 export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
   const router = new Hono<TgAuthRouteEnv>();
@@ -468,6 +481,44 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
       accounts: linked,
     });
   });
+
+  const handleSavePreferences = async (c: {
+    req: { header(name: string): string | undefined; json(): Promise<unknown> };
+    env: { CACHE?: KVNamespace };
+    get(key: "config"): ServerConfig;
+    get(key: "repo"): ServerRepository;
+    json(data: unknown, status?: number): Response;
+  }) => {
+    const session = await authenticateMiniAppSession(c);
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
+    let body: z.infer<typeof EcosystemPreferencesSchema>;
+    try {
+      body = EcosystemPreferencesSchema.parse(await c.req.json());
+    } catch {
+      return c.json({ error: "Invalid ecosystem preferences payload" }, 400);
+    }
+    const repo = c.get("repo");
+    const tgId = session.claims.telegramUserId;
+    if (body.activeAddress) {
+      await repo.setDefaultLinkedAddress(tgId, body.activeAddress).catch(() => false);
+    }
+    const pref = {
+      ...(body.preferredNetwork ? { preferredNetwork: body.preferredNetwork } : {}),
+      ...(body.activeAddress ? { activeAddress: body.activeAddress } : {}),
+      updatedAt: Math.floor(Date.now() / 1000),
+    };
+    if (c.env.CACHE) {
+      await c.env.CACHE.put(`eco_pref:${tgId}`, JSON.stringify(pref), {
+        expirationTtl: 30 * 86_400,
+      }).catch(() => {});
+    }
+    return c.json({ ok: true, ...pref });
+  };
+
+  router.put("/preferences", handleSavePreferences);
+  router.post("/preferences", handleSavePreferences);
 
   return router;
 }

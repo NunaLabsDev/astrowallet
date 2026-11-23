@@ -754,6 +754,33 @@ select:focus-visible {
   text-align: center;
 }
 
+/* Expanded Fullscreen Interactive Chart Modal */
+.aw-chart-expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  background: rgba(4, 9, 24, 0.94);
+  backdrop-filter: blur(14px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+}
+
+.aw-chart-expanded-card {
+  width: 100%;
+  max-width: 720px;
+  max-height: 92vh;
+  overflow-y: auto;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 22px;
+  background: rgba(11, 20, 51, 0.96);
+  border: 1px solid rgba(165, 139, 224, 0.36);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
+}
+
 .aw-sorobit-grid {
   display: grid;
   gap: 14px;

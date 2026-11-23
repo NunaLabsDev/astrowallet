@@ -82,14 +82,18 @@ function computeOnChainAssetScore(input: {
   return Math.min(10.0, Math.round(score * 10) / 10);
 }
 
-function PriceAreaChart({
+function InteractiveMarketChart({
   candles,
   quoteCode,
   positive,
+  chartMode,
+  expanded = false,
 }: {
   candles: readonly TokenPriceCandle[];
   quoteCode: string;
   positive: boolean;
+  chartMode: "area" | "candles";
+  expanded?: boolean;
 }) {
   const [activeIdx, setActiveIdx] = useState<number | null>(null);
 
@@ -100,45 +104,71 @@ function PriceAreaChart({
           <IconChart size={20} />
           <div style={{ fontWeight: 600, fontSize: 13 }}>No historical SDEX trades in this window</div>
           <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-            Switch timeframe (7D / 30D) or check the Orderbook tab for resting liquidity.
+            Switch timeframe (7D / 30D / 1Y / ALL) or check the Orderbook tab for resting liquidity.
           </div>
         </div>
       </div>
     );
   }
 
-  const width = 320;
-  const height = 124;
-  const padX = 10;
-  const padY = 14;
-  const closes = candles.map((c) => c.close);
-  const minVal = Math.min(...closes);
-  const maxVal = Math.max(...closes);
+  const width = expanded ? 560 : 320;
+  const height = expanded ? 240 : 140;
+  const padX = 12;
+  const padTop = 14;
+  const padBottom = 22;
+  const lows = candles.map((c) => Math.min(c.low, c.open, c.close));
+  const highs = candles.map((c) => Math.max(c.high, c.open, c.close));
+  const volumes = candles.map((c) => c.baseVolume ?? 0);
+  const minVal = Math.min(...lows);
+  const maxVal = Math.max(...highs);
   const range = maxVal - minVal;
+  const maxVol = Math.max(...volumes, 1);
+
+  const yForPrice = (price: number): number => {
+    const norm = range > 0 ? (price - minVal) / range : 0.5;
+    return height - padBottom - norm * (height - padTop - padBottom);
+  };
 
   const points = candles.map((c, idx) => {
     const x =
       candles.length === 1
         ? width / 2
         : padX + (idx / (candles.length - 1)) * (width - padX * 2);
-    const norm = range > 0 ? (c.close - minVal) / range : 0.5;
-    const y = height - padY - norm * (height - padY * 2);
-    return { x, y, candle: c };
+    return {
+      x,
+      yOpen: yForPrice(c.open),
+      yHigh: yForPrice(c.high),
+      yLow: yForPrice(c.low),
+      yClose: yForPrice(c.close),
+      volHeight: Math.max(1.5, ((c.baseVolume ?? 0) / maxVol) * 16),
+      candle: c,
+    };
   });
 
   const strokeColor = positive ? "#10B981" : "#F15A24";
   const linePath = points
-    .map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.y.toFixed(1)}`)
+    .map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.yClose.toFixed(1)}`)
     .join(" ");
   const firstPoint = points[0]!;
   const lastPoint = points[points.length - 1]!;
   const areaPath =
     points.length === 1
       ? ""
-      : `${linePath} L${lastPoint.x.toFixed(1)},${(height - 4).toFixed(1)} L${firstPoint.x.toFixed(1)},${(height - 4).toFixed(1)} Z`;
+      : `${linePath} L${lastPoint.x.toFixed(1)},${(height - padBottom).toFixed(1)} L${firstPoint.x.toFixed(1)},${(height - padBottom).toFixed(1)} Z`;
 
   const inspected =
     activeIdx !== null && points[activeIdx] ? points[activeIdx]! : lastPoint;
+  const candleWidth = Math.max(
+    2.5,
+    Math.min(expanded ? 12 : 8, ((width - padX * 2) / Math.max(points.length, 1)) * 0.68),
+  );
+
+  const handlePointerScrub = (clientX: number, rect: DOMRect) => {
+    if (points.length <= 1 || rect.width <= 0) return;
+    const rel = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const idx = Math.round(rel * (points.length - 1));
+    setActiveIdx(idx);
+  };
 
   return (
     <div className="aw-token-chart-box">
@@ -150,16 +180,24 @@ function PriceAreaChart({
           · {new Date(inspected.candle.timestamp).toLocaleDateString()}
         </span>
         <span className="tabular-nums" style={{ flexShrink: 0 }}>
-          H: {formatTokenPriceValue(inspected.candle.high)} · L:{" "}
-          {formatTokenPriceValue(inspected.candle.low)}
+          {chartMode === "candles"
+            ? `O:${formatTokenPriceValue(inspected.candle.open)} H:${formatTokenPriceValue(inspected.candle.high)} L:${formatTokenPriceValue(inspected.candle.low)}`
+            : `H: ${formatTokenPriceValue(inspected.candle.high)} · L: ${formatTokenPriceValue(inspected.candle.low)}`}
         </span>
       </div>
 
       <svg
         viewBox={`0 0 ${width} ${height}`}
-        style={{ width: "100%", height: "auto", display: "block", touchAction: "pan-y" }}
+        style={{ width: "100%", height: "auto", display: "block", touchAction: "pan-y", userSelect: "none" }}
         role="img"
         aria-label={`Historical price chart in ${quoteCode}`}
+        onPointerDown={(e) => handlePointerScrub(e.clientX, e.currentTarget.getBoundingClientRect())}
+        onPointerMove={(e) => {
+          if (e.buttons > 0 || e.pointerType === "mouse") {
+            handlePointerScrub(e.clientX, e.currentTarget.getBoundingClientRect());
+          }
+        }}
+        onPointerLeave={() => setActiveIdx(null)}
       >
         <defs>
           <linearGradient id="aw-token-chart-grad" x1="0" y1="0" x2="0" y2="1">
@@ -169,46 +207,86 @@ function PriceAreaChart({
         </defs>
         <line
           x1={padX}
-          y1={height / 2}
+          y1={(height - padBottom + padTop) / 2}
           x2={width - padX}
-          y2={height / 2}
+          y2={(height - padBottom + padTop) / 2}
           stroke="rgba(165, 139, 224, 0.16)"
           strokeDasharray="3 3"
         />
-        {areaPath && <path d={areaPath} fill="url(#aw-token-chart-grad)" />}
-        {points.length > 1 && (
-          <path
-            d={linePath}
-            fill="none"
-            stroke={strokeColor}
-            strokeWidth="2.2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
+
+        {/* Subtle volume bars at bottom */}
+        {points.map((pt) => (
+          <rect
+            key={`vol-${pt.candle.timestamp}`}
+            x={pt.x - candleWidth / 2}
+            y={height - pt.volHeight - 2}
+            width={candleWidth}
+            height={pt.volHeight}
+            rx={1}
+            fill="rgba(165, 139, 224, 0.22)"
+          />
+        ))}
+
+        {chartMode === "area" ? (
+          <>
+            {areaPath && <path d={areaPath} fill="url(#aw-token-chart-grad)" />}
+            {points.length > 1 && (
+              <path
+                d={linePath}
+                fill="none"
+                stroke={strokeColor}
+                strokeWidth="2.2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            )}
+            <circle
+              cx={inspected.x}
+              cy={inspected.yClose}
+              r={4.2}
+              fill="#F5C928"
+            />
+          </>
+        ) : (
+          points.map((pt, idx) => {
+            const bull = pt.candle.close >= pt.candle.open;
+            const cColor = bull ? "#10B981" : "#F15A24";
+            const bodyTop = Math.min(pt.yOpen, pt.yClose);
+            const bodyH = Math.max(1.8, Math.abs(pt.yClose - pt.yOpen));
+            const isSel = activeIdx === idx;
+            return (
+              <g key={pt.candle.timestamp} opacity={isSel ? 1 : 0.9}>
+                <line
+                  x1={pt.x}
+                  y1={pt.yHigh}
+                  x2={pt.x}
+                  y2={pt.yLow}
+                  stroke={isSel ? "#F5C928" : cColor}
+                  strokeWidth={1.3}
+                />
+                <rect
+                  x={pt.x - candleWidth / 2}
+                  y={bodyTop}
+                  width={candleWidth}
+                  height={bodyH}
+                  rx={1.2}
+                  fill={isSel ? "#F5C928" : cColor}
+                />
+              </g>
+            );
+          })
+        )}
+
+        {activeIdx !== null && (
+          <line
+            x1={inspected.x}
+            y1={padTop}
+            x2={inspected.x}
+            y2={height - padBottom}
+            stroke="rgba(245, 201, 40, 0.45)"
+            strokeDasharray="2 2"
           />
         )}
-        {points.map((pt, idx) => {
-          const isSelected = activeIdx === idx || (activeIdx === null && idx === points.length - 1);
-          return (
-            <g key={pt.candle.timestamp}>
-              <circle
-                cx={pt.x}
-                cy={pt.y}
-                r={isSelected ? 4.2 : 2.2}
-                fill={isSelected ? "#F5C928" : strokeColor}
-                opacity={isSelected ? 1 : 0.65}
-              />
-              <circle
-                cx={pt.x}
-                cy={pt.y}
-                r={10}
-                fill="transparent"
-                style={{ cursor: "pointer" }}
-                onMouseEnter={() => setActiveIdx(idx)}
-                onClick={() => setActiveIdx(idx)}
-              />
-            </g>
-          );
-        })}
       </svg>
     </div>
   );
@@ -243,6 +321,8 @@ export function TokenExplorerSheet({
 
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>("overview");
   const [timeframe, setTimeframe] = useState<TokenPriceTimeframe>("24h");
+  const [chartMode, setChartMode] = useState<"area" | "candles">("candles");
+  const [chartExpanded, setChartExpanded] = useState(false);
   const [loadingDetails, setLoadingDetails] = useState(false);
   const [loadingChart, setLoadingChart] = useState(false);
   const [details, setDetails] = useState<StellarTokenDetails | null>(null);
@@ -418,7 +498,23 @@ export function TokenExplorerSheet({
       counterAsset,
     })
       .then((hist) => {
-        if (!cancelled) setPriceHistory(hist);
+        if (!cancelled) {
+          setPriceHistory(hist);
+          // Warm 7d & 30d in background when viewing 24h so timeframe switches feel instant
+          if (timeframe === "24h") {
+            for (const nextTf of ["7d", "30d"] as const) {
+              void fetchCachedMarketHistory({
+                apiBaseUrl: config.apiBaseUrl,
+                network: config.network,
+                horizonUrls: config.horizonUrls,
+                assetCode: selectedToken.assetCode,
+                assetIssuer: selectedToken.assetIssuer as ClassicAddress | undefined,
+                timeframe: nextTf,
+                counterAsset,
+              }).catch(() => undefined);
+            }
+          }
+        }
       })
       .catch(() => {
         if (!cancelled && !hasWarmCache) setPriceHistory(null);
@@ -902,7 +998,7 @@ export function TokenExplorerSheet({
                   ? `https://t.me/${config.astrodexBotUsername}/${config.astrodexMiniAppShortName}`
                   : `https://t.me/${config.astrodexBotUsername}`
               }?startapp=${encodeURIComponent(
-                `token_${
+                `${config.network}_token_${
                   selectedToken.assetIssuer
                     ? `${selectedToken.assetCode}_${selectedToken.assetIssuer}`
                     : selectedToken.assetCode
@@ -957,6 +1053,11 @@ export function TokenExplorerSheet({
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: "var(--aw-ink-secondary)" }}>
               Historical Price ({quoteCode})
+              {loadingChart && (
+                <span className="glass-pill" style={{ marginLeft: 6, padding: "1px 6px", fontSize: 10 }}>
+                  Updating…
+                </span>
+              )}
               {priceHistory && priceHistory.candles.length >= 2 && (
                 <span style={{ fontWeight: 400, marginLeft: 6, fontSize: 11 }}>
                   ({new Date(priceHistory.candles[0]!.timestamp).toLocaleDateString()} →{" "}
@@ -967,31 +1068,112 @@ export function TokenExplorerSheet({
                 </span>
               )}
             </span>
-            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {(["24h", "7d", "30d", "1y", "all"] as const).map((tf) => (
-                <button
-                  key={tf}
-                  type="button"
-                  className="aw-chip-btn"
-                  aria-pressed={timeframe === tf}
-                  onClick={() => setTimeframe(tf)}
-                >
-                  {tf.toUpperCase()}
-                </button>
-              ))}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+              <button
+                type="button"
+                className="aw-mini-chip"
+                aria-pressed={chartMode === "candles"}
+                onClick={() => setChartMode((m) => (m === "candles" ? "area" : "candles"))}
+              >
+                {chartMode === "candles" ? "Candles" : "Area"}
+              </button>
+              <button
+                type="button"
+                className="aw-mini-chip"
+                onClick={() => setChartExpanded(true)}
+                title="Expand chart fullscreen"
+              >
+                ⤢ Expand
+              </button>
             </div>
           </div>
 
-          {loadingChart ? (
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {(["24h", "7d", "30d", "1y", "all"] as const).map((tf) => (
+              <button
+                key={tf}
+                type="button"
+                className="aw-chip-btn"
+                aria-pressed={timeframe === tf}
+                onClick={() => setTimeframe(tf)}
+              >
+                {tf.toUpperCase()}
+              </button>
+            ))}
+          </div>
+
+          {loadingChart && !priceHistory ? (
             <div className="aw-token-chart-box" style={{ justifyContent: "center", alignContent: "center", textAlign: "center", fontSize: 12 }}>
               Loading Horizon trade aggregations...
             </div>
           ) : (
-            <PriceAreaChart
+            <InteractiveMarketChart
               candles={priceHistory?.candles ?? []}
               quoteCode={quoteCode}
               positive={positiveChange}
+              chartMode={chartMode}
             />
+          )}
+
+          {chartExpanded && (
+            <div
+              className="aw-chart-expanded"
+              role="dialog"
+              aria-label="Expanded Market Chart"
+              onClick={(e) => {
+                if (e.target === e.currentTarget) setChartExpanded(false);
+              }}
+            >
+              <div className="aw-chart-expanded-card">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontWeight: 800, fontSize: 16 }}>
+                      {selectedToken.assetCode} / {quoteCode}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                      Touch &amp; drag across candles for OHLCV telemetry
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <button
+                      type="button"
+                      className="aw-chip-btn"
+                      aria-pressed={chartMode === "candles"}
+                      onClick={() => setChartMode((m) => (m === "candles" ? "area" : "candles"))}
+                    >
+                      {chartMode === "candles" ? "Candles" : "Area"}
+                    </button>
+                    <button
+                      type="button"
+                      className="aw-btn-secondary"
+                      onClick={() => setChartExpanded(false)}
+                    >
+                      Close ✕
+                    </button>
+                  </div>
+                </div>
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {(["24h", "7d", "30d", "1y", "all"] as const).map((tf) => (
+                    <button
+                      key={tf}
+                      type="button"
+                      className="aw-chip-btn"
+                      aria-pressed={timeframe === tf}
+                      onClick={() => setTimeframe(tf)}
+                    >
+                      {tf.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
+                <InteractiveMarketChart
+                  candles={priceHistory?.candles ?? []}
+                  quoteCode={quoteCode}
+                  positive={positiveChange}
+                  chartMode={chartMode}
+                  expanded
+                />
+              </div>
+            </div>
           )}
 
           <div className="aw-token-stats-grid">
@@ -1141,18 +1323,49 @@ export function TokenExplorerSheet({
       {/* TAB 2: TOP HOLDERS & AMM POOLS */}
       {inspectorTab === "holders" && (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 12 }}>
+          {(accountState?.liquidityPoolPositions?.length ?? 0) > 0 && (() => {
+            const matchingUserPools = accountState!.liquidityPoolPositions!.filter((lp) =>
+              lp.reserves.some((r) =>
+                isNativeXlm
+                  ? r.assetCode === "XLM" && !r.assetIssuer
+                  : r.assetCode.toUpperCase() === selectedToken.assetCode.toUpperCase() &&
+                    r.assetIssuer === selectedToken.assetIssuer,
+              ),
+            );
+            if (matchingUserPools.length === 0) return null;
+            return (
+              <div style={{ display: "grid", gap: 6 }}>
+                <div style={{ fontWeight: 700, fontSize: 13 }}>
+                  Your Active AMM Positions ({matchingUserPools.length})
+                </div>
+                {matchingUserPools.map((lp) => (
+                  <div key={lp.poolId} className="aw-list-row" style={{ fontSize: 12 }}>
+                    <div style={{ minWidth: 0, display: "grid", gap: 2 }}>
+                      <div style={{ fontWeight: 700 }}>
+                        {lp.reserves
+                          .map((r) => `${formatCompactNumber(r.userAmount)} ${r.assetCode}`)
+                          .join(" + ")}
+                      </div>
+                      <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                        Pool {lp.poolId.slice(0, 8)}…{lp.poolId.slice(-6)} · Share {lp.sharePct.toFixed(4)}%
+                      </div>
+                    </div>
+                    <span className="glass-pill glass-pill--trust">LP Active</span>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
           <div style={{ display: "grid", gap: 8 }}>
             <div style={{ fontWeight: 700, fontSize: 13 }}>
-              Top On-Chain Holders {holders.length > 0 ? `(${holders.length})` : ""}
+              {isNativeXlm
+                ? `Active XLM Holders Sample (${holders.length})`
+                : `Top On-Chain Holders (${holders.length})`}
             </div>
-            {isNativeXlm ? (
-              <div className="aw-banner" style={{ fontSize: 12 }}>
-                XLM is the native protocol asset held across millions of ledger accounts. Active
-                AMM Liquidity Pools &amp; Market Depth are shown below.
-              </div>
-            ) : holders.length === 0 ? (
+            {holders.length === 0 ? (
               <div className="aw-empty-state" style={{ fontSize: 12 }}>
-                No public holder records returned by Horizon for this asset.
+                No public holder records returned by Horizon right now.
               </div>
             ) : (
               <div style={{ display: "grid", gap: 6 }}>
@@ -1194,7 +1407,7 @@ export function TokenExplorerSheet({
 
           <div style={{ display: "grid", gap: 8 }}>
             <div style={{ fontWeight: 700, fontSize: 13 }}>
-              AMM Liquidity Pools ({liquidityPools.length})
+              Active AMM Liquidity Pools ({liquidityPools.length})
             </div>
             {liquidityPools.length === 0 ? (
               <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
@@ -1223,6 +1436,39 @@ export function TokenExplorerSheet({
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {config.astrodexBotUsername && (
+              <a
+                href={`${
+                  config.astrodexMiniAppShortName
+                    ? `https://t.me/${config.astrodexBotUsername}/${config.astrodexMiniAppShortName}`
+                    : `https://t.me/${config.astrodexBotUsername}`
+                }?startapp=${encodeURIComponent(`${config.network}_tab_book`)}`}
+                className="aw-btn-secondary"
+                style={{ textDecoration: "none", flex: "1 1 180px" }}
+              >
+                <IconChart size={14} />
+                <span>Explore Deep Pools on AstroDex</span>
+              </a>
+            )}
+            {config.explorerBaseUrl && (
+              <a
+                href={
+                  selectedToken.assetIssuer
+                    ? `${config.explorerBaseUrl.replace(/\/+$/, "")}/asset/${encodeURIComponent(`${selectedToken.assetCode}-${selectedToken.assetIssuer}`)}?filter=asset-holders`
+                    : `${config.explorerBaseUrl.replace(/\/+$/, "")}/asset/XLM?filter=asset-holders`
+                }
+                target="_blank"
+                rel="noreferrer"
+                className="aw-btn-secondary"
+                style={{ flex: "1 1 180px" }}
+              >
+                <span>Full Holders List</span>
+                <IconExternalLink size={14} />
+              </a>
             )}
           </div>
         </div>

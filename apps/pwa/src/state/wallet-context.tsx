@@ -215,6 +215,8 @@ export interface WalletContextValue {
   restoreAgVaultJson(rawJson: string, pinOrPassphrase: string): Promise<void>;
   exportAgVaultJson(): Promise<string>;
   revealMnemonicWithPin(pinOrPassphrase: string): Promise<string>;
+  verifyPinOrPassphrase(pinOrPassphrase: string): Promise<void>;
+  verifyBiometricReauth(reason?: string): Promise<void>;
   unlockWithPin(pinOrPassphrase: string): Promise<void>;
   unlockWithBiometric(): Promise<void>;
   enableFingerprint(pinOrPassphrase: string): Promise<{ enrolled: boolean; message: string }>;
@@ -1243,6 +1245,38 @@ export function WalletProvider({
     [cleanScopeId],
   );
 
+  const verifyPinOrPassphrase = useCallback(
+    async (pinOrPassphrase: string): Promise<void> => {
+      const envelope = await loadEncryptedVault(cleanScopeId);
+      if (!envelope) {
+        throw new Error("No encrypted vault stored on this device");
+      }
+      await decryptVaultPayload(envelope, pinOrPassphrase, {
+        deriveKeyFn: deriveKeyInWorker,
+      });
+    },
+    [cleanScopeId],
+  );
+
+  const verifyBiometricReauth = useCallback(
+    async (reason = "Confirm high-value AstroWallet transaction"): Promise<void> => {
+      if (telegramBioAvailable) {
+        const bio = await authenticateTelegramBiometric(reason);
+        if (bio.authenticated) {
+          const pinFromBio =
+            bio.token || (await tgSecureStorageGet(securePinKey));
+          if (pinFromBio) {
+            await verifyPinOrPassphrase(pinFromBio);
+            return;
+          }
+        }
+      }
+      const pin = await unlockWithFingerprint(resolveWebAuthnRpId(config.pwaOrigin), cleanScopeId);
+      await verifyPinOrPassphrase(pin);
+    },
+    [telegramBioAvailable, securePinKey, verifyPinOrPassphrase, config.pwaOrigin, cleanScopeId],
+  );
+
   const addDerivedAccount = useCallback(
     async (label: string, pinOrPassphrase: string): Promise<LinkedAccount> => {
       if (!sessionVault.has()) {
@@ -1954,6 +1988,8 @@ export function WalletProvider({
     restoreAgVaultJson,
     exportAgVaultJson,
     revealMnemonicWithPin,
+    verifyPinOrPassphrase,
+    verifyBiometricReauth,
     unlockWithPin,
     unlockWithBiometric,
     enableFingerprint,

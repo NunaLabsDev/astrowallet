@@ -13,6 +13,7 @@ import { deriveTonAccount } from "@astrowallet/ton-core";
 import { describe, expect, it } from "vitest";
 import {
   computeNextDerivationIndex,
+  requiresHighValueReauth,
   validateStellarMemoInput,
   validateTransferAmount,
 } from "./components/flow-validators.js";
@@ -338,5 +339,53 @@ describe("PWA Multi-User Client Flows & Form Validators", () => {
       scamKp.zeroize();
       liquidKp.zeroize();
     }
+  });
+
+  it("enforces high-value & mainnet-warning PIN/biometric re-auth thresholds", () => {
+    expect(
+      requiresHighValueReauth({
+        amount: "10",
+        assetCode: "XLM",
+        spendableBalance: 100,
+        thresholdXlm: 250,
+        network: "testnet",
+      }).required,
+    ).toBe(false);
+
+    expect(
+      requiresHighValueReauth({
+        amount: "250",
+        assetCode: "XLM",
+        spendableBalance: 1000,
+        thresholdXlm: 250,
+        network: "testnet",
+      }).required,
+    ).toBe(true);
+
+    expect(
+      requiresHighValueReauth({
+        amount: "100",
+        assetCode: "USDC",
+        spendableBalance: 500,
+        network: "testnet",
+      }).required,
+    ).toBe(true);
+
+    expect(
+      requiresHighValueReauth({
+        amount: "60",
+        assetCode: "XLM",
+        spendableBalance: 100,
+        thresholdXlm: 250,
+        network: "testnet",
+      }).required,
+    ).toBe(true);
+
+    expect(
+      requiresHighValueReauth({
+        network: "mainnet",
+        hasWarningVerdict: true,
+      }).required,
+    ).toBe(true);
   });
 });

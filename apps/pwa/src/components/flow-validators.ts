@@ -75,3 +75,57 @@ export function computeNextDerivationIndex(
 ): number {
   return accounts.reduce((max, acc) => Math.max(max, acc.derivationIndex ?? 0), -1) + 1;
 }
+
+const STABLECOIN_CODES = new Set(["USDC", "USDT", "EURC", "PYUSD"]);
+
+/**
+ * Determines whether a transaction requires fresh PIN or biometric re-authentication
+ * before signing (high-value XLM/stablecoin threshold, >50% balance drain, or mainnet warning).
+ */
+export function requiresHighValueReauth(params: {
+  amount?: string | undefined;
+  assetCode?: string | undefined;
+  spendableBalance?: number | undefined;
+  thresholdXlm?: number | undefined;
+  network: "testnet" | "mainnet";
+  hasWarningVerdict?: boolean | undefined;
+}): { required: boolean; reason?: string } {
+  const thresholdXlm = params.thresholdXlm && params.thresholdXlm > 0 ? params.thresholdXlm : 250;
+  const code = (params.assetCode ?? "XLM").toUpperCase();
+  const numericAmount = params.amount ? Number(params.amount) : 0;
+
+  if (params.network === "mainnet" && params.hasWarningVerdict) {
+    return {
+      required: true,
+      reason: "Mainnet transaction has a Scan & Shield warning.",
+    };
+  }
+
+  if (Number.isFinite(numericAmount) && numericAmount > 0) {
+    if (code === "XLM" && numericAmount >= thresholdXlm) {
+      return {
+        required: true,
+        reason: `High-value transfer (>= ${thresholdXlm} XLM threshold).`,
+      };
+    }
+    if (STABLECOIN_CODES.has(code) && numericAmount >= 100) {
+      return {
+        required: true,
+        reason: `High-value ${code} transfer (>= 100 ${code} threshold).`,
+      };
+    }
+    if (
+      typeof params.spendableBalance === "number" &&
+      Number.isFinite(params.spendableBalance) &&
+      params.spendableBalance >= 50 &&
+      numericAmount >= params.spendableBalance * 0.5
+    ) {
+      return {
+        required: true,
+        reason: "Transfer moves 50% or more of your spendable balance.",
+      };
+    }
+  }
+
+  return { required: false };
+}

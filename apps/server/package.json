@@ -14,6 +14,7 @@
     "@astrowallet/domain": "workspace:*",
     "@astrowallet/security-shield": "workspace:*",
     "@astrowallet/tg-protocol": "workspace:*",
+    "@stellar/stellar-sdk": "^17.4.0",
     "grammy": "^1.36.0",
     "hono": "^4.7.10",
     "zod": "^3.25.0"

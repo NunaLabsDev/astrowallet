@@ -10,6 +10,7 @@ import type {
   SignMessageResult,
   SignTransactionOptions,
   SignTransactionResult,
+  UniversalScanReport,
   WaitOptions,
 } from "./types.js";
 import { sha256Hex } from "./verify.js";
@@ -93,13 +94,26 @@ export interface AstroConnectClient {
   ): Promise<SignTransactionResult>;
   signMessage(message: string, opts?: SignMessageOptions): Promise<SignMessageResult>;
   resolveIdentity(query: string): Promise<AstroIdentity>;
+  resolveTelegramIdentity(user?: {
+    id?: number | string | undefined;
+    username?: string | undefined;
+  }): Promise<AstroIdentity | null>;
+  scanTarget(target: string): Promise<UniversalScanReport>;
+}
+
+function normalizePathPrefix(raw: string | undefined, fallback: string): string {
+  const trimmed = (raw ?? fallback).trim().replace(/\/+$/, "");
+  return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
 
 /**
  * Creates a lightweight AstroConnect v1 client for Telegram Mini Apps, Node.js, or Cloudflare Workers.
  */
 export function createAstroConnectClient(config: AstroConnectConfig): AstroConnectClient {
-  const baseUrl = config.apiBaseUrl.replace(/\/+$/, "");
+  const baseUrl = config.apiBaseUrl.trim().replace(/\/+$/, "");
+  const requestsPrefix = normalizePathPrefix(config.requestsPathPrefix, "/v1/connect/requests");
+  const identityPrefix = normalizePathPrefix(config.identityPathPrefix, "/v1/identity/resolve");
+  const scanPath = normalizePathPrefix(config.scanPath, "/v1/connect/scan");
   const fetchImpl = config.fetchFn ?? fetch;
   const openLinkImpl = config.openLinkFn ?? defaultOpenTelegramLink;
 
@@ -108,7 +122,7 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
     if (config.ecosystemSecret) {
       headers["X-Ecosystem-Secret"] = config.ecosystemSecret;
     }
-    const res = await fetchImpl(`${baseUrl}/v1/connect/requests`, {
+    const res = await fetchImpl(`${baseUrl}${requestsPrefix}`, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
@@ -151,6 +165,7 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
           submit: opts.submit ?? true,
           humanSummary: opts.humanSummary,
           ...(opts.subAction ? { subAction: opts.subAction } : {}),
+          ...(opts.sourceAddress ? { sourceAddress: opts.sourceAddress } : {}),
         },
       });
     },
@@ -169,7 +184,7 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
 
     async getRequestStatus(requestId, resultToken) {
       const res = await fetchImpl(
-        `${baseUrl}/v1/connect/requests/${encodeURIComponent(requestId)}`,
+        `${baseUrl}${requestsPrefix}/${encodeURIComponent(requestId)}`,
         {
           method: "GET",
           headers: { "X-Connect-Token": resultToken },
@@ -298,7 +313,7 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
 
     async resolveIdentity(query) {
       const res = await fetchImpl(
-        `${baseUrl}/v1/identity/resolve?q=${encodeURIComponent(query)}`,
+        `${baseUrl}${identityPrefix}?q=${encodeURIComponent(query)}`,
       );
       const data = (await res.json()) as AstroIdentity & { error?: string };
       if (!res.ok) {
@@ -308,6 +323,47 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
         );
       }
       return data;
+    },
+
+    async resolveTelegramIdentity(user) {
+      const candidates: string[] = [];
+      if (user?.id !== undefined && String(user.id).trim()) {
+        candidates.push(String(user.id).trim());
+      }
+      const cleanUsername = user?.username?.trim().replace(/^@/, "");
+      if (cleanUsername) {
+        candidates.push(cleanUsername);
+      }
+      for (const query of candidates) {
+        try {
+          const identity = await this.resolveIdentity(query);
+          if (identity.found && identity.primaryAddress) {
+            return identity;
+          }
+        } catch {
+          // Graceful null fallback for 0-click auto-resolution
+        }
+      }
+      return null;
+    },
+
+    async scanTarget(target) {
+      const res = await fetchImpl(`${baseUrl}${scanPath}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target }),
+      });
+      const data = (await res.json()) as {
+        report?: UniversalScanReport;
+        error?: string;
+      };
+      if (!res.ok || !data.report) {
+        throw new AstroConnectError(
+          "http_error",
+          data.error ?? `Scan & Shield failed (${res.status})`,
+        );
+      }
+      return data.report;
     },
   };
 }

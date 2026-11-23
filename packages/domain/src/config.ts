@@ -1,7 +1,9 @@
 import { z } from "zod";
 import {
+  ClassicAddressSchema,
   ContractAddressSchema,
   TonNetworkSchema,
+  type ClassicAddress,
   type ContractAddress,
   type TonNetwork,
 } from "./accounts.js";
@@ -311,6 +313,14 @@ const RawPwaEnvSchema = z
     ),
     VITE_MOONPAY_WIDGET_URL: OptionalUrlSchema("VITE_MOONPAY_WIDGET_URL"),
     VITE_TRANSAK_WIDGET_URL: OptionalUrlSchema("VITE_TRANSAK_WIDGET_URL"),
+    VITE_HIGH_VALUE_REAUTH_XLM: z.preprocess(
+      (val) => emptyToUndefined(val) ?? "250",
+      z.coerce
+        .number()
+        .positive("VITE_HIGH_VALUE_REAUTH_XLM must be positive")
+        .max(1_000_000)
+        .default(250),
+    ),
   })
   .superRefine((env, ctx) => {
     if (env.VITE_STELLAR_NETWORK === "mainnet" && env.VITE_FRIENDBOT_URL) {
@@ -382,6 +392,7 @@ export interface PwaConfig {
   cctpForwarderContractId?: ContractAddress | undefined;
   moonPayWidgetUrl?: string | undefined;
   transakWidgetUrl?: string | undefined;
+  highValueReauthXlm: number;
 }
 
 export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
@@ -416,6 +427,7 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     cctpForwarderContractId: parsed.VITE_CCTP_FORWARDER_CONTRACT_ID,
     moonPayWidgetUrl: parsed.VITE_MOONPAY_WIDGET_URL,
     transakWidgetUrl: parsed.VITE_TRANSAK_WIDGET_URL,
+    highValueReauthXlm: parsed.VITE_HIGH_VALUE_REAUTH_XLM,
   };
 }
 
@@ -499,6 +511,47 @@ const RawServerEnvSchema = z
         .optional(),
     ),
     CONNECT_VERIFIED_BOTS: parseBotUsernameCsv("CONNECT_VERIFIED_BOTS"),
+    RELAY_CHANNEL_ACCOUNTS: z
+      .preprocess((val) => (typeof val === "string" ? val : ""), z.string())
+      .transform((raw) =>
+        Array.from(
+          new Set(
+            raw
+              .split(",")
+              .map((part) => part.trim())
+              .filter(Boolean),
+          ),
+        ),
+      )
+      .superRefine((accounts, ctx) => {
+        for (const addr of accounts) {
+          if (!ClassicAddressSchema.safeParse(addr).success) {
+            ctx.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: `RELAY_CHANNEL_ACCOUNTS contains invalid Classic address "${addr}"`,
+            });
+          }
+        }
+      }),
+    RELAY_SPONSOR_SECRET: z.preprocess(
+      emptyToUndefined,
+      z
+        .string()
+        .trim()
+        .regex(/^S[A-Z2-7]{55}$/, "RELAY_SPONSOR_SECRET must be a valid Stellar S... secret key")
+        .optional(),
+    ),
+    RELAY_BOOTSTRAP_STARTING_BALANCE_XLM: z.preprocess(
+      (val) => emptyToUndefined(val) ?? "1.5",
+      z
+        .string()
+        .trim()
+        .refine(
+          (v) => /^\d+(\.\d{1,7})?$/.test(v) && Number(v) >= 1 && Number(v) <= 5,
+          "RELAY_BOOTSTRAP_STARTING_BALANCE_XLM must be between 1 and 5 XLM",
+        ),
+    ),
+    RELAY_BOOTSTRAP_DAILY_LIMIT: parsePositiveIntWithDefault(25, 500),
   })
   .superRefine((env, ctx) => {
     if (env.STELLAR_NETWORK === "mainnet" && env.FRIENDBOT_URL) {
@@ -563,6 +616,10 @@ export interface ServerConfig {
   indexerWebhookSecret?: string | undefined;
   ecosystemSharedIntentSecret?: string | undefined;
   connectVerifiedBots: string[];
+  relayChannelAccounts: ClassicAddress[];
+  relaySponsorSecret?: string | undefined;
+  relayBootstrapStartingBalanceXlm: string;
+  relayBootstrapDailyLimit: number;
 }
 
 export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig {
@@ -600,5 +657,9 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     indexerWebhookSecret: parsed.INDEXER_WEBHOOK_SECRET,
     ecosystemSharedIntentSecret: parsed.ECOSYSTEM_SHARED_INTENT_SECRET,
     connectVerifiedBots: parsed.CONNECT_VERIFIED_BOTS,
+    relayChannelAccounts: parsed.RELAY_CHANNEL_ACCOUNTS as ClassicAddress[],
+    relaySponsorSecret: parsed.RELAY_SPONSOR_SECRET,
+    relayBootstrapStartingBalanceXlm: parsed.RELAY_BOOTSTRAP_STARTING_BALANCE_XLM,
+    relayBootstrapDailyLimit: parsed.RELAY_BOOTSTRAP_DAILY_LIMIT,
   };
 }

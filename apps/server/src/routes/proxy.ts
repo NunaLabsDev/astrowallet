@@ -155,6 +155,69 @@ export async function lookupSep29MemoRequired(
   return false;
 }
 
+export async function runScanTarget(params: {
+  config: ServerConfig;
+  cache?: KVNamespace | undefined;
+  target: string;
+  fetchFn?: FetchLike | undefined;
+}): Promise<
+  | { ok: true; body: Record<string, unknown> }
+  | { ok: false; status: 400; error: string }
+> {
+  const fetchFn = params.fetchFn ?? fetch;
+  const shield = createSecurityShield({
+    networkPassphrase: params.config.networkPassphrase,
+    rpcUrls: params.config.rpcUrls,
+    horizonUrls: params.config.horizonUrls,
+    stellarExpertApiBase: params.config.stellarExpertApiBase,
+    sep42AssetListUrls: params.config.sep42AssetListUrls,
+    fetchFn,
+    directoryLookup: (addr) =>
+      lookupDirectoryTag(params.config, params.cache, addr, fetchFn),
+    memoRequiredLookup: (addr) =>
+      lookupSep29MemoRequired(params.config, addr, fetchFn),
+  });
+
+  const scanner = shield.createScanner();
+  const addrParse = StellarAddressSchema.safeParse(params.target);
+  if (addrParse.success) {
+    const report = await scanner.scanAddress(addrParse.data);
+    return {
+      ok: true,
+      body: {
+        kind: "address",
+        target: addrParse.data,
+        report,
+      },
+    };
+  }
+
+  try {
+    const decoded = decodeTransactionEnvelope(
+      params.target,
+      params.config.networkPassphrase,
+    );
+    const report = await scanner.scanTransactionXdr(params.target);
+    return {
+      ok: true,
+      body: {
+        kind: "xdr",
+        decoded,
+        report,
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 400,
+      error:
+        err instanceof Error
+          ? err.message
+          : "Target is neither a valid Stellar address nor a valid transaction XDR",
+    };
+  }
+}
+
 export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEnv> {
   const router = new Hono<ProxyRouteEnv>();
   const fetchFn = deps.fetchFn ?? fetch;
@@ -373,50 +436,16 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       return c.json({ error: "Invalid scan payload" }, 400);
     }
 
-    const shield = createSecurityShield({
-      networkPassphrase: config.networkPassphrase,
-      rpcUrls: config.rpcUrls,
-      horizonUrls: config.horizonUrls,
-      stellarExpertApiBase: config.stellarExpertApiBase,
-      sep42AssetListUrls: config.sep42AssetListUrls,
+    const result = await runScanTarget({
+      config,
+      cache: c.env.CACHE,
+      target: body.target,
       fetchFn,
-      directoryLookup: (addr) => lookupDirectoryTag(config, c.env.CACHE, addr, fetchFn),
-      memoRequiredLookup: (addr) => lookupSep29MemoRequired(config, addr, fetchFn),
     });
-
-    const scanner = shield.createScanner();
-    const addrParse = StellarAddressSchema.safeParse(body.target);
-    if (addrParse.success) {
-      const report = await scanner.scanAddress(addrParse.data);
-      return c.json({
-        kind: "address",
-        target: addrParse.data,
-        report,
-      });
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.status);
     }
-
-    try {
-      const decoded = decodeTransactionEnvelope(
-        body.target,
-        config.networkPassphrase,
-      );
-      const report = await scanner.scanTransactionXdr(body.target);
-      return c.json({
-        kind: "xdr",
-        decoded,
-        report,
-      });
-    } catch (err) {
-      return c.json(
-        {
-          error:
-            err instanceof Error
-              ? err.message
-              : "Target is neither a valid Stellar address nor a valid transaction XDR",
-        },
-        400,
-      );
-    }
+    return c.json(result.body);
   });
 
   return router;

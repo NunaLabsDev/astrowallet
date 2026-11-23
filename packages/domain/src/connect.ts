@@ -89,6 +89,7 @@ export const ConnectSignXdrPayloadSchema = z.object({
   submit: z.boolean().default(true),
   humanSummary: z.string().trim().min(1).max(400),
   subAction: z.string().trim().max(64).optional(),
+  sourceAddress: StellarAddressSchema.optional(),
 });
 
 export const ConnectAccountSummarySchema = z.object({

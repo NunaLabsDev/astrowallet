@@ -15,6 +15,8 @@ import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
 import { triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import { requiresHighValueReauth } from "./flow-validators.js";
+import { HighValueReauthGate } from "./HighValueReauthGate.js";
 
 export interface ActiveIntentRoute {
   intentId: string;
@@ -145,6 +147,7 @@ export function IntentSheet({
   const [copiedClaimUrl, setCopiedClaimUrl] = useState(false);
   const [destScanReport, setDestScanReport] = useState<ScanReport | null>(null);
   const [scanningIntent, setScanningIntent] = useState(false);
+  const [reauthVerified, setReauthVerified] = useState(false);
 
   const isAccountUnfunded = accountState !== null && !accountState.funded;
   const intentAssetCode = (intent?.payload.assetCode ?? "XLM").toUpperCase();
@@ -217,7 +220,23 @@ export function IntentSheet({
 
   useEffect(() => {
     setWarningAcknowledged(false);
+    setReauthVerified(false);
   }, [route.intentId, intent?.intentId]);
+
+  const reauthGate = useMemo(() => {
+    if (!intent) return { required: false };
+    const isSwap = intent.actionType === "swap";
+    const rawAsset = isSwap ? intent.payload.fromAsset : intent.payload.assetCode;
+    const assetCode = rawAsset?.split(":")[0];
+    return requiresHighValueReauth({
+      amount: intent.payload.amount,
+      assetCode,
+      spendableBalance: availableNum ?? undefined,
+      thresholdXlm: config.highValueReauthXlm,
+      network: config.network,
+      hasWarningVerdict: destScanReport?.verdict === "warning",
+    });
+  }, [intent, availableNum, config.highValueReauthXlm, config.network, destScanReport?.verdict]);
 
   useEffect(() => {
     const requestedSource = intent?.payload.sourceAddress?.trim();
@@ -1028,11 +1047,22 @@ export function IntentSheet({
                           available; need {intent.payload.amount}).
                         </div>
                       )}
+                  {reauthGate.required && reauthGate.reason && (
+                    <HighValueReauthGate
+                      reason={reauthGate.reason}
+                      verified={reauthVerified}
+                      onVerified={() => setReauthVerified(true)}
+                    />
+                  )}
                   <button
                     type="button"
                     className="aw-btn-primary"
                     disabled={
-                      busy || !resolvedEscrowContract || isAccountUnfunded || hasInsufficientFunds
+                      busy ||
+                      !resolvedEscrowContract ||
+                      isAccountUnfunded ||
+                      hasInsufficientFunds ||
+                      (reauthGate.required && !reauthVerified)
                     }
                     onClick={() => void handleFundClaimEscrow()}
                   >
@@ -1170,13 +1200,21 @@ export function IntentSheet({
                   )}
                 </div>
               )}
+              {reauthGate.required && reauthGate.reason && (
+                <HighValueReauthGate
+                  reason={reauthGate.reason}
+                  verified={reauthVerified}
+                  onVerified={() => setReauthVerified(true)}
+                />
+              )}
               <button
                 type="button"
                 className="aw-btn-primary"
                 disabled={
                   busy ||
                   destScanReport?.verdict === "malicious" ||
-                  (destScanReport?.verdict === "warning" && !warningAcknowledged)
+                  (destScanReport?.verdict === "warning" && !warningAcknowledged) ||
+                  (reauthGate.required && !reauthVerified)
                 }
                 onClick={() => void handleConfirmSwap()}
               >
@@ -1276,6 +1314,13 @@ export function IntentSheet({
                   )}
                 </div>
               )}
+              {reauthGate.required && reauthGate.reason && (
+                <HighValueReauthGate
+                  reason={reauthGate.reason}
+                  verified={reauthVerified}
+                  onVerified={() => setReauthVerified(true)}
+                />
+              )}
               <button
                 type="button"
                 className="aw-btn-primary"
@@ -1283,7 +1328,8 @@ export function IntentSheet({
                   busy ||
                   !intent.payload.unsignedXdr ||
                   destScanReport?.verdict === "malicious" ||
-                  (destScanReport?.verdict === "warning" && !warningAcknowledged)
+                  (destScanReport?.verdict === "warning" && !warningAcknowledged) ||
+                  (reauthGate.required && !reauthVerified)
                 }
                 onClick={() => void handleConfirmSignXdr()}
               >
@@ -1399,6 +1445,13 @@ export function IntentSheet({
                       available; need {intent.payload.amount}).
                     </div>
                   )}
+              {reauthGate.required && reauthGate.reason && (
+                <HighValueReauthGate
+                  reason={reauthGate.reason}
+                  verified={reauthVerified}
+                  onVerified={() => setReauthVerified(true)}
+                />
+              )}
               <button
                 type="button"
                 className="aw-btn-primary"
@@ -1408,7 +1461,8 @@ export function IntentSheet({
                   hasInsufficientFunds ||
                   destScanReport?.verdict === "malicious" ||
                   (destScanReport?.verdict === "warning" && !warningAcknowledged) ||
-                  Boolean(destScanReport?.requiresMemoCheck && !intent.payload.memo?.trim())
+                  Boolean(destScanReport?.requiresMemoCheck && !intent.payload.memo?.trim()) ||
+                  (reauthGate.required && !reauthVerified)
                 }
                 onClick={() => void handleConfirmPayment()}
               >

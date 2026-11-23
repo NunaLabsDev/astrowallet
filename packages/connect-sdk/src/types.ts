@@ -13,7 +13,7 @@ export interface ConnectAppInfo {
 }
 
 export interface AstroConnectConfig {
-  /** Base URL of the AstroWallet server / Pages origin (e.g. https://astrowallet-soroban.pages.dev). */
+  /** Base URL of the AstroWallet server / Pages origin (or "" for same-origin Worker proxy). */
   apiBaseUrl: string;
   /** Calling dApp identity metadata displayed in AstroWallet Clear-Sign UI and Boomerang CTA. */
   app: ConnectAppInfo;
@@ -23,6 +23,12 @@ export interface AstroConnectConfig {
   openLinkFn?: ((deepLink: string) => void) | undefined;
   /** Optional shared secret for official ASTRO ecosystem apps. */
   ecosystemSecret?: string | undefined;
+  /** Optional path override for connect requests (default: "/v1/connect/requests"). */
+  requestsPathPrefix?: string | undefined;
+  /** Optional path override for AstroID resolution (default: "/v1/identity/resolve"). */
+  identityPathPrefix?: string | undefined;
+  /** Optional path override for Scan & Shield (default: "/v1/connect/scan"). */
+  scanPath?: string | undefined;
 }
 
 export interface ConnectAccountSummary {
@@ -102,6 +108,7 @@ export interface SignTransactionOptions extends WaitOptions {
   humanSummary: string;
   submit?: boolean | undefined;
   subAction?: string | undefined;
+  sourceAddress?: string | undefined;
   ttlSeconds?: number | undefined;
 }
 
@@ -135,4 +142,44 @@ export interface AstroIdentity {
   username?: string | undefined;
   primaryAddress?: string | undefined;
   accounts: ConnectAccountSummary[];
+}
+
+export interface IntentTokenClaims {
+  intentId: string;
+  network: AstroNetwork;
+  telegramUserId: string;
+  expiresAt: number;
+}
+
+export type VerifyIntentResult =
+  | { valid: true }
+  | { valid: false; reason: "malformed" | "expired" | "invalid_signature" };
+
+export interface CrossAppIntentEnvelopeV1 {
+  originApp: string;
+  subAction: string;
+  humanSummary: string;
+  unsignedXdr: string;
+  xdrSha256: string;
+  returnStartAppParam?: string | undefined;
+  fromAsset?: string | undefined;
+  toAsset?: string | undefined;
+  amount?: string | undefined;
+  expectedOutputAmount?: string | undefined;
+  provider?: string | undefined;
+  priceImpactPct?: string | undefined;
+}
+
+export interface UniversalScanFinding {
+  code: string;
+  severity: "info" | "warning" | "critical";
+  title: string;
+  description: string;
+  blocksSigning?: boolean | undefined;
+}
+
+export interface UniversalScanReport {
+  verdict: "safe" | "warning" | "malicious";
+  requiresMemoCheck?: boolean | undefined;
+  findings: UniversalScanFinding[];
 }

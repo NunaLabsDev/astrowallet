@@ -26,6 +26,7 @@ export interface WorkerBindings {
   DB?: D1Database;
   CACHE?: KVNamespace;
   CHAIN_WATCHER?: DurableObjectNamespace;
+  CHANNEL_POOL?: DurableObjectNamespace;
   ASTRODEX?: ServiceFetcher;
   ASTROGATE?: ServiceFetcher;
   [key: string]: unknown;

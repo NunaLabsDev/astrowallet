@@ -18,8 +18,10 @@ import {
   signMiniAppSessionToken,
   type ConnectChallengePayload,
 } from "@astrowallet/tg-protocol";
+import { Keypair } from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
+import { ChannelPoolDO } from "./durable-objects/channel-pool.js";
 import type {
   ServerRepository,
   StoredEncryptedVaultBackup,
@@ -2760,5 +2762,242 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       sig: "c".repeat(64),
       txHash: "2".repeat(64),
     });
+  });
+
+  it("supports ChannelPoolDO tx_bad_seq retry, /v1/connect/scan, and /v1/relay/bootstrap fail-closed gates", async () => {
+    const repo = createMemoryRepo();
+    const pool = new ChannelPoolDO({} as never, {});
+    const channel1 = Keypair.random().publicKey();
+    const channel2 = Keypair.random().publicKey();
+    const sponsorKp = Keypair.random();
+    const newUserKp = Keypair.random();
+    const fundedKp = Keypair.random();
+
+    const usedChannels: string[] = [];
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        if (url.includes("channels.openzeppelin.com")) {
+          const headers = new Headers(init?.headers);
+          const ch = headers.get("X-Channel-Account") ?? "";
+          usedChannels.push(ch);
+          if (usedChannels.length === 1) {
+            return new Response("tx_bad_seq", { status: 400 });
+          }
+          return new Response(JSON.stringify({ hash: "9".repeat(64), status: "submitted" }), {
+            status: 200,
+          });
+        }
+        if (url.includes(`/accounts/${newUserKp.publicKey()}`)) {
+          return new Response("Not Found", { status: 404 });
+        }
+        if (url.includes(`/accounts/${fundedKp.publicKey()}`)) {
+          return new Response(JSON.stringify({ sequence: "10" }), { status: 200 });
+        }
+        if (url.includes(`/accounts/${sponsorKp.publicKey()}`)) {
+          return new Response(JSON.stringify({ sequence: "100" }), { status: 200 });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    // 1. Open-CORS /v1/connect/scan
+    const scanRes = await app.request(
+      "/v1/connect/scan",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "https://external.example" },
+        body: JSON.stringify({ target: newUserKp.publicKey() }),
+      },
+      TEST_ENV,
+    );
+    expect(scanRes.status).toBe(200);
+    expect(scanRes.headers.get("Access-Control-Allow-Origin")).toBe("*");
+
+    // 2. ChannelPoolDO lease + tx_bad_seq retry
+    const intentNow = Math.floor(Date.now() / 1000);
+    const intentExpiresAt = intentNow + 300;
+    const intentSig = await signIntentToken(
+      {
+        intentId: "int_chan01",
+        network: "testnet",
+        telegramUserId: "55112233",
+        expiresAt: intentExpiresAt,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId: "int_chan01",
+      network: "testnet",
+      actionType: "sign_xdr",
+      creatorTelegramUserId: "55112233",
+      payloadJson: JSON.stringify({ humanSummary: "Test channel pool" }),
+      hmacSig: intentSig,
+      status: "pending",
+      expiresAt: intentExpiresAt,
+      createdAt: intentNow,
+    });
+
+    const envWithPool = {
+      ...TEST_ENV,
+      OZ_CHANNELS_API_URL: "https://channels.openzeppelin.com/testnet",
+      RELAY_ALLOWED_CONTRACTS: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      RELAY_CHANNEL_ACCOUNTS: `${channel1},${channel2}`,
+      CHANNEL_POOL: {
+        idFromName: (name: string) => name as never,
+        get: () => pool as never,
+      },
+    };
+
+    const relayRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          intentAuth: { intentId: "int_chan01", sig: intentSig },
+        }),
+      },
+      envWithPool as never,
+    );
+    expect(relayRes.status).toBe(200);
+    expect(usedChannels).toHaveLength(2);
+    expect(usedChannels[0]).not.toBe(usedChannels[1]);
+
+    // 3. /v1/relay/bootstrap fail-closed checks
+    const unconfiguredBoot = await app.request(
+      "/v1/relay/bootstrap",
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" },
+      TEST_ENV,
+    );
+    expect(unconfiguredBoot.status).toBe(503);
+
+    const now = Math.floor(Date.now() / 1000);
+    const initPairs: Array<[string, string]> = [
+      ["auth_date", String(now - 5)],
+      ["user", JSON.stringify({ id: 888999, username: "boot_user", first_name: "Boot" })],
+    ];
+    initPairs.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const initHash = await computeTelegramInitDataHash(
+      initPairs.map(([k, v]) => `${k}=${v}`).join("\n"),
+      TEST_ENV.TG_BOT_TOKEN,
+    );
+    const initParams = new URLSearchParams(Object.fromEntries(initPairs));
+    initParams.set("hash", initHash);
+    const authRes = await app.request(
+      "/v1/tg/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: initParams.toString() }),
+      },
+      TEST_ENV,
+    );
+    const { sessionToken } = (await authRes.json()) as { sessionToken: string };
+    const bootEnv = { ...TEST_ENV, RELAY_SPONSOR_SECRET: sponsorKp.secret() };
+
+    const makeBootSig = async (kp: Keypair, nonce: string) => {
+      const msg = `astrowallet-bootstrap:v1:testnet:${kp.publicKey()}:${now}:${nonce}`;
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(`Stellar Signed Message:\n${msg}`),
+      );
+      return Buffer.from(kp.sign(Buffer.from(digest))).toString("base64");
+    };
+
+    // Already funded -> 409
+    const fundedRes = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          address: fundedKp.publicKey(),
+          mode: "sponsored_reserve",
+          timestamp: now,
+          nonce: "nonce_funded_1",
+          signatureBase64: await makeBootSig(fundedKp, "nonce_funded_1"),
+        }),
+      },
+      bootEnv,
+    );
+    expect(fundedRes.status).toBe(409);
+
+    // Invalid sig -> 403
+    const badSigRes = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          address: newUserKp.publicKey(),
+          mode: "sponsored_reserve",
+          timestamp: now,
+          nonce: "nonce_badsig_1",
+          signatureBase64: Buffer.alloc(64, 1).toString("base64"),
+        }),
+      },
+      bootEnv,
+    );
+    expect(badSigRes.status).toBe(403);
+
+    // Valid sponsored_reserve -> 200 with sponsorSignedXdr, then replay -> 409
+    const goodSig = await makeBootSig(newUserKp, "nonce_good_1");
+    const okBoot = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          address: newUserKp.publicKey(),
+          mode: "sponsored_reserve",
+          timestamp: now,
+          nonce: "nonce_good_1",
+          signatureBase64: goodSig,
+        }),
+      },
+      bootEnv,
+    );
+    expect(okBoot.status).toBe(200);
+    const bootJson = (await okBoot.json()) as {
+      ok: boolean;
+      sponsorSignedXdr: string;
+      sponsorAddress: string;
+    };
+    expect(bootJson.ok).toBe(true);
+    expect(bootJson.sponsorAddress).toBe(sponsorKp.publicKey());
+    expect(bootJson.sponsorSignedXdr.length).toBeGreaterThan(32);
+
+    const replayBoot = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
+        },
+        body: JSON.stringify({
+          address: newUserKp.publicKey(),
+          mode: "sponsored_reserve",
+          timestamp: now,
+          nonce: "nonce_good_2",
+          signatureBase64: await makeBootSig(newUserKp, "nonce_good_2"),
+        }),
+      },
+      bootEnv,
+    );
+    expect(replayBoot.status).toBe(409);
   });
 });

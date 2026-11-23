@@ -22,7 +22,8 @@
 | `VITE_ASTRODEX_MINI_APP_SHORT_NAME` | `dex` | `dex` | Optional AstroDex Mini App short name (`t.me/<bot>/<short_name>`) |
 | `VITE_ASTROGATE_BOT_USERNAME` | `AstroGateSorobanBot` | `AstroGateBot` | Optional Boomerang return link for AstroGate-origin intents |
 | `VITE_TON_NETWORK` | `testnet` | `mainnet` | Defaults to `VITE_STELLAR_NETWORK` |
-| `VITE_TON_RPC_URLS` | Comma-separated TON RPC URLs | Comma-separated TON RPC URLs | Toncenter JSON-RPC v2 endpoints (HTTPS on mainnet) |
+| `VITE_TON_RPC_URLS` | Comma-separated TON RPC URLs | Comma-separated TON RPC URLs | Toncenter JSON-RPC v2 + failover endpoints (HTTPS on mainnet) |
+| `VITE_HIGH_VALUE_REAUTH_XLM` | `250` | `250` | PIN/biometric re-auth threshold in XLM (default `250`) |
 | `VITE_TON_BRIDGE_URL` | TON Connect SSE bridge URL | TON Connect SSE bridge URL | TON Connect v2 encrypted bridge (`https://...`) |
 | `VITE_TON_EXPLORER_BASE_URL` | Testnet TON explorer URL | Mainnet TON explorer URL | Optional transaction/address explorer link |
 | `VITE_ALLOW_DEV_OUTSIDE_TELEGRAM` | `false` (or `true` locally) | *(forbidden: must be `false`)* | Zod rejects if `true` when `mainnet` |
@@ -53,6 +54,10 @@
 | `SOROSWAP_API_BASE` | Env Var | Soroswap aggregator API base URL |
 | `SEP42_ASSET_LIST_URLS` / `CLAIM_ESCROW_CONTRACT_ID` / `SMART_ACCOUNT_WASM_HASH` | Env Var | Server-side SEP-42 lists, escrow `C...`, and smart account WASM hash verification |
 | `RELAY_ALLOWED_CONTRACTS` | Env Var | Comma-separated `C...` allowlist enforced by `/v1/relay/submit` |
+| `RELAY_CHANNEL_ACCOUNTS` | Env Var | Optional comma-separated Classic `G...` Channel Accounts leased via `ChannelPoolDO` |
+| `RELAY_BOOTSTRAP_STARTING_BALANCE_XLM` | Env Var | Optional `1`..`5` XLM starting balance for `direct` `/v1/relay/bootstrap` (default `1.5`) |
+| `RELAY_BOOTSTRAP_DAILY_LIMIT` | Env Var | Optional daily cap on `/v1/relay/bootstrap` activations (default `25`) |
+| `RELAY_SPONSOR_SECRET` | Secret | Optional Stellar `S...` sponsor secret for CAP-33 `G...` account bootstrapping |
 | `RELAY_RATE_LIMIT_PER_MIN` / `PROXY_RATE_LIMIT_PER_MIN` | Env Var | Rate-limit thresholds (defaults: `10`, `60`) |
 | `RELAY_MAX_OPERATIONS` / `RELAY_MAX_FEE_STROOPS` / `RELAY_DAILY_BUDGET_STROOPS` | Env Var | Policy caps (defaults: `5`, `2000000`, `500000000` stroops) |
 | `DB` | Cloudflare D1 | Users (`telegram_user_id` PK), linked addresses, intents, claim links, `rate_limits`, `relay_daily_usage`, `processed_tg_updates`, `encrypted_vault_backups` |

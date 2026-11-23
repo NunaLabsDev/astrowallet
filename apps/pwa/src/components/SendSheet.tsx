@@ -14,9 +14,11 @@ import { mapSep7MemoKind } from "../state/session-vault.js";
 import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import {
+  requiresHighValueReauth,
   validateStellarMemoInput,
   validateTransferAmount,
 } from "./flow-validators.js";
+import { HighValueReauthGate } from "./HighValueReauthGate.js";
 import {
   IconCheck,
   IconClose,
@@ -116,6 +118,7 @@ export function SendSheet({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reviewPending, setReviewPending] = useState<PendingStellarReview | null>(null);
+  const [reauthVerified, setReauthVerified] = useState(false);
   const [confirmedTxHash, setConfirmedTxHash] = useState<string | null>(null);
   const [copiedHash, setCopiedHash] = useState(false);
 
@@ -375,7 +378,19 @@ export function SendSheet({
       }
     }
 
+    const reauthCheck = reviewPending
+      ? requiresHighValueReauth({
+          amount: reviewPending.amount,
+          assetCode: reviewPending.assetCode,
+          spendableBalance: maxSpendableNumber,
+          thresholdXlm: config.highValueReauthXlm,
+          network: config.network,
+          hasWarningVerdict: destShieldReport?.verdict === "warning",
+        })
+      : { required: false };
+
     triggerTelegramHaptic("selection");
+    setReauthVerified(false);
     setReviewPending({
       destination: parsedDest.data,
       amount: amount.trim(),
@@ -386,6 +401,7 @@ export function SendSheet({
       saveAsContact,
       contactLabel: contactLabel.trim(),
     });
+    void reauthCheck;
   };
 
   const handleConfirmBroadcast = async () => {
@@ -556,6 +572,24 @@ export function SendSheet({
             </div>
           )}
 
+          {(() => {
+            const gate = requiresHighValueReauth({
+              amount: reviewPending.amount,
+              assetCode: reviewPending.assetCode,
+              spendableBalance: maxSpendableNumber,
+              thresholdXlm: config.highValueReauthXlm,
+              network: config.network,
+              hasWarningVerdict: destShieldReport?.verdict === "warning",
+            });
+            return gate.required && gate.reason ? (
+              <HighValueReauthGate
+                reason={gate.reason}
+                verified={reauthVerified}
+                onVerified={() => setReauthVerified(true)}
+              />
+            ) : null;
+          })()}
+
           {error && (
             <div className="aw-banner aw-banner--danger" role="alert">
               {error}
@@ -570,6 +604,7 @@ export function SendSheet({
               disabled={busy}
               onClick={() => {
                 setError(null);
+                setReauthVerified(false);
                 setReviewPending(null);
               }}
             >
@@ -579,7 +614,18 @@ export function SendSheet({
               type="button"
               className="aw-btn-primary"
               style={{ flex: 2 }}
-              disabled={busy}
+              disabled={
+                busy ||
+                (requiresHighValueReauth({
+                  amount: reviewPending.amount,
+                  assetCode: reviewPending.assetCode,
+                  spendableBalance: maxSpendableNumber,
+                  thresholdXlm: config.highValueReauthXlm,
+                  network: config.network,
+                  hasWarningVerdict: destShieldReport?.verdict === "warning",
+                }).required &&
+                  !reauthVerified)
+              }
               onClick={() => void handleConfirmBroadcast()}
             >
               <IconSend size={15} />

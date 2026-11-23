@@ -5,12 +5,19 @@ import {
   evaluateDecodedTransaction,
 } from "@astrowallet/security-shield";
 import { verifyConnectSignature, verifyIntentToken } from "@astrowallet/tg-protocol";
-import type { KVNamespace } from "@cloudflare/workers-types";
+import type { DurableObjectNamespace, KVNamespace } from "@cloudflare/workers-types";
+import {
+  BASE_FEE,
+  Keypair,
+  Operation,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
 import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
 import type { FetchLike } from "../stellar-verifier.js";
+import { authenticateMiniAppSession } from "./tg-auth.js";
 
 export interface RelayRoutesDeps {
   fetchFn?: FetchLike | undefined;
@@ -19,6 +26,7 @@ export interface RelayRoutesDeps {
 export type RelayRouteEnv = {
   Bindings: {
     CACHE?: KVNamespace;
+    CHANNEL_POOL?: DurableObjectNamespace;
     [key: string]: unknown;
   };
   Variables: {
@@ -256,19 +264,107 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         ? { func: body.funcXdrBase64, auth: body.authEntriesXdrBase64 }
         : { xdr: body.signedTxXdrBase64 };
 
-    const headers: Record<string, string> = {
-      "Content-Type": "application/json",
-    };
-    if (config.ozChannelsApiKey) {
-      headers.Authorization = `Bearer ${config.ozChannelsApiKey}`;
-    }
-
     const cleanUrl = config.ozChannelsApiUrl.replace(/\/+$/, "");
-    const res = await fetchFn(cleanUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(upstreamPayload),
-    });
+    const poolStub =
+      c.env.CHANNEL_POOL && config.relayChannelAccounts.length > 0
+        ? c.env.CHANNEL_POOL.get(
+            c.env.CHANNEL_POOL.idFromName(`channel-pool:${config.network}`),
+          )
+        : null;
+
+    const acquireChannel = async (exclude: string[] = []) => {
+      if (!poolStub) return null;
+      const leaseRes = await poolStub.fetch(
+        new Request("https://channel-pool.internal/acquire", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channels: config.relayChannelAccounts,
+            exclude,
+          }),
+        }),
+      );
+      if (!leaseRes.ok) {
+        return { errorStatus: leaseRes.status, errorText: await leaseRes.text() } as const;
+      }
+      return (await leaseRes.json()) as { leaseId: string; channelAddress: string };
+    };
+
+    const releaseChannel = async (leaseId: string | undefined) => {
+      if (!poolStub || !leaseId) return;
+      await poolStub
+        .fetch(
+          new Request("https://channel-pool.internal/release", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ leaseId }),
+          }),
+        )
+        .catch(() => undefined);
+    };
+
+    const submitWithChannel = async (channelAddress?: string) => {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (config.ozChannelsApiKey) {
+        headers.Authorization = `Bearer ${config.ozChannelsApiKey}`;
+      }
+      if (channelAddress) {
+        headers["X-Channel-Account"] = channelAddress;
+      }
+      return fetchFn(cleanUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(upstreamPayload),
+      });
+    };
+
+    let res: Response;
+    if (poolStub) {
+      const excluded: string[] = [];
+      let lease = await acquireChannel(excluded);
+      if (lease && "errorStatus" in lease) {
+        return c.json(
+          { error: "All relay channel accounts are busy; retry shortly" },
+          429,
+        );
+      }
+      try {
+        res = await submitWithChannel(lease?.channelAddress);
+        if (!res.ok) {
+          const errText = await res.text();
+          if (
+            /tx_bad_seq/i.test(errText) &&
+            lease &&
+            config.relayChannelAccounts.length > 1
+          ) {
+            excluded.push(lease.channelAddress);
+            await releaseChannel(lease.leaseId);
+            lease = await acquireChannel(excluded);
+            if (lease && !("errorStatus" in lease)) {
+              res = await submitWithChannel(lease.channelAddress);
+            } else {
+              return c.json(
+                { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
+                502,
+              );
+            }
+          } else {
+            return c.json(
+              { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
+              502,
+            );
+          }
+        }
+      } finally {
+        if (lease && !("errorStatus" in lease)) {
+          await releaseChannel(lease.leaseId);
+        }
+      }
+    } else {
+      res = await submitWithChannel();
+    }
 
     if (!res.ok) {
       const errText = await res.text();
@@ -285,6 +381,220 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       hash: data.hash ?? data.txHash ?? "",
       status: data.status ?? "submitted",
     });
+  });
+
+  const BootstrapBodySchema = z.object({
+    address: ClassicAddressSchema,
+    mode: z.enum(["sponsored_reserve", "direct"]).default("sponsored_reserve"),
+    timestamp: z.number().int().positive(),
+    nonce: z.string().trim().min(8).max(64),
+    signatureBase64: z.string().min(16),
+  });
+
+  /**
+   * Sponsored CAP-33 / direct activation for unfunded new Classic G... accounts.
+   * Fail-closed: requires RELAY_SPONSOR_SECRET, verified Mini App session, SEP-53
+   * ownership proof, Horizon unfunded check, and 1-per-user + 1-per-address D1 dedup.
+   */
+  router.post("/bootstrap", async (c) => {
+    const config = c.get("config");
+    if (!config.relaySponsorSecret) {
+      return c.json(
+        { error: "Sponsored account bootstrapping (RELAY_SPONSOR_SECRET) is not configured" },
+        503,
+      );
+    }
+
+    const session = await authenticateMiniAppSession(c);
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
+
+    const repo = c.get("repo");
+    const limit = await checkRateLimit({
+      repository: repo,
+      cache: c.env.CACHE,
+      scope: "relay_bootstrap",
+      clientKey: clientKeyFromHeaders(c.req.raw.headers),
+      limitPerMin: Math.min(config.relayRateLimitPerMin, 5),
+    });
+    if (!limit.allowed) {
+      c.header("Retry-After", String(limit.retryAfterSeconds));
+      return c.json({ error: "Bootstrap rate limit exceeded" }, 429);
+    }
+
+    let body: z.infer<typeof BootstrapBodySchema>;
+    try {
+      body = BootstrapBodySchema.parse(await c.req.json());
+    } catch (err) {
+      return c.json(
+        { error: "Invalid bootstrap payload", details: err instanceof Error ? err.message : undefined },
+        400,
+      );
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (Math.abs(nowSec - body.timestamp) > 120) {
+      return c.json({ error: "Bootstrap signature timestamp expired" }, 403);
+    }
+
+    const challengeMsg = `astrowallet-bootstrap:v1:${config.network}:${body.address}:${body.timestamp}:${body.nonce}`;
+    const sigValid = await verifyConnectSignature({
+      address: body.address,
+      message: challengeMsg,
+      signatureBase64: body.signatureBase64,
+    });
+    if (!sigValid) {
+      return c.json({ error: "Invalid SEP-53 ownership signature for bootstrap address" }, 403);
+    }
+
+    // Check Horizon: reject if target account is already funded
+    for (const hBase of config.horizonUrls) {
+      try {
+        const acctRes = await fetchFn(
+          `${hBase.replace(/\/+$/, "")}/accounts/${encodeURIComponent(body.address)}`,
+          { headers: { Accept: "application/json" } },
+        );
+        if (acctRes.status === 200) {
+          return c.json({ error: "Target Stellar account is already funded on-ledger" }, 409);
+        }
+        if (acctRes.status === 404) {
+          break;
+        }
+      } catch {
+        // Try next Horizon URL
+      }
+    }
+
+    if (repo) {
+      const dayUtc = new Date(nowSec * 1000).toISOString().slice(0, 10);
+      const budget = await repo.tryConsumeRelayBudget({
+        dayUtc,
+        feeStroops: "100000",
+        dailyBudgetStroops: String(BigInt(config.relayBootstrapDailyLimit) * 100_000n),
+      });
+      if (!budget.allowed) {
+        return c.json({ error: "Daily sponsored bootstrap limit reached" }, 429);
+      }
+
+      const claimedUser = await repo.claimAlertDedupKey(
+        `bootstrap:tg:${config.network}:${session.claims.telegramUserId}`,
+      );
+      if (!claimedUser) {
+        return c.json({ error: "This Telegram account has already used its sponsored activation" }, 409);
+      }
+      const claimedAddr = await repo.claimAlertDedupKey(
+        `bootstrap:addr:${config.network}:${body.address}`,
+      );
+      if (!claimedAddr) {
+        return c.json({ error: "This Stellar address has already been bootstrapped" }, 409);
+      }
+    }
+
+    const sponsorKeypair = Keypair.fromSecret(config.relaySponsorSecret);
+    const sponsorAddress = sponsorKeypair.publicKey();
+
+    let sponsorSequence: string | undefined;
+    for (const hBase of config.horizonUrls) {
+      try {
+        const sRes = await fetchFn(
+          `${hBase.replace(/\/+$/, "")}/accounts/${encodeURIComponent(sponsorAddress)}`,
+          { headers: { Accept: "application/json" } },
+        );
+        if (!sRes.ok) continue;
+        const sJson = (await sRes.json()) as { sequence?: string };
+        if (sJson.sequence) {
+          sponsorSequence = sJson.sequence;
+          break;
+        }
+      } catch {
+        // Try next Horizon URL
+      }
+    }
+    if (!sponsorSequence) {
+      return c.json({ error: "Sponsor account sequence unavailable on Horizon" }, 502);
+    }
+
+    const sponsorAccount = {
+      accountId: () => sponsorAddress,
+      sequenceNumber: () => sponsorSequence!,
+      incrementSequenceNumber: () => {
+        sponsorSequence = (BigInt(sponsorSequence!) + 1n).toString();
+      },
+    };
+
+    const builder = new TransactionBuilder(sponsorAccount, {
+      fee: String(Number(BASE_FEE) * 4),
+      networkPassphrase: config.networkPassphrase,
+    });
+
+    if (body.mode === "sponsored_reserve") {
+      builder
+        .addOperation(
+          Operation.beginSponsoringFutureReserves({
+            sponsoredId: body.address,
+          }),
+        )
+        .addOperation(
+          Operation.createAccount({
+            destination: body.address,
+            startingBalance: "0",
+          }),
+        )
+        .addOperation(
+          Operation.endSponsoringFutureReserves({
+            source: body.address,
+          }),
+        );
+    } else {
+      builder.addOperation(
+        Operation.createAccount({
+          destination: body.address,
+          startingBalance: config.relayBootstrapStartingBalanceXlm,
+        }),
+      );
+    }
+
+    const tx = builder.setTimeout(180).build();
+    tx.sign(sponsorKeypair);
+    const sponsorSignedXdr = tx.toXDR();
+
+    if (body.mode === "sponsored_reserve") {
+      return c.json({
+        ok: true,
+        mode: "sponsored_reserve",
+        sponsorAddress,
+        sponsorSignedXdr,
+      });
+    }
+
+    // Direct mode: submit sponsor-signed createAccount directly to Horizon
+    for (const hBase of config.horizonUrls) {
+      try {
+        const submitRes = await fetchFn(
+          `${hBase.replace(/\/+$/, "")}/transactions`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ tx: sponsorSignedXdr }).toString(),
+          },
+        );
+        if (submitRes.ok) {
+          const submitted = (await submitRes.json()) as { hash?: string; ledger?: number };
+          return c.json({
+            ok: true,
+            mode: "direct",
+            sponsorAddress,
+            hash: submitted.hash ?? "",
+            ledger: submitted.ledger,
+          });
+        }
+      } catch {
+        // Try next Horizon URL
+      }
+    }
+
+    return c.json({ error: "Horizon rejected direct bootstrap transaction" }, 502);
   });
 
   return router;

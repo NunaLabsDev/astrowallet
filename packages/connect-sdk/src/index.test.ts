@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   AstroConnectError,
+  buildAstroWalletIntentDeepLink,
+  buildAstroWalletOnboardingDeepLink,
+  buildCanonicalIntentMessage,
+  buildCrossAppIntentEnvelope,
   createAstroConnectClient,
   createAstroWalletKitModule,
   decodeStellarClassicPublicKey,
+  signIntentToken,
   verifyAstroLoginProof,
+  verifyIntentToken,
   verifySep53Signature,
 } from "./index.js";
 
@@ -267,5 +273,110 @@ describe("@astrowallet/connect SDK", () => {
     });
     expect(await kitModule.isAvailable()).toBe(true);
     expect(await kitModule.getAddress()).toEqual({ address: signer.address });
+  });
+
+  it("supports v0.2.0 intent tokens, envelope hashing, resolveTelegramIdentity, scanTarget, and proxy prefix", async () => {
+    const secret = "s".repeat(32);
+    const now = 1_700_000_000;
+    const claims = {
+      intentId: "int_12345678",
+      network: "testnet" as const,
+      telegramUserId: "998877",
+      expiresAt: now + 300,
+    };
+    expect(buildCanonicalIntentMessage(claims)).toBe("testnet:int_12345678:998877:1700000300");
+    const sig = await signIntentToken(claims, secret);
+    expect(await verifyIntentToken(claims, sig, secret, now + 10)).toEqual({ valid: true });
+    expect(await verifyIntentToken(claims, sig, secret, now + 400)).toEqual({
+      valid: false,
+      reason: "expired",
+    });
+
+    const envelope = await buildCrossAppIntentEnvelope({
+      originApp: "external_dapp",
+      subAction: "custom_call",
+      humanSummary: "Execute contract call",
+      unsignedXdr: "AAAAAg==",
+    });
+    expect(envelope.xdrSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(
+      buildAstroWalletIntentDeepLink({
+        astroWalletBotUsername: "@AstroWalletAppBot",
+        astroWalletMiniAppShortName: "wallet",
+        intentId: "int_12345678",
+        sig,
+      }),
+    ).toBe(`https://t.me/AstroWalletAppBot/wallet?startapp=i-int_12345678-${sig}`);
+    expect(
+      buildAstroWalletOnboardingDeepLink({
+        astroWalletBotUsername: "AstroWalletAppBot",
+        astroWalletMiniAppShortName: "wallet",
+      }),
+    ).toBe("https://t.me/AstroWalletAppBot/wallet?startapp=t-vault");
+
+    const signer = await generateSigner();
+    const calls: string[] = [];
+    const proxyClient = createAstroConnectClient({
+      apiBaseUrl: "",
+      requestsPathPrefix: "/api/v1/wallet/connect/requests",
+      app: { name: "ProxyApp", botUsername: "ProxyAppBot" },
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        calls.push(url);
+        if (url.startsWith("/v1/identity/resolve?q=998877")) {
+          return new Response(JSON.stringify({ ok: true, found: false, accounts: [] }), {
+            status: 200,
+          });
+        }
+        if (url.startsWith("/v1/identity/resolve?q=alice")) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              found: true,
+              primaryAddress: signer.address,
+              accounts: [{ address: signer.address, kind: "classic", label: "Primary", isDefault: true }],
+            }),
+            { status: 200 },
+          );
+        }
+        if (url === "/v1/connect/scan") {
+          return new Response(
+            JSON.stringify({ report: { verdict: "safe", findings: [] } }),
+            { status: 200 },
+          );
+        }
+        if (url === "/api/v1/wallet/connect/requests" && init?.method === "POST") {
+          const parsed = JSON.parse(String(init.body)) as { payload: { sourceAddress?: string } };
+          expect(parsed.payload.sourceAddress).toBe(signer.address);
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              requestId: "ac_proxy1",
+              network: "testnet",
+              action: "sign_xdr",
+              trustTier: "external",
+              sig: "c".repeat(32),
+              resultToken: "rt_proxy",
+              expiresAt: now + 300,
+              deepLink: "https://t.me/AstroWalletAppBot/wallet?startapp=c-ac_proxy1-cccc",
+            }),
+            { status: 201 },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+      openLinkFn: () => undefined,
+    });
+
+    const resolved = await proxyClient.resolveTelegramIdentity({ id: 998877, username: "@alice" });
+    expect(resolved?.primaryAddress).toBe(signer.address);
+    const scan = await proxyClient.scanTarget(signer.address);
+    expect(scan.verdict).toBe("safe");
+    const handle = await proxyClient.createSignTransactionRequest("AAAAAg==", {
+      humanSummary: "Test proxy",
+      sourceAddress: signer.address,
+    });
+    expect(handle.requestId).toBe("ac_proxy1");
+    expect(calls).toContain("/api/v1/wallet/connect/requests");
   });
 });

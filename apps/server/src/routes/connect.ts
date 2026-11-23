@@ -23,6 +23,7 @@ import {
   verifyConnectRequestToken,
   verifyConnectSignature,
 } from "@astrowallet/tg-protocol";
+import type { KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
@@ -33,6 +34,7 @@ import {
   type FetchLike,
   type TxVerificationResult,
 } from "../stellar-verifier.js";
+import { runScanTarget } from "./proxy.js";
 import { authenticateMiniAppSession } from "./tg-auth.js";
 
 export interface ConnectRoutesDeps {
@@ -47,6 +49,10 @@ export interface ConnectRoutesDeps {
 }
 
 export type ConnectRouteEnv = {
+  Bindings: {
+    CACHE?: KVNamespace;
+    [key: string]: unknown;
+  };
   Variables: {
     config: ServerConfig;
     repo: ServerRepository;
@@ -576,6 +582,44 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
       completedAt: now,
       returnUrl,
     });
+  });
+
+  router.post("/scan", async (c) => {
+    const config = c.get("config");
+    const repo = c.get("repo");
+    const rate = await checkRateLimit({
+      repository: repo,
+      cache: c.env.CACHE,
+      scope: "connect_scan",
+      clientKey: clientKeyFromHeaders(c.req.raw.headers),
+      limitPerMin: config.proxyRateLimitPerMin,
+    });
+    if (!rate.allowed) {
+      c.header("Retry-After", String(rate.retryAfterSeconds));
+      return c.json({ error: "Rate limit exceeded" }, 429);
+    }
+
+    let body: { target?: unknown };
+    try {
+      body = (await c.req.json()) as { target?: unknown };
+    } catch {
+      return c.json({ error: "Invalid scan payload" }, 400);
+    }
+    const target = typeof body.target === "string" ? body.target.trim() : "";
+    if (target.length < 10) {
+      return c.json({ error: "Invalid scan payload" }, 400);
+    }
+
+    const result = await runScanTarget({
+      config,
+      cache: c.env.CACHE,
+      target,
+      fetchFn: deps.fetchFn,
+    });
+    if (!result.ok) {
+      return c.json({ error: result.error }, result.status);
+    }
+    return c.json(result.body);
   });
 
   return router;

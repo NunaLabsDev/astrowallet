@@ -10,6 +10,8 @@ import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
 import { getTelegramWebApp, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import { requiresHighValueReauth } from "./flow-validators.js";
+import { HighValueReauthGate } from "./HighValueReauthGate.js";
 
 export interface ActiveConnectRoute {
   requestId: string;
@@ -35,6 +37,7 @@ interface RemoteConnectRequest {
     xdrSha256?: string | undefined;
     submit?: boolean | undefined;
     subAction?: string | undefined;
+    sourceAddress?: string | undefined;
   };
   expiresAt: number;
   returnUrl: string;
@@ -84,6 +87,7 @@ export function ConnectRequestSheet({
     vaultStatus,
     accounts,
     activeAccount,
+    setActiveIndex,
     signActiveSep53Message,
     signRawXdrWithShield,
     signAndSubmitRawXdrWithShield,
@@ -98,10 +102,21 @@ export function ConnectRequestSheet({
   const [scanReport, setScanReport] = useState<ScanReport | null>(null);
   const [scanningXdr, setScanningXdr] = useState(false);
   const [warningAcknowledged, setWarningAcknowledged] = useState(false);
+  const [reauthVerified, setReauthVerified] = useState(false);
 
   useEffect(() => {
     setWarningAcknowledged(false);
+    setReauthVerified(false);
   }, [route.requestId]);
+
+  useEffect(() => {
+    const requestedSource = request?.payload.sourceAddress?.trim();
+    if (!requestedSource || activeAccount?.address === requestedSource) return;
+    const match = accounts.find((a) => a.address === requestedSource);
+    if (match && typeof match.derivationIndex === "number") {
+      setActiveIndex(match.derivationIndex);
+    }
+  }, [request?.payload.sourceAddress, activeAccount?.address, accounts, setActiveIndex]);
 
   useEffect(() => {
     let cancelled = false;
@@ -526,6 +541,19 @@ export function ConnectRequestSheet({
                       )}
                     </div>
                   )}
+                  {(() => {
+                    const gate = requiresHighValueReauth({
+                      network: config.network,
+                      hasWarningVerdict: scanReport?.verdict === "warning",
+                    });
+                    return gate.required && gate.reason ? (
+                      <HighValueReauthGate
+                        reason={gate.reason}
+                        verified={reauthVerified}
+                        onVerified={() => setReauthVerified(true)}
+                      />
+                    ) : null;
+                  })()}
                 </>
               )}
 
@@ -548,7 +576,12 @@ export function ConnectRequestSheet({
                     !activeAccount ||
                     (request.action === "sign_xdr" &&
                       (scanReport?.verdict === "malicious" ||
-                        (scanReport?.verdict === "warning" && !warningAcknowledged)))
+                        (scanReport?.verdict === "warning" && !warningAcknowledged) ||
+                        (requiresHighValueReauth({
+                          network: config.network,
+                          hasWarningVerdict: scanReport?.verdict === "warning",
+                        }).required &&
+                          !reauthVerified)))
                   }
                   onClick={() => void handleApprove()}
                   style={{ flex: "2 1 0" }}

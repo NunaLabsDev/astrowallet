@@ -1024,9 +1024,12 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
 
     const res = await fetchFn(`https://${cleanDomain}/.well-known/stellar.toml`, {
       headers: { Accept: "text/plain" },
-      redirect: "error",
+      redirect: "manual",
       signal: AbortSignal.timeout(5000),
     });
+    if (res.status >= 300 && res.status < 400) {
+      throw new Error(`Unexpected redirect fetching stellar.toml from ${cleanDomain} (${res.status})`);
+    }
     if (!res.ok) {
       throw new Error(`Failed to fetch stellar.toml from ${cleanDomain} (${res.status})`);
     }

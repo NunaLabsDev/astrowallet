@@ -1,11 +1,12 @@
 import { useMemo, useState, type FormEvent } from "react";
 import {
+  NEAR_STELLAR_USDC_ASSET_ID,
+  NEAR_STELLAR_XLM_ASSET_ID,
   computeLayerZeroOftSharedAmount,
   convertEvmUsdc6ToStellarStroops7,
   convertStellarUsdcToEvmAtomic6,
   createCircleCctpRampAdapter,
   createNearIntentsQuoteAdapter,
-  createSep24AnchorRampAdapter,
   encodeLayerZeroRecipientBytes32,
   type NearIntentsQuoteResult,
 } from "@astrowallet/defi";
@@ -21,12 +22,12 @@ const NEAR_ORIGIN_ASSETS = [
   { id: "nep141:eth.omft.near", label: "Ethereum (ETH)" },
   { id: "nep141:sol.omft.near", label: "Solana (SOL)" },
   { id: "nep141:ton.omft.near", label: "TON (TON)" },
-  { id: "stellar:usdc", label: "Stellar USDC (Origin -> Cross-Chain)" },
+  { id: NEAR_STELLAR_USDC_ASSET_ID, label: "Stellar USDC (Origin -> Cross-Chain)" },
 ] as const;
 
 const NEAR_DEST_ASSETS = [
-  { id: "stellar:usdc", label: "Stellar USDC" },
-  { id: "stellar:xlm", label: "Stellar XLM" },
+  { id: NEAR_STELLAR_USDC_ASSET_ID, label: "Stellar USDC" },
+  { id: NEAR_STELLAR_XLM_ASSET_ID, label: "Stellar XLM" },
 ] as const;
 
 /**
@@ -36,7 +37,7 @@ const NEAR_DEST_ASSETS = [
  * 3) Pro Bridge Validator (Circle CCTP 6<->7 + LayerZero V2 OFT)
  */
 export function RampSheet() {
-  const { config, activeAccount, accountState } = useWallet();
+  const { config, activeAccount, accountState, signSep10ChallengeXdr } = useWallet();
 
   const [activeTab, setActiveTab] = useState<RampTab>("cash");
 
@@ -44,8 +45,11 @@ export function RampSheet() {
   const [cashDirection, setCashDirection] = useState<"offramp" | "onramp">("offramp");
   const [cashAmount, setCashAmount] = useState("50.00");
   const [anchorDomain, setAnchorDomain] = useState(
-    () => config.moneygramAnchorDomain ?? "extstellar.moneygram.com",
+    () =>
+      config.moneygramAnchorDomain ??
+      (config.network === "mainnet" ? "stellar.moneygram.com" : "extstellar.moneygram.com"),
   );
+  const [cashBusy, setCashBusy] = useState(false);
   const [cashSessionUrl, setCashSessionUrl] = useState<string | null>(null);
   const [cashError, setCashError] = useState<string | null>(null);
 
@@ -114,23 +118,52 @@ export function RampSheet() {
 
   const handleBuildMoneyGramSession = async (e: FormEvent) => {
     e.preventDefault();
+    setCashBusy(true);
     setCashError(null);
     setCashSessionUrl(null);
     try {
-      const adapter = createSep24AnchorRampAdapter({
-        anchorDomain,
-        assetCode: "USDC",
+      const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
+      const cleanDomain = anchorDomain.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+      const chRes = await fetch(
+        `${apiBase}/v1/proxy/sep10/challenge?domain=${encodeURIComponent(cleanDomain)}&account=${encodeURIComponent(activeAccount.address)}`,
+      );
+      const chJson = (await chRes.json()) as { transaction?: string; error?: string };
+      if (!chRes.ok || !chJson.transaction) {
+        throw new Error(chJson.error ?? "Failed to fetch MoneyGram SEP-10 challenge");
+      }
+
+      const signedXdr = await signSep10ChallengeXdr(chJson.transaction);
+      const tokRes = await fetch(`${apiBase}/v1/proxy/sep10/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain: cleanDomain, transaction: signedXdr }),
       });
-      const res = await adapter.createSessionUrl({
-        direction: cashDirection,
-        fiatCurrency: "USD",
-        assetCode: "USDC",
-        amount: cashAmount,
-        destinationAddress: activeAccount.address,
+      const tokJson = (await tokRes.json()) as { token?: string; error?: string };
+      if (!tokRes.ok || !tokJson.token) {
+        throw new Error(tokJson.error ?? "MoneyGram SEP-10 authentication failed");
+      }
+
+      const sep24Res = await fetch(`${apiBase}/v1/proxy/sep24/interactive`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          domain: cleanDomain,
+          direction: cashDirection === "offramp" ? "withdraw" : "deposit",
+          token: tokJson.token,
+          assetCode: "USDC",
+          amount: cashAmount.trim(),
+          account: activeAccount.address,
+        }),
       });
-      setCashSessionUrl(res.url);
+      const sep24Json = (await sep24Res.json()) as { url?: string; error?: string };
+      if (!sep24Res.ok || !sep24Json.url) {
+        throw new Error(sep24Json.error ?? "MoneyGram SEP-24 interactive session failed");
+      }
+      setCashSessionUrl(sep24Json.url);
     } catch (err) {
       setCashError(err instanceof Error ? err.message : "Failed to prepare MoneyGram SEP-24 session");
+    } finally {
+      setCashBusy(false);
     }
   };
 
@@ -306,8 +339,8 @@ export function RampSheet() {
             />
           </div>
 
-          <button type="submit" className="aw-btn-primary">
-            Prepare MoneyGram SEP-24 Session
+          <button type="submit" className="aw-btn-primary" disabled={cashBusy}>
+            {cashBusy ? "Authenticating SEP-10 & Starting SEP-24..." : "Launch MoneyGram SEP-24 Checkout"}
           </button>
 
           {cashError && <div className="aw-banner aw-banner--danger">{cashError}</div>}

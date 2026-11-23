@@ -996,5 +996,169 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     });
   });
 
+  async function resolveSep24AnchorEndpoints(
+    domain: string,
+    cache?: KVNamespace,
+  ): Promise<{ webAuthEndpoint: string; transferServerSep24: string }> {
+    const cleanDomain = domain.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    if (!isSafePublicDomain(cleanDomain)) {
+      throw new Error("Invalid or unsafe anchor domain");
+    }
+    const cacheKey = `sep24_meta:${cleanDomain}`;
+    if (cache) {
+      const hit = await cache.get(cacheKey);
+      if (hit) {
+        try {
+          const parsed = JSON.parse(hit) as { webAuthEndpoint?: string; transferServerSep24?: string };
+          if (parsed.webAuthEndpoint && parsed.transferServerSep24) {
+            return {
+              webAuthEndpoint: parsed.webAuthEndpoint,
+              transferServerSep24: parsed.transferServerSep24,
+            };
+          }
+        } catch {
+          // ignore cache parse error
+        }
+      }
+    }
+
+    const res = await fetchFn(`https://${cleanDomain}/.well-known/stellar.toml`, {
+      headers: { Accept: "text/plain" },
+      redirect: "error",
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) {
+      throw new Error(`Failed to fetch stellar.toml from ${cleanDomain} (${res.status})`);
+    }
+    const toml = (await res.text()).slice(0, STELLAR_TOML_MAX_BYTES);
+    const webAuthMatch = toml.match(/^\s*WEB_AUTH_ENDPOINT\s*=\s*"([^"]+)"/m);
+    const sep24Match = toml.match(/^\s*TRANSFER_SERVER_SEP0024\s*=\s*"([^"]+)"/m);
+    const webAuthEndpoint = webAuthMatch?.[1]?.trim() ?? "";
+    const transferServerSep24 = sep24Match?.[1]?.trim() ?? "";
+    if (!webAuthEndpoint.startsWith("https://") || !transferServerSep24.startsWith("https://")) {
+      throw new Error(`Anchor ${cleanDomain} missing HTTPS WEB_AUTH_ENDPOINT or TRANSFER_SERVER_SEP0024`);
+    }
+    const webAuthHost = new URL(webAuthEndpoint).hostname.toLowerCase();
+    const sep24Host = new URL(transferServerSep24).hostname.toLowerCase();
+    if (!isSafePublicDomain(webAuthHost) || !isSafePublicDomain(sep24Host)) {
+      throw new Error("Anchor endpoint hostname failed SSRF check");
+    }
+
+    const result = {
+      webAuthEndpoint: webAuthEndpoint.replace(/\/+$/, ""),
+      transferServerSep24: transferServerSep24.replace(/\/+$/, ""),
+    };
+    if (cache) {
+      await cache.put(cacheKey, JSON.stringify(result), { expirationTtl: 600 });
+    }
+    return result;
+  }
+
+  router.get("/sep10/challenge", async (c) => {
+    const domain = c.req.query("domain") ?? "";
+    const account = c.req.query("account") ?? "";
+    const parsedAcct = ClassicAddressSchema.safeParse(account.trim());
+    if (!parsedAcct.success) {
+      return c.json({ error: "Valid Classic G... account is required" }, 400);
+    }
+    try {
+      const endpoints = await resolveSep24AnchorEndpoints(domain, c.env.CACHE);
+      const res = await fetchFn(
+        `${endpoints.webAuthEndpoint}?account=${encodeURIComponent(parsedAcct.data)}`,
+        { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(8000) },
+      );
+      const body = (await res.json()) as { transaction?: string; network_passphrase?: string; error?: string };
+      if (!res.ok || !body.transaction) {
+        return c.json({ error: body.error ?? `SEP-10 challenge failed (${res.status})` }, 502);
+      }
+      return c.json({
+        transaction: body.transaction,
+        network_passphrase: body.network_passphrase,
+        webAuthEndpoint: endpoints.webAuthEndpoint,
+        transferServerSep24: endpoints.transferServerSep24,
+      });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : "SEP-10 challenge error" }, 400);
+    }
+  });
+
+  router.post("/sep10/token", async (c) => {
+    let body: { domain?: string; transaction?: string };
+    try {
+      body = (await c.req.json()) as { domain?: string; transaction?: string };
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (!body.domain || !body.transaction) {
+      return c.json({ error: "domain and signed transaction XDR are required" }, 400);
+    }
+    try {
+      const endpoints = await resolveSep24AnchorEndpoints(body.domain, c.env.CACHE);
+      const res = await fetchFn(endpoints.webAuthEndpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({ transaction: body.transaction }),
+        signal: AbortSignal.timeout(8000),
+      });
+      const json = (await res.json()) as { token?: string; error?: string };
+      if (!res.ok || !json.token) {
+        return c.json({ error: json.error ?? `SEP-10 token exchange failed (${res.status})` }, 401);
+      }
+      return c.json({ token: json.token });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : "SEP-10 token error" }, 400);
+    }
+  });
+
+  router.post("/sep24/interactive", async (c) => {
+    let body: {
+      domain?: string;
+      direction?: "deposit" | "withdraw";
+      token?: string;
+      assetCode?: string;
+      amount?: string;
+      account?: string;
+    };
+    try {
+      body = (await c.req.json()) as typeof body;
+    } catch {
+      return c.json({ error: "Invalid JSON body" }, 400);
+    }
+    if (!body.domain || !body.token || !body.assetCode || !body.direction) {
+      return c.json({ error: "domain, direction, token, and assetCode are required" }, 400);
+    }
+    const action = body.direction === "withdraw" ? "withdraw" : "deposit";
+    try {
+      const endpoints = await resolveSep24AnchorEndpoints(body.domain, c.env.CACHE);
+      const res = await fetchFn(
+        `${endpoints.transferServerSep24}/transactions/${action}/interactive`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            Authorization: `Bearer ${body.token}`,
+          },
+          body: JSON.stringify({
+            asset_code: body.assetCode.trim().toUpperCase(),
+            ...(body.amount ? { amount: body.amount.trim() } : {}),
+            ...(body.account ? { account: body.account.trim() } : {}),
+          }),
+          signal: AbortSignal.timeout(10000),
+        },
+      );
+      const json = (await res.json()) as { url?: string; id?: string; type?: string; error?: string };
+      if (!res.ok || !json.url) {
+        return c.json(
+          { error: json.error ?? `SEP-24 interactive session rejected (${res.status})` },
+          res.status >= 400 && res.status < 500 ? (res.status as 400) : 502,
+        );
+      }
+      return c.json({ url: json.url, id: json.id, type: json.type });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : "SEP-24 interactive error" }, 400);
+    }
+  });
+
   return router;
 }

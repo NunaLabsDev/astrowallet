@@ -239,6 +239,29 @@ function createConnectMemoryRepo(): ServerRepository {
       connectRequests.set(requestId, next);
       return next;
     },
+    async recordDailyUserActivity() {},
+    async incrementProductEvent() {},
+    async getPublicMetricsSnapshot(network) {
+      return {
+        network,
+        totalRegisteredUsers: 0,
+        totalLinkedWallets: 0,
+        classicWallets: 0,
+        smartWallets: 0,
+        encryptedVaultBackups: 0,
+        confirmedIntents: 0,
+        approvedConnectRequests: 0,
+        relayTxCount: 0,
+        verifiedTxCount: 0,
+        dau: 0,
+        wau: 0,
+        mau: 0,
+        dailySeries: [],
+        platforms: {},
+        eventBreakdown: {},
+        recentVerifiedTxs: [],
+      };
+    },
   };
 }
 

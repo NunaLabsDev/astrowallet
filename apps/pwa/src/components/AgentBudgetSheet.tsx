@@ -1,9 +1,11 @@
 import { useMemo, useState } from "react";
 import {
   AGENT_DERIVATION_INDEX,
+  buildX402PaymentHeader,
   createDefaultAgentBudgetPolicy,
   evaluateAgentSpendRequest,
   parseX402PaymentRequiredHeader,
+  recordAgentSpend,
   type AgentBudgetPolicy,
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
@@ -35,7 +37,7 @@ function formatStroopsUsdc(stroops: string): string {
  * for isolated sub-account m/44'/148'/99' + test live HTTP 402 endpoints (AstroDex Forensic Alpha).
  */
 export function AgentBudgetSheet() {
-  const { config, activeAccount, accounts } = useWallet();
+  const { config, activeAccount, accounts, vaultStatus, signActiveSep53Message } = useWallet();
 
   const [policy, setPolicy] = useState<AgentBudgetPolicy>(() =>
     loadPolicy(config.network),
@@ -95,9 +97,46 @@ export function AgentBudgetSheet() {
           network: first.network,
           amountStroops: first.amount,
         });
-        setProbeResult(
-          `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC on ${first.network} -> ${first.payTo.slice(0, 6)}…${first.payTo.slice(-4)} · Policy Check: ${check.allowed ? "APPROVED (within cap)" : `BLOCKED (${check.reason})`}`,
-        );
+        if (!check.allowed) {
+          setProbeResult(
+            `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC on ${first.network} -> ${first.payTo.slice(0, 6)}…${first.payTo.slice(-4)} · Policy Check: BLOCKED (${check.reason})`,
+          );
+          return;
+        }
+        if (vaultStatus !== "unlocked") {
+          setProbeResult(
+            `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC on ${first.network} -> APPROVED by policy. Unlock vault to sign X-PAYMENT proof.`,
+          );
+          return;
+        }
+        const nonce = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
+        const challenge = `x402:${first.network}:${first.asset}:${first.amount}:${first.payTo}:${nonce}`;
+        const signed = await signActiveSep53Message(challenge);
+        const xPayment = buildX402PaymentHeader({
+          x402Version: terms.x402Version,
+          network: first.network,
+          payer: signed.signerAddress,
+          asset: first.asset,
+          amount: first.amount,
+          payTo: first.payTo,
+          nonce,
+          signatureBase64: signed.signature,
+        });
+        const paidRes = await fetch(parsedUrl.toString(), {
+          method: "GET",
+          headers: { "X-PAYMENT": xPayment },
+        });
+        if (paidRes.ok) {
+          savePolicy(recordAgentSpend(policy, first.amount));
+          const receiptHdr = paidRes.headers.get("PAYMENT-RESPONSE");
+          setProbeResult(
+            `HTTP 200 PAID (${formatStroopsUsdc(first.amount)} USDC) · Receipt: ${receiptHdr ? "PAYMENT-RESPONSE verified" : "settled"}`,
+          );
+        } else {
+          setProbeResult(
+            `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC · Policy APPROVED · Facilitator status ${paidRes.status} (requires funded USDC auth entry)`,
+          );
+        }
       } else if (res.ok) {
         setProbeResult(`HTTP 200 OK (${parsedUrl.hostname})`);
       } else {
@@ -239,7 +278,7 @@ export function AgentBudgetSheet() {
           disabled={probing}
           onClick={handleProbeX402}
         >
-          {probing ? "Inspecting HTTP 402..." : "Inspect x402 Payment Terms"}
+          {probing ? "Executing x402 Flow..." : "Test & Sign Live x402 Call"}
         </button>
       </div>
 

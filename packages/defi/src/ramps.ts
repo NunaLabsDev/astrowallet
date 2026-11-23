@@ -62,6 +62,11 @@ export function createSep24AnchorRampAdapter(input: {
   };
 }
 
+export const NEAR_STELLAR_USDC_ASSET_ID =
+  "nep245:v2_1.omni.hot.tg:1100_111bzQBB65GxAPAVoxqmMcgYo5oS3txhqs1Uh1cgahKQUeTUq1TJu";
+export const NEAR_STELLAR_XLM_ASSET_ID =
+  "nep245:v2_1.omni.hot.tg:1100_111bzQBB5v7AhLyPMDwS8uJgQV24KaAPXtwyVWu2KXbbfQU6NXRCz";
+
 export interface NearIntentsQuoteInput {
   originAsset: string;
   destinationAsset: string;
@@ -102,7 +107,10 @@ export function createNearIntentsQuoteAdapter(input: {
 
   return {
     async requestQuote(req: NearIntentsQuoteInput): Promise<NearIntentsQuoteResult> {
-      const isStellarOrigin = req.originAsset.toLowerCase().includes("stellar");
+      const originLower = req.originAsset.toLowerCase();
+      const isStellarOrigin =
+        originLower.includes("stellar") ||
+        originLower.startsWith("nep245:v2_1.omni.hot.tg:1100_");
       const body: Record<string, unknown> = {
         dry: req.dry ?? true,
         swapType: "EXACT_INPUT",

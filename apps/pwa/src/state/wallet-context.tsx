@@ -49,6 +49,7 @@ import {
   saveEncryptedVault,
   serializeAgVaultBackup,
   signChallengeMessage,
+  signSep10ChallengeTransaction,
   signTransactionXdrEnvelope,
   unlockWithFingerprint,
   validateMnemonicPhrase,
@@ -306,6 +307,7 @@ export interface WalletContextValue {
   simulateRawXdr(xdrBase64: string): Promise<SorobanSimulationSummary>;
   buildDevTemplateXdr(template: DevTemplateKind): Promise<string>;
   derivePublicKeyPreview(count: number): DerivedPublicKeyPreview[];
+  signSep10ChallengeXdr(challengeXdr: string): Promise<string>;
   signActiveSep53Message(message: string): Promise<{ signature: string; signerAddress: ClassicAddress }>;
   signConnectChallenge(
     message: string,
@@ -2445,6 +2447,15 @@ export function WalletProvider({
     [config.smartAccountWasmHash, config.networkPassphrase],
   );
 
+  const signSep10ChallengeXdr = useCallback(
+    async (challengeXdr: string): Promise<string> => {
+      return withActiveKeypair(async (keypair) =>
+        signSep10ChallengeTransaction(challengeXdr, keypair, config.networkPassphrase),
+      );
+    },
+    [withActiveKeypair, config.networkPassphrase],
+  );
+
   const signActiveSep53Message = useCallback(
     async (message: string) => {
       return withActiveKeypair(async (keypair) => ({
@@ -2677,6 +2688,7 @@ export function WalletProvider({
     simulateRawXdr,
     buildDevTemplateXdr,
     derivePublicKeyPreview,
+    signSep10ChallengeXdr,
     signActiveSep53Message,
     signConnectChallenge,
     fundClaimEscrow,

@@ -6,6 +6,8 @@ import {
   MuxedAccount,
   Operation,
   StrKey,
+  TransactionBuilder,
+  type Keypair,
   type xdr,
 } from "@stellar/stellar-sdk";
 
@@ -194,4 +196,30 @@ export function buildManageSellOfferOperation(input: {
     price: input.price,
     offerId: input.offerId ?? "0",
   });
+}
+
+/**
+ * Validates and signs a Stellar SEP-10 web authentication challenge transaction
+ * (`sequence === "0"`, non-FeeBump, strictly `manageData` operations only).
+ */
+export function signSep10ChallengeTransaction(
+  challengeXdr: string,
+  keypair: Keypair,
+  networkPassphrase: string,
+): string {
+  const tx = TransactionBuilder.fromXDR(challengeXdr, networkPassphrase);
+  if ("innerTransaction" in tx) {
+    throw new Error("SEP-10 challenge cannot be a FeeBumpTransaction");
+  }
+  if (tx.sequence !== "0") {
+    throw new Error("SEP-10 safety check failed: challenge sequence must be 0");
+  }
+  if (
+    tx.operations.length === 0 ||
+    tx.operations.some((op: { type: string }) => op.type !== "manageData")
+  ) {
+    throw new Error("SEP-10 safety check failed: challenge may only contain manageData ops");
+  }
+  tx.sign(keypair);
+  return tx.toXDR();
 }

@@ -99,3 +99,33 @@ cargo test --manifest-path contracts/claim-escrow/Cargo.toml
    (cd apps/pwa && ../server/node_modules/.bin/wrangler pages deploy dist --project-name astrowallet --branch main)
    ```
    > See [`ENV_MATRIX.md`](./ENV_MATRIX.md) for the complete required `VITE_*` (including `VITE_TON_*` and `VITE_TG_MINI_APP_SHORT_NAME`) and Cloudflare Worker env/secret variables.
+
+
+---
+
+## Session checkpoint — 2026-11-23 (late): Mainnet-ready wallet + Express Sign
+
+**State: committed `31996fa` (+ `c0f9a39` redirect fix), pushed to `main`, deployed** (`astrowallet-server`, `astrowallet-server-mainnet`, Pages `astrowallet-soroban`).
+
+### Done
+- SEP-10 → SEP-24 MoneyGram proxy (`/v1/proxy/sep10/*`, `/sep24/interactive`); fixed Workers bug (`redirect: "error"` → `"manual"`).
+- NEAR Intents real IDs + live dry quotes verified. Stellar→BTC needs `depositMode: MEMO` and ≥ ~51.5 USDC. Destination needs a USDC trustline.
+- Removed AstroGate / Sorobits from user-facing UI and bots (AstroGate deferred to future NFT work). Classic NFT gallery only.
+- Bot (`apps/server/src/bot.ts`): new `/buy`, `/sell`, `/nft`, `/nft send`; `/swap` now tries the AstroDex 5-way aggregator first, then Soroswap, then Horizon path. Canonical Mainnet assets map (USDE, SUSDE, USDT0, USDC, AQUA, EURC). `/start` and `/help` rewritten in English.
+- Express Sign: `?express=1` on intent URLs; minimalist header, inline quick-unlock (biometric/PIN), hidden dock; session lease configurable (Always Ask/15/30/60 min, `aw_express_session_ttl_min`); `window.opener.postMessage({type:"ASTRO_SIGN_COMPLETE"})` + auto-close/auto-return after 900 ms with a "Stay Here" button.
+- Telegram profile (`setMyCommands`, short/long description) updated for both bots; announcement sent to the owner DM (message_id 98).
+- Gates passed: build, typecheck, lint, 173/173 tests, secret-scan, PWA build.
+
+### Verified live
+Webhooks for `/start /help /balance /nft /buy /sell /swap` returned 200. Pages contain no "astrogate" string. `GET /health` = mainnet.
+
+### Open / next
+1. **Not verified:** the bot replies actually delivered in Telegram (webhook 200 only). Check the owner chat manually. Telegram `getWebhookInfo` last_error was an old 405.
+2. `/buy` & `/sell` & `/nft send` untested with real signing; run one tiny real Mainnet tx with wallet `GCOKDLY…` (has AQUA + 121 NFTs); `GBVH3ZM…` has 1 XLM only.
+3. MoneyGram SEP-10 needs `client_domain` + published `SIGNING_KEY` in `/.well-known/stellar.toml` of the PWA (currently returns HTML) and partner registration.
+4. Express Sign: `HighValueReauthGate` still applies; test popup flow on web (ASTROdex → wallet popup) with a real device.
+5. Roadmap: SEP-43 smart-account session keys (zero-popup for `C…` accounts), AstroConnect `GET /requests/:id` requires `sig`.
+6. Update docs: add the Express Sign and `/buy /sell /nft` commands to `docs/INDEX.md` and the SCF submission file; run `astro-docs lint`.
+7. Cosmetic: `wrangler.toml` `env.mainnet` warns about vars not inherited (FRIENDBOT_URL, CLAIM_ESCROW_CONTRACT_ID, RELAY_ALLOWED_CONTRACTS, ASTRODEX_API_BASE_URL, ASTROGATE_API_BASE_URL) — decide whether mainnet should define them.
+
+Secrets stay in `~/.secrets/` (never print). Scratch E2E scripts: `~/.gemini/antigravity-cli/brain/939b652b-b3d3-485d-ab34-b518d29b89b2/scratch/`.

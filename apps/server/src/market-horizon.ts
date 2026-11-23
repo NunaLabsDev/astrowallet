@@ -635,23 +635,19 @@ export async function fetchMarketTopHoldersAndPools(input: {
     ? fetchHorizonJson<{
         _embedded?: {
           records?: Array<{
-            base_account?: string;
-            counter_account?: string;
+            source_account?: string;
           }>;
         };
       }>(
         input.horizonUrls,
-        `/trades?base_asset_type=native&limit=30&order=desc`,
+        `/transactions?limit=25&order=desc`,
         fetchFn,
       )
         .then(async (body) => {
           const uniq = new Set<string>();
           for (const rec of body?._embedded?.records ?? []) {
-            if (rec.base_account && StrKey.isValidEd25519PublicKey(rec.base_account)) {
-              uniq.add(rec.base_account);
-            }
-            if (rec.counter_account && StrKey.isValidEd25519PublicKey(rec.counter_account)) {
-              uniq.add(rec.counter_account);
+            if (rec.source_account && StrKey.isValidEd25519PublicKey(rec.source_account)) {
+              uniq.add(rec.source_account);
             }
             if (uniq.size >= 12) break;
           }

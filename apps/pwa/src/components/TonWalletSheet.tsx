@@ -16,7 +16,11 @@ interface PendingTonReview {
   comment?: string | undefined;
 }
 
-export function TonWalletSheet() {
+export function TonWalletSheet({
+  onOpenCrossChainBridge,
+}: {
+  onOpenCrossChainBridge?: (() => void) | undefined;
+} = {}) {
   const {
     config,
     activeIndex,
@@ -468,6 +472,30 @@ export function TonWalletSheet() {
               </button>
             </form>
           </>
+        )}
+      </section>
+
+      <section className="glass-card" style={{ display: "grid", gap: 8 }}>
+        <div style={{ fontSize: 13, fontWeight: 700 }}>
+          Stellar ⇄ TON Unified Seed &amp; Future Bridge
+        </div>
+        <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", lineHeight: 1.5 }}>
+          Your Stellar (<code>m/44&apos;/148&apos;/{activeIndex}&apos;</code>) and TON (
+          <code>m/44&apos;/607&apos;/{activeIndex}&apos;</code>) wallets are derived from the same
+          recovery phrase so switching accounts updates both together, while operating on two
+          separate L1 blockchains (<code>{config.network.toUpperCase()}</code> /{" "}
+          <code>{config.tonNetwork.toUpperCase()}</code>).
+        </div>
+        {onOpenCrossChainBridge && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="aw-btn-secondary"
+              onClick={onOpenCrossChainBridge}
+            >
+              <span>Open Cross-Chain USDC Bridge</span>
+            </button>
+          </div>
         )}
       </section>
     </div>

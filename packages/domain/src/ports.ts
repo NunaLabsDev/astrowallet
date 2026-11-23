@@ -22,6 +22,14 @@ export interface AssetBalance {
   assetIssuer?: string | undefined;
   balance: string;
   isVerifiedAsset: boolean;
+  limit?: string | undefined;
+  buyingLiabilities?: string | undefined;
+  sellingLiabilities?: string | undefined;
+  isAuthorized?: boolean | undefined;
+  isAuthorizedToMaintainLiabilities?: boolean | undefined;
+  isClawbackEnabled?: boolean | undefined;
+  sponsor?: string | undefined;
+  lastModifiedLedger?: number | undefined;
 }
 
 export interface ChainPort {

@@ -7,6 +7,7 @@ import {
   fetchTokenOnChainDetails,
   fetchTokenOrderbookAgainstXlm,
   fetchTokenPriceHistoryAgainstXlm,
+  fetchTokenRecentTrades,
   parseStellarTomlForAsset,
   searchHorizonAssets,
 } from "./ledger/token-explorer.js";
@@ -458,5 +459,81 @@ name = "Euro Coin"
       tomlMatched: false,
     });
     expect(heldMeta[`EURC:${issuerNoImage}`]?.image).toBeUndefined();
+  });
+
+  it("supports 1y and all timeframes (stepping down to daily if weekly sparse) and fetches recent token trades", async () => {
+    const aggAll = await fetchTokenPriceHistoryAgainstXlm({
+      horizonUrls: ["https://horizon-test.example"],
+      assetCode: "USDC",
+      assetIssuer: ISSUER_USDC,
+      timeframe: "all",
+      nowMs: 1_760_000_000_000,
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url.includes("resolution=604800000")) {
+          // Sparse weekly response (< 2 candles) -> should step down to daily 86400000
+          return new Response(JSON.stringify({ _embedded: { records: [] } }), { status: 200 });
+        }
+        return new Response(
+          JSON.stringify({
+            _embedded: {
+              records: [
+                {
+                  timestamp: "1759910400000",
+                  open: "8.00",
+                  high: "8.50",
+                  low: "7.90",
+                  close: "8.40",
+                  base_volume: "1200.0",
+                },
+                {
+                  timestamp: "1759824000000",
+                  open: "7.50",
+                  high: "8.10",
+                  low: "7.40",
+                  close: "8.00",
+                  base_volume: "900.0",
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    expect(aggAll.timeframe).toBe("all");
+    expect(aggAll.source).toBe("trade_aggregations");
+    expect(aggAll.candles).toHaveLength(2);
+    expect(aggAll.latestPriceXlm).toBe(8.4);
+
+    const trades = await fetchTokenRecentTrades({
+      horizonUrls: ["https://horizon-test.example"],
+      assetCode: "USDC",
+      assetIssuer: ISSUER_USDC,
+      limit: 5,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            _embedded: {
+              records: [
+                {
+                  id: "t-1",
+                  ledger_close_time: "2026-11-23T10:00:00Z",
+                  base_amount: "100.0",
+                  counter_amount: "840.0",
+                  base_account: Keypair.random().publicKey(),
+                  counter_account: Keypair.random().publicKey(),
+                  base_is_seller: false,
+                  price: { n: 84, d: 10 },
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+    });
+    expect(trades).toHaveLength(1);
+    expect(trades[0]?.price).toBe("8.40000");
+    expect(trades[0]?.isBuy).toBe(true);
   });
 });

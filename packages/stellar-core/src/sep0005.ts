@@ -149,6 +149,33 @@ export function deriveMultipleAccounts(
 }
 
 /**
+ * Validates an external Stellar Ed25519 secret seed (`S...`) and wraps it in a zeroizable handle.
+ */
+export function parseExternalSecretAccount(secretSeed: string): {
+  publicKey: ClassicAddress;
+  secretKey: string;
+  toKeypair: () => Keypair;
+  zeroize: () => void;
+} {
+  const normalized = secretSeed.trim().toUpperCase();
+  if (!/^S[A-Z2-7]{55}$/.test(normalized)) {
+    throw new Error("Invalid Stellar secret key (expected 56-char S... seed)");
+  }
+  const kp = Keypair.fromSecret(normalized);
+  const raw = new Uint8Array(kp.rawSecretKey());
+  return {
+    publicKey: kp.publicKey() as ClassicAddress,
+    secretKey: normalized,
+    toKeypair() {
+      return Keypair.fromRawEd25519Seed(new Uint8Array(raw));
+    },
+    zeroize() {
+      zeroizeBytes(raw);
+    },
+  };
+}
+
+/**
  * Signs a canonical SEP-53 challenge message using SHA-256("Stellar Signed Message:\n" + message).
  */
 export function signChallengeMessage(keypair: Keypair, message: string): string {

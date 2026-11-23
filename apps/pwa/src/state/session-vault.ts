@@ -12,6 +12,7 @@ import {
  */
 export class SessionMnemonicVault {
   private buffer: Uint8Array | null = null;
+  private importedSecrets = new Map<string, Uint8Array>();
 
   set(mnemonic: string): void {
     this.clear();
@@ -32,11 +33,40 @@ export class SessionMnemonicVault {
     return fn(new TextDecoder().decode(this.buffer));
   }
 
+  setImportedSecret(address: string, secretSeed: string): void {
+    const existing = this.importedSecrets.get(address);
+    if (existing) {
+      existing.fill(0);
+    }
+    const encoded = new TextEncoder().encode(secretSeed);
+    const copy = new Uint8Array(encoded.byteLength);
+    copy.set(encoded);
+    encoded.fill(0);
+    this.importedSecrets.set(address, copy);
+  }
+
+  hasImportedSecret(address: string): boolean {
+    const buf = this.importedSecrets.get(address);
+    return Boolean(buf && buf.byteLength > 0);
+  }
+
+  withImportedSecret<T>(address: string, fn: (secretSeed: string) => T): T {
+    const buf = this.importedSecrets.get(address);
+    if (!buf || buf.byteLength === 0) {
+      throw new Error("Imported secret is not unlocked");
+    }
+    return fn(new TextDecoder().decode(buf));
+  }
+
   clear(): void {
     if (this.buffer) {
       this.buffer.fill(0);
       this.buffer = null;
     }
+    for (const buf of this.importedSecrets.values()) {
+      buf.fill(0);
+    }
+    this.importedSecrets.clear();
   }
 }
 

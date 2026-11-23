@@ -3,7 +3,7 @@ import { StrKey } from "@stellar/stellar-sdk";
 import { createFailoverEndpoints } from "../network.js";
 import { resolveSacContractId } from "../smart-account/index.js";
 
-export type TokenPriceTimeframe = "24h" | "7d" | "30d";
+export type TokenPriceTimeframe = "24h" | "7d" | "30d" | "1y" | "all";
 
 export interface TokenIssuerFlags {
   authRequired: boolean;
@@ -41,6 +41,12 @@ export interface StellarTokenDetails {
   anchorAsset?: string | undefined;
   supplyAmount: string;
   numAccounts: number;
+  authorizedToMaintainLiabilitiesAccounts?: number | undefined;
+  unauthorizedAccounts?: number | undefined;
+  numClaimableBalances?: number | undefined;
+  numLiquidityPools?: number | undefined;
+  numContracts?: number | undefined;
+  contractsAmount?: string | undefined;
   claimableBalancesAmount?: string | undefined;
   liquidityPoolsAmount?: string | undefined;
   latestLedgerSequence?: number | undefined;
@@ -113,7 +119,12 @@ interface HorizonAssetRecord {
   accounts?: {
     authorized?: number;
     authorized_to_maintain_liabilities?: number;
+    unauthorized?: number;
   };
+  num_claimable_balances?: number;
+  num_liquidity_pools?: number;
+  num_contracts?: number;
+  contracts_amount?: string;
   claimable_balances_amount?: string;
   liquidity_pools_amount?: string;
   flags?: {
@@ -869,6 +880,23 @@ export async function fetchTokenOnChainDetails(input: {
     ...(tomlMeta?.anchorAsset ? { anchorAsset: tomlMeta.anchorAsset } : {}),
     supplyAmount: record?.balances?.authorized ?? record?.amount ?? "0",
     numAccounts: record?.accounts?.authorized ?? 0,
+    ...(typeof record?.accounts?.authorized_to_maintain_liabilities === "number"
+      ? {
+          authorizedToMaintainLiabilitiesAccounts:
+            record.accounts.authorized_to_maintain_liabilities,
+        }
+      : {}),
+    ...(typeof record?.accounts?.unauthorized === "number"
+      ? { unauthorizedAccounts: record.accounts.unauthorized }
+      : {}),
+    ...(typeof record?.num_claimable_balances === "number"
+      ? { numClaimableBalances: record.num_claimable_balances }
+      : {}),
+    ...(typeof record?.num_liquidity_pools === "number"
+      ? { numLiquidityPools: record.num_liquidity_pools }
+      : {}),
+    ...(typeof record?.num_contracts === "number" ? { numContracts: record.num_contracts } : {}),
+    ...(record?.contracts_amount ? { contractsAmount: record.contracts_amount } : {}),
     claimableBalancesAmount: record?.claimable_balances_amount,
     liquidityPoolsAmount: record?.liquidity_pools_amount,
     flags: {
@@ -921,27 +949,29 @@ export async function fetchTokenPriceHistoryAgainstXlm(input: {
     "24h": { lookbackMs: 24 * 60 * 60 * 1000, resolutionMs: 3_600_000, limit: 24 },
     "7d": { lookbackMs: 7 * 24 * 60 * 60 * 1000, resolutionMs: 14_400_000, limit: 42 },
     "30d": { lookbackMs: 30 * 24 * 60 * 60 * 1000, resolutionMs: 86_400_000, limit: 30 },
+    "1y": { lookbackMs: 365 * 24 * 60 * 60 * 1000, resolutionMs: 86_400_000, limit: 200 },
+    "all": { lookbackMs: 10 * 365 * 24 * 60 * 60 * 1000, resolutionMs: 604_800_000, limit: 200 },
   };
   const cfg = timeframeConfig[input.timeframe];
 
   const baseParams = resolveAssetQueryParams("base", input.assetCode, input.assetIssuer);
   const counterParams = resolveAssetQueryParams("counter", quoteCode, quoteIssuer);
-  const aggParams = new URLSearchParams({
-    ...baseParams,
-    ...counterParams,
-    start_time: String(Math.max(0, nowMs - cfg.lookbackMs)),
-    end_time: String(nowMs),
-    resolution: String(cfg.resolutionMs),
-    limit: String(cfg.limit),
-    order: "desc",
-  });
 
-  try {
+  async function queryAggCandles(lookbackMs: number, resolutionMs: number, limit: number) {
+    const aggParams = new URLSearchParams({
+      ...baseParams,
+      ...counterParams,
+      start_time: String(Math.max(0, nowMs - lookbackMs)),
+      end_time: String(nowMs),
+      resolution: String(resolutionMs),
+      limit: String(limit),
+      order: "desc",
+    });
     const aggBody = await fetchJsonWithHorizonFailover<{
       _embedded?: { records?: HorizonTradeAggRecord[] };
     }>(input.horizonUrls, `/trade_aggregations?${aggParams.toString()}`, fetchFn);
 
-    const parsedCandles = (aggBody?._embedded?.records ?? [])
+    return (aggBody?._embedded?.records ?? [])
       .map((rec): TokenPriceCandle | null => {
         const ts = parseFiniteNumber(rec.timestamp);
         const open = parseFiniteNumber(rec.open);
@@ -963,6 +993,17 @@ export async function fetchTokenPriceHistoryAgainstXlm(input: {
       })
       .filter((c): c is TokenPriceCandle => c !== null)
       .reverse();
+  }
+
+  try {
+    let parsedCandles = await queryAggCandles(cfg.lookbackMs, cfg.resolutionMs, cfg.limit);
+    // For newer tokens on "all" where weekly candles are sparse (< 2), step down to daily candles.
+    if (input.timeframe === "all" && parsedCandles.length < 2) {
+      const dailyCandles = await queryAggCandles(365 * 24 * 60 * 60 * 1000, 86_400_000, 200);
+      if (dailyCandles.length > parsedCandles.length) {
+        parsedCandles = dailyCandles;
+      }
+    }
 
     if (parsedCandles.length > 0) {
       const first = parsedCandles[0]!;
@@ -1060,6 +1101,79 @@ export async function fetchTokenPriceHistoryAgainstXlm(input: {
     volumeBase: 0,
     source: "order_book",
   };
+}
+
+export interface TokenRecentTradeRecord {
+  id: string;
+  timestamp: string;
+  price: string;
+  baseAmount: string;
+  counterAmount: string;
+  baseAccount?: string | undefined;
+  counterAccount?: string | undefined;
+  isBuy: boolean;
+}
+
+/**
+ * Fetches recent executed SDEX/AMM trades for a token pair from Horizon `/trades`.
+ */
+export async function fetchTokenRecentTrades(input: {
+  horizonUrls: readonly string[];
+  assetCode: string;
+  assetIssuer?: ClassicAddress | undefined;
+  counterAsset?: { code: string; issuer?: ClassicAddress | undefined } | undefined;
+  limit?: number | undefined;
+  fetchFn?: typeof fetch | undefined;
+}): Promise<TokenRecentTradeRecord[]> {
+  const fetchFn = input.fetchFn ?? fetch;
+  const quoteCode = input.counterAsset?.code ?? "XLM";
+  const quoteIssuer = input.counterAsset?.issuer;
+  const isBaseNative = input.assetCode.trim().toUpperCase() === "XLM" && !input.assetIssuer;
+  const isQuoteNative = quoteCode.toUpperCase() === "XLM" && !quoteIssuer;
+  if (isBaseNative && isQuoteNative) {
+    return [];
+  }
+
+  const baseParams = resolveAssetQueryParams("base", input.assetCode, input.assetIssuer);
+  const counterParams = resolveAssetQueryParams("counter", quoteCode, quoteIssuer);
+  const params = new URLSearchParams({
+    ...baseParams,
+    ...counterParams,
+    limit: String(Math.min(Math.max(input.limit ?? 15, 1), 50)),
+    order: "desc",
+  });
+
+  const body = await fetchJsonWithHorizonFailover<{
+    _embedded?: {
+      records?: Array<{
+        id?: string;
+        ledger_close_time?: string;
+        base_amount?: string;
+        counter_amount?: string;
+        base_account?: string;
+        counter_account?: string;
+        base_is_seller?: boolean;
+        price?: { n?: string | number; d?: string | number };
+      }>;
+    };
+  }>(input.horizonUrls, `/trades?${params.toString()}`, fetchFn);
+
+  const out: TokenRecentTradeRecord[] = [];
+  for (const rec of body?._embedded?.records ?? []) {
+    const p = parseTradePrice(rec.price);
+    if (p === null || !rec.id || !rec.ledger_close_time) continue;
+    out.push({
+      id: rec.id,
+      timestamp: rec.ledger_close_time,
+      price: p.toPrecision(6),
+      baseAmount: rec.base_amount ?? "0",
+      counterAmount: rec.counter_amount ?? "0",
+      baseAccount: rec.base_account,
+      counterAccount: rec.counter_account,
+      isBuy: !rec.base_is_seller,
+    });
+  }
+  return out;
 }
 
 /**

@@ -6,6 +6,7 @@ import {
   fetchTokenOnChainDetails,
   fetchTokenOrderbookAgainstXlm,
   fetchTokenPriceHistoryAgainstXlm,
+  fetchTokenRecentTrades,
   searchHorizonAssets,
   type StellarTokenDetails,
   type TokenCatalogItem,
@@ -13,6 +14,7 @@ import {
   type TokenPriceCandle,
   type TokenPriceHistoryResult,
   type TokenPriceTimeframe,
+  type TokenRecentTradeRecord,
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
@@ -220,6 +222,7 @@ export function TokenExplorerSheet({
   const [details, setDetails] = useState<StellarTokenDetails | null>(null);
   const [priceHistory, setPriceHistory] = useState<TokenPriceHistoryResult | null>(null);
   const [orderbook, setOrderbook] = useState<TokenOrderbookSnapshot | null>(null);
+  const [recentTrades, setRecentTrades] = useState<TokenRecentTradeRecord[]>([]);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [trustBusy, setTrustBusy] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
@@ -280,6 +283,7 @@ export function TokenExplorerSheet({
     if (!selectedToken) {
       setDetails(null);
       setOrderbook(null);
+      setRecentTrades([]);
       setDetailError(null);
       return undefined;
     }
@@ -307,11 +311,19 @@ export function TokenExplorerSheet({
         counterAsset,
         limit: 5,
       }).catch(() => null),
+      fetchTokenRecentTrades({
+        horizonUrls: config.horizonUrls,
+        assetCode: selectedToken.assetCode,
+        assetIssuer: selectedToken.assetIssuer as ClassicAddress | undefined,
+        counterAsset,
+        limit: 15,
+      }).catch(() => []),
     ])
-      .then(([det, ob]) => {
+      .then(([det, ob, trades]) => {
         if (cancelled) return;
         setDetails(det);
         setOrderbook(ob);
+        setRecentTrades(trades);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -847,7 +859,7 @@ export function TokenExplorerSheet({
           [
             ["overview", "Chart & Stats"],
             ["security", "Scanner & Security"],
-            ["orderbook", "Orderbook (SDEX)"],
+            ["orderbook", "Orderbook & Trades"],
           ] as const
         ).map(([id, label]) => (
           <button
@@ -876,9 +888,18 @@ export function TokenExplorerSheet({
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: "var(--aw-ink-secondary)" }}>
               Historical Price ({quoteCode})
+              {priceHistory && priceHistory.candles.length >= 2 && (
+                <span style={{ fontWeight: 400, marginLeft: 6, fontSize: 11 }}>
+                  ({new Date(priceHistory.candles[0]!.timestamp).toLocaleDateString()} →{" "}
+                  {new Date(
+                    priceHistory.candles[priceHistory.candles.length - 1]!.timestamp,
+                  ).toLocaleDateString()}
+                  )
+                </span>
+              )}
             </span>
-            <div style={{ display: "flex", gap: 6 }}>
-              {(["24h", "7d", "30d"] as const).map((tf) => (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {(["24h", "7d", "30d", "1y", "all"] as const).map((tf) => (
                 <button
                   key={tf}
                   type="button"
@@ -967,6 +988,76 @@ export function TokenExplorerSheet({
                       : "—"}
               </strong>
             </div>
+          </div>
+
+          {!isNativeXlm && details && (
+            <div className="aw-contract-seals" style={{ fontSize: 12 }}>
+              <div className="aw-seal-row">
+                <span>Holders Breakdown</span>
+                <code className="tabular-nums">
+                  Auth: {formatCompactNumber(details.numAccounts)} · Maint:{" "}
+                  {formatCompactNumber(details.authorizedToMaintainLiabilitiesAccounts ?? 0)} ·
+                  Unauth: {formatCompactNumber(details.unauthorizedAccounts ?? 0)}
+                </code>
+              </div>
+              <div className="aw-seal-row">
+                <span>On-Chain Distribution</span>
+                <code className="tabular-nums">
+                  Pools: {details.numLiquidityPools ?? 0} · Claimables:{" "}
+                  {details.numClaimableBalances ?? 0} · Contracts: {details.numContracts ?? 0}
+                  {details.contractsAmount
+                    ? ` (${formatCompactNumber(details.contractsAmount)})`
+                    : ""}
+                </code>
+              </div>
+              {userHolding && (
+                <div className="aw-seal-row">
+                  <span>Your Trustline</span>
+                  <code className="tabular-nums">
+                    Limit: {userHolding.limit ? formatCompactNumber(userHolding.limit) : "Max"} ·
+                    Sell Liab: {userHolding.sellingLiabilities ?? "0"} ·{" "}
+                    {userHolding.isAuthorized === false ? "Frozen" : "Authorized"}
+                  </code>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>
+              Recent SDEX / AMM Trades ({recentTrades.length})
+            </div>
+            {recentTrades.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--aw-ink-muted)" }}>
+                No recent trades recorded on Horizon for this pair.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 6 }}>
+                {recentTrades.slice(0, 10).map((t) => (
+                  <div
+                    key={t.id}
+                    className="aw-seal-row tabular-nums"
+                    style={{ fontSize: 11 }}
+                  >
+                    <span
+                      style={{
+                        color: t.isBuy ? "var(--aw-trust-emerald)" : "#ffb396",
+                        fontWeight: 700,
+                      }}
+                    >
+                      {t.isBuy ? "BUY" : "SELL"} {formatCompactNumber(t.baseAmount)}{" "}
+                      {selectedToken.assetCode} @ {t.price} {quoteCode}
+                    </span>
+                    <span style={{ color: "var(--aw-ink-muted)" }}>
+                      {new Date(t.timestamp).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1156,6 +1247,43 @@ export function TokenExplorerSheet({
               <IconExternalLink size={14} />
             </a>
           )}
+
+          <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>
+              Recent SDEX / AMM Trades ({recentTrades.length})
+            </div>
+            {recentTrades.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--aw-ink-muted)" }}>
+                No recent trades recorded on Horizon for this pair.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 6 }}>
+                {recentTrades.slice(0, 10).map((t) => (
+                  <div
+                    key={t.id}
+                    className="aw-seal-row tabular-nums"
+                    style={{ fontSize: 11 }}
+                  >
+                    <span
+                      style={{
+                        color: t.isBuy ? "var(--aw-trust-emerald)" : "#ffb396",
+                        fontWeight: 700,
+                      }}
+                    >
+                      {t.isBuy ? "BUY" : "SELL"} {formatCompactNumber(t.baseAmount)}{" "}
+                      {selectedToken.assetCode} @ {t.price} {quoteCode}
+                    </span>
+                    <span style={{ color: "var(--aw-ink-muted)" }}>
+                      {new Date(t.timestamp).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -1213,6 +1341,43 @@ export function TokenExplorerSheet({
               </div>
             </div>
           )}
+
+          <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>
+              Recent SDEX / AMM Trades ({recentTrades.length})
+            </div>
+            {recentTrades.length === 0 ? (
+              <div style={{ fontSize: 12, color: "var(--aw-ink-muted)" }}>
+                No recent trades recorded on Horizon for this pair.
+              </div>
+            ) : (
+              <div style={{ display: "grid", gap: 6 }}>
+                {recentTrades.slice(0, 10).map((t) => (
+                  <div
+                    key={t.id}
+                    className="aw-seal-row tabular-nums"
+                    style={{ fontSize: 11 }}
+                  >
+                    <span
+                      style={{
+                        color: t.isBuy ? "var(--aw-trust-emerald)" : "#ffb396",
+                        fontWeight: 700,
+                      }}
+                    >
+                      {t.isBuy ? "BUY" : "SELL"} {formatCompactNumber(t.baseAmount)}{" "}
+                      {selectedToken.assetCode} @ {t.price} {quoteCode}
+                    </span>
+                    <span style={{ color: "var(--aw-ink-muted)" }}>
+                      {new Date(t.timestamp).toLocaleTimeString([], {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </section>

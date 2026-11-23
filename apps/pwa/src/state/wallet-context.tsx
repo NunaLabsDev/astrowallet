@@ -42,6 +42,7 @@ import {
   loadContacts,
   loadEncryptedVault,
   parseAgVaultBackup,
+  parseExternalSecretAccount,
   publicKeyToRawHex,
   saveContacts,
   saveEncryptedVault,
@@ -50,6 +51,7 @@ import {
   signTransactionXdrEnvelope,
   unlockWithFingerprint,
   validateMnemonicPhrase,
+  type AccountTradeRecord,
   type ClaimableBalanceRecord,
   type ContactEntry,
   type DevTemplateKind,
@@ -180,6 +182,7 @@ export interface WalletContextValue {
   activeIndex: number;
   accountState: StellarAccountState | null;
   recentPayments: readonly RecentPaymentRecord[];
+  recentTrades: readonly AccountTradeRecord[];
   claimableBalances: readonly ClaimableBalanceRecord[];
   openOffers: readonly SdexOfferRecord[];
   contacts: readonly ContactEntry[];
@@ -222,6 +225,17 @@ export interface WalletContextValue {
   enableFingerprint(pinOrPassphrase: string): Promise<{ enrolled: boolean; message: string }>;
   disableFingerprint(): Promise<void>;
   addDerivedAccount(label: string, pinOrPassphrase: string): Promise<LinkedAccount>;
+  activateDerivedAccountAtIndex(
+    index: number,
+    label: string,
+    pinOrPassphrase: string,
+  ): Promise<LinkedAccount>;
+  importExternalSecretAccount(
+    secretSeed: string,
+    label: string,
+    pinOrPassphrase: string,
+  ): Promise<LinkedAccount>;
+  isImportedAccount(address: string): boolean;
   renameDerivedAccount(index: number, newLabel: string, pinOrPassphrase: string): Promise<void>;
   lockVault(): void;
   wipeLocalVault(): Promise<void>;
@@ -391,7 +405,10 @@ export function WalletProvider({
             const signatureBase64 = signChallengeMessage(sourceKeypair, challenge);
             const res = await fetch(`${apiBase}/v1/relay/submit`, {
               method: "POST",
-              headers: { "Content-Type": "application/json" },
+              headers: {
+                "Content-Type": "application/json",
+                "X-Astro-Network": config.network,
+              },
               body: JSON.stringify({
                 mode: "feebump",
                 signedTxXdrBase64: rawPayload,
@@ -451,6 +468,7 @@ export function WalletProvider({
 
   const [accountState, setAccountState] = useState<StellarAccountState | null>(null);
   const [recentPayments, setRecentPayments] = useState<RecentPaymentRecord[]>([]);
+  const [recentTrades, setRecentTrades] = useState<AccountTradeRecord[]>([]);
   const [claimableBalances, setClaimableBalances] = useState<ClaimableBalanceRecord[]>([]);
   const [openOffers, setOpenOffers] = useState<SdexOfferRecord[]>([]);
   const [contacts, setContacts] = useState<ContactEntry[]>([]);
@@ -640,9 +658,10 @@ export function WalletProvider({
     setLoadingChain(true);
     setChainError(null);
     try {
-      const [state, payments, claimables, offers] = await Promise.all([
+      const [state, payments, trades, claimables, offers] = await Promise.all([
         stellarClient.fetchAccountState(targetAddress),
         stellarClient.fetchRecentPayments(targetAddress, 25),
+        stellarClient.fetchRecentTrades(targetAddress, 20),
         stellarClient.fetchClaimableBalances(targetAddress, 20),
         stellarClient.fetchOpenOffers(targetAddress, 20),
       ]);
@@ -660,6 +679,7 @@ export function WalletProvider({
       }));
       setAccountState({ ...state, balances: enrichedBalances });
       setRecentPayments(payments);
+      setRecentTrades(trades);
       setClaimableBalances(claimables);
       setOpenOffers(offers);
     } catch (err) {
@@ -680,6 +700,7 @@ export function WalletProvider({
       setLoadingChain(false);
       setAccountState(null);
       setRecentPayments([]);
+      setRecentTrades([]);
       setClaimableBalances([]);
       setOpenOffers([]);
     }
@@ -691,6 +712,16 @@ export function WalletProvider({
     ): Promise<T> => {
       if (!sessionVault.has() || !activeAccount) {
         throw new Error("Vault is locked");
+      }
+      if (sessionVault.hasImportedSecret(activeAccount.address)) {
+        const parsed = sessionVault.withImportedSecret(activeAccount.address, (secret) =>
+          parseExternalSecretAccount(secret),
+        );
+        try {
+          return await fn(parsed.toKeypair());
+        } finally {
+          parsed.zeroize();
+        }
       }
       const derived = sessionVault.withMnemonic((mnemonic) =>
         deriveStellarAccount(mnemonic, activeAccount.derivationIndex ?? 0),
@@ -1194,6 +1225,11 @@ export function WalletProvider({
         deriveKeyFn: deriveKeyInWorker,
       });
       sessionVault.set(decrypted.mnemonic);
+      for (const acc of decrypted.accounts) {
+        if (acc.importedSecret) {
+          sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+        }
+      }
       setAccountMetaList(decrypted.accounts);
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setLocalVaultUpdatedAt(envelope.updatedAt);
@@ -1277,6 +1313,11 @@ export function WalletProvider({
       await saveEncryptedVault(envelope, cleanScopeId);
       setLocalVaultUpdatedAt(envelope.updatedAt);
       sessionVault.set(decrypted.mnemonic);
+      for (const acc of decrypted.accounts) {
+        if (acc.importedSecret) {
+          sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+        }
+      }
       setAccountMetaList(decrypted.accounts);
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setVaultStatus("unlocked");
@@ -1415,6 +1456,132 @@ export function WalletProvider({
       return linked;
     },
     [cleanScopeId, showToast],
+  );
+
+  const activateDerivedAccountAtIndex = useCallback(
+    async (index: number, label: string, pinOrPassphrase: string): Promise<LinkedAccount> => {
+      if (!sessionVault.has()) {
+        throw new Error("Unlock your vault before activating a derived key");
+      }
+      if (!Number.isInteger(index) || index < 0 || index > 50) {
+        throw new Error("Derivation index must be between 0 and 50");
+      }
+      const envelope = await loadEncryptedVault(cleanScopeId);
+      if (!envelope) {
+        throw new Error("Encrypted vault missing from IndexedDB");
+      }
+      const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+        deriveKeyFn: deriveKeyInWorker,
+      });
+      const existing = decrypted.accounts.find((acc) => acc.index === index);
+      if (existing) {
+        setActiveIndex(existing.index);
+        const linkedExisting = toLinkedAccounts([existing])[0];
+        if (!linkedExisting) throw new Error("Failed to resolve existing account");
+        return linkedExisting;
+      }
+
+      const derived = deriveStellarAccount(decrypted.mnemonic, index);
+      const cleanLabel = label.trim() || `Account #${index + 1}`;
+      const nextMeta: VaultAccountMetadata = {
+        index,
+        label: cleanLabel.slice(0, 32),
+        address: derived.publicKey,
+      };
+      derived.zeroize();
+
+      const updatedAccounts = [...decrypted.accounts, nextMeta].sort((a, b) => a.index - b.index);
+      const updatedEnvelope = await encryptVaultPayload(
+        {
+          mnemonic: decrypted.mnemonic,
+          accounts: updatedAccounts,
+          createdAt: decrypted.createdAt,
+        },
+        pinOrPassphrase,
+        { deriveKeyFn: deriveKeyInWorker },
+      );
+
+      await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+      setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
+      setAccountMetaList(updatedAccounts);
+      setActiveIndex(index);
+
+      const linked = toLinkedAccounts([nextMeta])[0];
+      if (!linked) {
+        throw new Error("Failed to construct linked account");
+      }
+      showToast(`Activated ${cleanLabel} (m/44'/148'/${index}')`);
+      return linked;
+    },
+    [cleanScopeId, showToast],
+  );
+
+  const importExternalSecretAccount = useCallback(
+    async (secretSeed: string, label: string, pinOrPassphrase: string): Promise<LinkedAccount> => {
+      if (!sessionVault.has()) {
+        throw new Error("Unlock your vault before importing an external key");
+      }
+      const parsed = parseExternalSecretAccount(secretSeed);
+      try {
+        const envelope = await loadEncryptedVault(cleanScopeId);
+        if (!envelope) {
+          throw new Error("Encrypted vault missing from IndexedDB");
+        }
+        const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+          deriveKeyFn: deriveKeyInWorker,
+        });
+        const duplicate = decrypted.accounts.find((acc) => acc.address === parsed.publicKey);
+        if (duplicate) {
+          setActiveIndex(duplicate.index);
+          const linkedDup = toLinkedAccounts([duplicate])[0];
+          if (!linkedDup) throw new Error("Failed to resolve existing account");
+          showToast(`Account ${duplicate.label} is already in your vault`, "info");
+          return linkedDup;
+        }
+
+        const nextIndex =
+          decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1) + 1;
+        const cleanLabel = label.trim() || `External #${nextIndex + 1}`;
+        const nextMeta: VaultAccountMetadata = {
+          index: nextIndex,
+          label: cleanLabel.slice(0, 32),
+          address: parsed.publicKey,
+          importedSecret: parsed.secretKey,
+        };
+
+        const updatedAccounts = [...decrypted.accounts, nextMeta];
+        const updatedEnvelope = await encryptVaultPayload(
+          {
+            mnemonic: decrypted.mnemonic,
+            accounts: updatedAccounts,
+            createdAt: decrypted.createdAt,
+          },
+          pinOrPassphrase,
+          { deriveKeyFn: deriveKeyInWorker },
+        );
+
+        await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+        sessionVault.setImportedSecret(parsed.publicKey, parsed.secretKey);
+        setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
+        setAccountMetaList(updatedAccounts);
+        setActiveIndex(nextIndex);
+
+        const linked = toLinkedAccounts([nextMeta])[0];
+        if (!linked) {
+          throw new Error("Failed to construct imported account");
+        }
+        showToast(`Imported external account "${cleanLabel}"`);
+        return linked;
+      } finally {
+        parsed.zeroize();
+      }
+    },
+    [cleanScopeId, showToast],
+  );
+
+  const isImportedAccount = useCallback(
+    (address: string) => sessionVault.hasImportedSecret(address),
+    [],
   );
 
   const renameDerivedAccount = useCallback(
@@ -1922,23 +2089,28 @@ export function WalletProvider({
         for (let i = 0; i < chosen.length; i += 1) {
           const meta = chosen[i];
           if (!meta) continue;
-          const derived = deriveStellarAccount(mnemonic, meta.index);
+          const isImported = sessionVault.hasImportedSecret(meta.address);
+          const signer = isImported
+            ? sessionVault.withImportedSecret(meta.address, (secret) =>
+                parseExternalSecretAccount(secret),
+              )
+            : deriveStellarAccount(mnemonic, meta.index);
           try {
-            const kp = derived.toKeypair();
+            const kp = signer.toKeypair();
             const signatureBase64 = signChallengeMessage(kp, message);
             const isClassicDefault = preferredDefaultAddress
-              ? derived.publicKey === preferredDefaultAddress
+              ? signer.publicKey === preferredDefaultAddress
               : i === 0;
             proofs.push({
-              address: derived.publicKey,
+              address: signer.publicKey,
               kind: "classic",
               label: meta.label,
               isDefault: isClassicDefault,
               signatureBase64,
             });
-            if (i === 0 && includePairedSmartAccount && config.smartAccountWasmHash) {
+            if (i === 0 && !isImported && includePairedSmartAccount && config.smartAccountWasmHash) {
               const smart = deriveCounterfactualSmartAccount({
-                guardianAddress: derived.publicKey,
+                guardianAddress: signer.publicKey,
                 wasmHashHex: config.smartAccountWasmHash,
                 networkPassphrase: config.networkPassphrase,
               });
@@ -1948,12 +2120,12 @@ export function WalletProvider({
                 kind: "smart",
                 label: `${meta.label} Smart`,
                 isDefault: preferredDefaultAddress === smart.contractAddress,
-                guardianAddress: derived.publicKey,
+                guardianAddress: signer.publicKey,
                 signatureBase64: signChallengeMessage(kp, boundMsg),
               });
             }
           } finally {
-            derived.zeroize();
+            signer.zeroize();
           }
         }
         return proofs;
@@ -2052,6 +2224,7 @@ export function WalletProvider({
     activeIndex,
     accountState,
     recentPayments,
+    recentTrades,
     claimableBalances,
     openOffers,
     contacts,
@@ -2086,6 +2259,9 @@ export function WalletProvider({
     enableFingerprint,
     disableFingerprint,
     addDerivedAccount,
+    activateDerivedAccountAtIndex,
+    importExternalSecretAccount,
+    isImportedAccount,
     renameDerivedAccount,
     lockVault,
     wipeLocalVault,

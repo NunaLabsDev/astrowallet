@@ -144,6 +144,7 @@ export interface VaultAccountMetadata {
   index: number;
   label: string;
   address: string;
+  importedSecret?: string | undefined;
 }
 
 export interface VaultPayload {
@@ -176,6 +177,7 @@ const VaultPayloadSchema = z.object({
       index: z.number().int().nonnegative(),
       label: z.string().min(1).max(32),
       address: z.string().regex(/^G[A-Z2-7]{55}$/),
+      importedSecret: z.string().regex(/^S[A-Z2-7]{55}$/).optional(),
     }),
   ),
   createdAt: z.number().int().positive(),

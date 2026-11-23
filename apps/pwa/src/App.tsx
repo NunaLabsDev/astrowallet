@@ -8,7 +8,12 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { StellarAddressSchema, type PwaConfig } from "@astrowallet/domain";
+import {
+  StellarAddressSchema,
+  applyPwaNetworkProfile,
+  type PwaConfig,
+  type StellarNetwork,
+} from "@astrowallet/domain";
 import {
   deriveCounterfactualSmartAccount,
   evaluateCloudBackupSecretStrength,
@@ -264,9 +269,9 @@ function renderDockIcon(tab: AppDockTab) {
 
 const MOBILE_DOCK_ITEMS: ReadonlyArray<{ id: AppDockTab; label: string }> = [
   { id: "wallet", label: "Wallet" },
-  { id: "ton", label: "TON" },
   { id: "activity", label: "Activity" },
   { id: "accounts", label: "Accounts" },
+  { id: "ton", label: "TON" },
 ];
 
 function RevealSeedModalContent({ onDone }: { onDone: () => void }) {
@@ -381,6 +386,8 @@ function WalletShell({
   onClearIntent,
   connectRoute,
   onClearConnect,
+  onSwitchNetwork,
+  canSwitchNetwork,
 }: {
   initialTab: AppDockTab;
   initialDrawer?: ActiveDrawer;
@@ -389,6 +396,8 @@ function WalletShell({
   onClearIntent: () => void;
   connectRoute: ActiveConnectRoute | null;
   onClearConnect: () => void;
+  onSwitchNetwork?: ((next: StellarNetwork) => void) | undefined;
+  canSwitchNetwork?: boolean | undefined;
 }) {
   const {
     tgUser,
@@ -407,7 +416,9 @@ function WalletShell({
     activeAccount,
     accountState,
     recentPayments,
+    recentTrades,
     claimableBalances,
+    openOffers,
     contacts,
     toast,
     dismissToast,
@@ -512,6 +523,9 @@ function WalletShell({
 
   const [wipeConfirmArmed, setWipeConfirmArmed] = useState(false);
   const [showMoreTools, setShowMoreTools] = useState(false);
+  const [activitySubTab, setActivitySubTab] = useState<
+    "payments" | "trades" | "holdings" | "ledger"
+  >("payments");
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -805,54 +819,68 @@ function WalletShell({
       }
       try {
         const base = config.apiBaseUrl.replace(/\/+$/, "");
-        const chRes = await fetch(`${base}/v1/tg/link-challenge`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${sessionToken}` },
-        });
-        const chData = (await chRes.json()) as {
-          intentId?: string;
-          sig?: string;
-          message?: string;
-          error?: string;
-        };
-        if (!chRes.ok || !chData.intentId || !chData.sig || !chData.message) {
-          throw new Error(
-            chData.error ?? `Failed to start Telegram link challenge (${chRes.status})`,
-          );
-        }
         const preferredDefault = linkedAccounts.find((a) => a.isDefault)?.address;
-        const proofs = await signConnectChallenge(
-          chData.message,
-          accounts.map((a) => a.derivationIndex ?? 0),
-          Boolean(config.smartAccountWasmHash),
-          preferredDefault,
-        );
-        const cfRes = await fetch(`${base}/v1/tg/link-confirm`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${sessionToken}`,
-          },
-          body: JSON.stringify({
-            intentId: chData.intentId,
-            sig: chData.sig,
-            accounts: proofs,
-          }),
-        });
-        const cfData = (await cfRes.json()) as {
-          ok?: boolean;
-          linkedCount?: number;
-          error?: string;
+        const selectedIndices = accounts.map((a) => a.derivationIndex ?? 0);
+
+        const syncToNetwork = async (targetNet: StellarNetwork) => {
+          const chRes = await fetch(`${base}/v1/tg/link-challenge`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${sessionToken}`,
+              "X-Astro-Network": targetNet,
+            },
+          });
+          const chData = (await chRes.json()) as {
+            intentId?: string;
+            sig?: string;
+            message?: string;
+            error?: string;
+          };
+          if (!chRes.ok || !chData.intentId || !chData.sig || !chData.message) {
+            throw new Error(
+              chData.error ?? `Failed to start Telegram link challenge (${chRes.status})`,
+            );
+          }
+          const proofs = await signConnectChallenge(
+            chData.message,
+            selectedIndices,
+            Boolean(config.smartAccountWasmHash),
+            preferredDefault,
+          );
+          const cfRes = await fetch(`${base}/v1/tg/link-confirm`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${sessionToken}`,
+              "X-Astro-Network": targetNet,
+            },
+            body: JSON.stringify({
+              intentId: chData.intentId,
+              sig: chData.sig,
+              accounts: proofs,
+            }),
+          });
+          const cfData = (await cfRes.json()) as {
+            ok?: boolean;
+            linkedCount?: number;
+            error?: string;
+          };
+          if (!cfRes.ok) {
+            throw new Error(cfData.error ?? `Failed to verify Telegram link (${cfRes.status})`);
+          }
+          return cfData.linkedCount ?? proofs.length;
         };
-        if (!cfRes.ok) {
-          throw new Error(cfData.error ?? `Failed to verify Telegram link (${cfRes.status})`);
+
+        const linkedCount = await syncToNetwork(config.network);
+        if (config.altNetworkProfile) {
+          void syncToNetwork(config.altNetworkProfile.network).catch(() => undefined);
         }
         await refreshLinkedAccounts();
         if (!opts.silent) {
           triggerTelegramHaptic("success");
         }
         showToast(
-          `Linked ${cfData.linkedCount ?? proofs.length} address(es) with @${config.tgBotUsername}`,
+          `Linked ${linkedCount} address(es) with @${config.tgBotUsername}`,
         );
       } catch (err) {
         if (!opts.silent) {
@@ -1077,15 +1105,36 @@ function WalletShell({
                     )}
                   </button>
                 )}
-                <span
-                  className={
-                    config.network === "testnet"
-                      ? "glass-pill glass-pill--gold"
-                      : "glass-pill glass-pill--trust"
-                  }
-                >
-                  {config.network.toUpperCase()}
-                </span>
+                {canSwitchNetwork && onSwitchNetwork ? (
+                  <button
+                    type="button"
+                    className={
+                      config.network === "testnet"
+                        ? "glass-pill glass-pill--gold"
+                        : "glass-pill glass-pill--trust"
+                    }
+                    style={{ cursor: "pointer", border: "none", fontFamily: "inherit" }}
+                    title={`Switch to ${config.network === "mainnet" ? "TESTNET" : "MAINNET"}`}
+                    onClick={() => {
+                      const next: StellarNetwork =
+                        config.network === "mainnet" ? "testnet" : "mainnet";
+                      triggerTelegramHaptic("selection");
+                      onSwitchNetwork(next);
+                    }}
+                  >
+                    {config.network.toUpperCase()} ⇄
+                  </button>
+                ) : (
+                  <span
+                    className={
+                      config.network === "testnet"
+                        ? "glass-pill glass-pill--gold"
+                        : "glass-pill glass-pill--trust"
+                    }
+                  >
+                    {config.network.toUpperCase()}
+                  </span>
+                )}
                 {isWalletUnlocked && (
                   <button type="button" className="aw-chip-btn" onClick={lockVault}>
                     <IconLock size={13} />
@@ -1657,7 +1706,9 @@ function WalletShell({
                       </section>
                     }
                   >
-                    <TonWalletSheet />
+                    <TonWalletSheet
+                      onOpenCrossChainBridge={() => setActiveDrawer("ramp")}
+                    />
                   </Suspense>
                 )}
 
@@ -1706,133 +1757,397 @@ function WalletShell({
                     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                       {(
                         [
-                          ["all", "All"],
-                          ["received", "Received"],
-                          ["sent", "Sent"],
+                          ["payments", "Payments"],
+                          ["trades", `Trades & Offers (${recentTrades.length + openOffers.length})`],
+                          ["holdings", `Claims & Holdings (${claimableBalances.length})`],
+                          ["ledger", "Signers & Ledger"],
                         ] as const
                       ).map(([id, label]) => (
                         <button
                           key={id}
                           type="button"
                           className="aw-chip-btn"
-                          aria-pressed={activityFilter === id}
-                          onClick={() => setActivityFilter(id)}
+                          aria-pressed={activitySubTab === id}
+                          onClick={() => setActivitySubTab(id)}
                         >
                           {label}
                         </button>
                       ))}
                     </div>
 
-                    {filteredPayments.length === 0 ? (
-                      <div className="aw-empty-state">
-                        <div style={{ fontWeight: 600, fontSize: 14 }}>
-                          No {activityFilter === "all" ? "" : `${activityFilter} `}transactions on{" "}
-                          {config.network.toUpperCase()}
+                    {activitySubTab === "payments" && (
+                      <>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {(
+                            [
+                              ["all", "All"],
+                              ["received", "Received"],
+                              ["sent", "Sent"],
+                            ] as const
+                          ).map(([id, label]) => (
+                            <button
+                              key={id}
+                              type="button"
+                              className="aw-chip-btn"
+                              aria-pressed={activityFilter === id}
+                              onClick={() => setActivityFilter(id)}
+                            >
+                              {label}
+                            </button>
+                          ))}
                         </div>
-                        <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                          Receive XLM or test a payment to inspect live ledger confirmations here.
-                        </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: 8,
-                            flexWrap: "wrap",
-                            justifyContent: "center",
-                            marginTop: 6,
-                          }}
-                        >
-                          <button
-                            type="button"
-                            className="aw-btn-secondary"
-                            onClick={() => setActiveDrawer("receive")}
-                          >
-                            <IconReceive size={15} />
-                            <span>Receive / QR</span>
-                          </button>
-                          {config.network === "testnet" &&
-                            config.friendbotUrl &&
-                            accountState &&
-                            !accountState.funded && (
+
+                        {filteredPayments.length === 0 ? (
+                          <div className="aw-empty-state">
+                            <div style={{ fontWeight: 600, fontSize: 14 }}>
+                              No {activityFilter === "all" ? "" : `${activityFilter} `}transactions on{" "}
+                              {config.network.toUpperCase()}
+                            </div>
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                              Receive XLM or test a payment to inspect live ledger confirmations here.
+                            </div>
+                            <div
+                              style={{
+                                display: "flex",
+                                gap: 8,
+                                flexWrap: "wrap",
+                                justifyContent: "center",
+                                marginTop: 6,
+                              }}
+                            >
                               <button
                                 type="button"
-                                className="aw-btn-gold"
-                                disabled={loadingChain}
-                                onClick={() => void fundActiveTestnetAccount()}
+                                className="aw-btn-secondary"
+                                onClick={() => setActiveDrawer("receive")}
                               >
-                                <IconZap size={15} />
-                                <span>Fund 10,000 XLM</span>
+                                <IconReceive size={15} />
+                                <span>Receive / QR</span>
                               </button>
-                            )}
-                        </div>
-                      </div>
-                    ) : (
-                      filteredPayments.map((p) => {
-                        const inbound = p.to === activeAccount.address;
-                        return (
-                          <div key={p.id} className="aw-list-row" style={{ flexWrap: "wrap" }}>
-                            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                              <span
-                                className={
-                                  inbound
-                                    ? "aw-tx-dir aw-tx-dir--in"
-                                    : "aw-tx-dir aw-tx-dir--out"
-                                }
-                              >
-                                {inbound ? (
-                                  <IconArrowDownLeft size={16} />
-                                ) : (
-                                  <IconArrowUpRight size={16} />
+                              {config.network === "testnet" &&
+                                config.friendbotUrl &&
+                                accountState &&
+                                !accountState.funded && (
+                                  <button
+                                    type="button"
+                                    className="aw-btn-gold"
+                                    disabled={loadingChain}
+                                    onClick={() => void fundActiveTestnetAccount()}
+                                  >
+                                    <IconZap size={15} />
+                                    <span>Fund 10,000 XLM</span>
+                                  </button>
                                 )}
-                              </span>
+                            </div>
+                          </div>
+                        ) : (
+                          filteredPayments.map((p) => {
+                            const inbound = p.to === activeAccount.address;
+                            return (
+                              <div key={p.id} className="aw-list-row" style={{ flexWrap: "wrap" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                  <span
+                                    className={
+                                      inbound
+                                        ? "aw-tx-dir aw-tx-dir--in"
+                                        : "aw-tx-dir aw-tx-dir--out"
+                                    }
+                                  >
+                                    {inbound ? (
+                                      <IconArrowDownLeft size={16} />
+                                    ) : (
+                                      <IconArrowUpRight size={16} />
+                                    )}
+                                  </span>
+                                  <div>
+                                    <div style={{ fontWeight: 700, fontSize: 13 }}>
+                                      {inbound ? "Received" : "Sent"} {p.assetCode}
+                                    </div>
+                                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                                      {inbound
+                                        ? `From ${p.from.slice(0, 6)}…${p.from.slice(-4)}`
+                                        : `To ${p.to.slice(0, 6)}…${p.to.slice(-4)}`}{" "}
+                                      · {new Date(p.createdAt).toLocaleString()}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", justifyItems: "end", gap: 4, marginLeft: "auto", minWidth: 0 }}>
+                                  <div
+                                    className="tabular-nums"
+                                    style={{
+                                      fontWeight: 700,
+                                      color: inbound
+                                        ? "var(--aw-safe-emerald)"
+                                        : "var(--aw-ink-primary)",
+                                    }}
+                                  >
+                                    {inbound ? "+" : "-"}
+                                    {p.amount} {p.assetCode}
+                                  </div>
+                                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                    <button
+                                      type="button"
+                                      className="aw-mini-chip"
+                                      onClick={() => void handleCopyTxHash(p.txHash)}
+                                    >
+                                      {copiedTxId === p.txHash ? "Copied Hash" : "Copy Tx"}
+                                    </button>
+                                    {config.explorerBaseUrl && (
+                                      <a
+                                        href={`${config.explorerBaseUrl.replace(/\/+$/, "")}/tx/${p.txHash}`}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="aw-mini-chip"
+                                      >
+                                        Explorer ↗
+                                      </a>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )}
+                      </>
+                    )}
+
+                    {activitySubTab === "trades" && (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>
+                          Open SDEX Orders ({openOffers.length})
+                        </div>
+                        {openOffers.length === 0 ? (
+                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                            No active SDEX limit offers on this account.
+                          </div>
+                        ) : (
+                          openOffers.map((o) => (
+                            <div key={o.id} className="aw-list-row" style={{ flexWrap: "wrap" }}>
                               <div>
                                 <div style={{ fontWeight: 700, fontSize: 13 }}>
-                                  {inbound ? "Received" : "Sent"} {p.assetCode}
+                                  Sell {o.amount} {o.sellingAssetCode} → {o.buyingAssetCode}
                                 </div>
                                 <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                                  {inbound
-                                    ? `From ${p.from.slice(0, 6)}…${p.from.slice(-4)}`
-                                    : `To ${p.to.slice(0, 6)}…${p.to.slice(-4)}`}{" "}
-                                  · {new Date(p.createdAt).toLocaleString()}
+                                  Price: {o.price} · Offer #{o.id} · Ledger #{o.lastModifiedLedger}
                                 </div>
+                              </div>
+                              <button
+                                type="button"
+                                className="aw-mini-chip"
+                                onClick={() => setActiveDrawer("tools")}
+                              >
+                                Manage in SDEX
+                              </button>
+                            </div>
+                          ))
+                        )}
+
+                        <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4 }}>
+                          Executed Trades ({recentTrades.length})
+                        </div>
+                        {recentTrades.length === 0 ? (
+                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                            No executed SDEX/AMM trades recorded for this account.
+                          </div>
+                        ) : (
+                          recentTrades.map((t) => (
+                            <div key={t.id} className="aw-list-row" style={{ flexWrap: "wrap" }}>
+                              <div>
+                                <div style={{ fontWeight: 700, fontSize: 13 }}>
+                                  {t.baseAmount} {t.baseAssetCode} ⇄ {t.counterAmount}{" "}
+                                  {t.counterAssetCode}
+                                </div>
+                                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                                  Rate: {t.price} · {new Date(t.ledgerCloseTime).toLocaleString()}
+                                </div>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )}
+
+                    {activitySubTab === "holdings" && (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>
+                          Pending Claimable Balances ({claimableBalances.length})
+                        </div>
+                        {claimableBalances.length === 0 ? (
+                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                            No incoming claimable balances pending for this account.
+                          </div>
+                        ) : (
+                          claimableBalances.map((cb) => (
+                            <div key={cb.id} className="aw-list-row" style={{ flexWrap: "wrap" }}>
+                              <div>
+                                <div style={{ fontWeight: 700, fontSize: 13 }}>
+                                  +{cb.amount} {cb.assetCode}
+                                </div>
+                                <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
+                                  {cb.sponsor
+                                    ? `Sponsor: ${cb.sponsor.slice(0, 6)}…${cb.sponsor.slice(-4)}`
+                                    : "Claimable balance"}{" "}
+                                  · Ledger #{cb.lastModifiedLedger}
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                className="aw-mini-chip"
+                                disabled={actionBusy}
+                                onClick={() => void claimBalanceById(cb.id)}
+                              >
+                                Claim
+                              </button>
+                            </div>
+                          ))
+                        )}
+
+                        <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4 }}>
+                          All Holdings &amp; Trustline Details ({accountState?.balances.length ?? 0})
+                        </div>
+                        {!accountState || accountState.balances.length === 0 ? (
+                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                            Account has no active balances yet.
+                          </div>
+                        ) : (
+                          accountState.balances.map((b) => {
+                            const key = `${b.assetCode}:${b.assetIssuer ?? "native"}`;
+                            return (
+                              <div key={key} className="aw-contract-seals" style={{ fontSize: 12 }}>
+                                <div className="aw-seal-row">
+                                  <strong>
+                                    {b.assetCode} ({formatAssetBalance(b.balance)})
+                                  </strong>
+                                  <button
+                                    type="button"
+                                    className="aw-mini-chip"
+                                    onClick={() =>
+                                      openTokenExplorer({
+                                        assetCode: b.assetCode,
+                                        assetIssuer: b.assetIssuer,
+                                      })
+                                    }
+                                  >
+                                    Inspect Token ↗
+                                  </button>
+                                </div>
+                                {b.assetIssuer && (
+                                  <div className="aw-seal-row">
+                                    <span>Issuer</span>
+                                    <code>
+                                      {b.assetIssuer.slice(0, 8)}…{b.assetIssuer.slice(-6)}
+                                    </code>
+                                  </div>
+                                )}
+                                <div className="aw-seal-row">
+                                  <span>Liabilities (Sell / Buy)</span>
+                                  <code className="tabular-nums">
+                                    {b.sellingLiabilities ?? "0"} / {b.buyingLiabilities ?? "0"}
+                                  </code>
+                                </div>
+                                {b.assetIssuer && (
+                                  <div className="aw-seal-row">
+                                    <span>Trustline Limit &amp; Flags</span>
+                                    <code className="tabular-nums">
+                                      Limit: {b.limit ? formatAssetBalance(b.limit) : "Max"} ·{" "}
+                                      {b.isAuthorized === false ? "Frozen" : "Authorized"}
+                                      {b.isClawbackEnabled ? " · Clawback" : ""}
+                                    </code>
+                                  </div>
+                                )}
+                                {b.sponsor && (
+                                  <div className="aw-seal-row">
+                                    <span>Reserve Sponsor</span>
+                                    <code>
+                                      {b.sponsor.slice(0, 6)}…{b.sponsor.slice(-4)}
+                                    </code>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                    )}
+
+                    {activitySubTab === "ledger" && (
+                      <div style={{ display: "grid", gap: 10 }}>
+                        {!accountState?.funded ? (
+                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                            Account is not yet activated on Stellar {config.network.toUpperCase()}.
+                          </div>
+                        ) : (
+                          <>
+                            <div className="aw-contract-seals" style={{ fontSize: 12 }}>
+                              <div className="aw-seal-row">
+                                <span>Sequence Number</span>
+                                <code className="tabular-nums">{accountState.sequence ?? "—"}</code>
+                              </div>
+                              <div className="aw-seal-row">
+                                <span>Reserves &amp; Subentries</span>
+                                <code className="tabular-nums">
+                                  Min {accountState.minReserveXlm} XLM · {accountState.subentryCount}{" "}
+                                  subentries · Sponsoring {accountState.numSponsoring} / Sponsored{" "}
+                                  {accountState.numSponsored}
+                                </code>
+                              </div>
+                              <div className="aw-seal-row">
+                                <span>Thresholds (Low / Med / High)</span>
+                                <code className="tabular-nums">
+                                  {accountState.thresholds
+                                    ? `${accountState.thresholds.lowThreshold} / ${accountState.thresholds.medThreshold} / ${accountState.thresholds.highThreshold}`
+                                    : "0 / 0 / 0"}
+                                </code>
+                              </div>
+                              <div className="aw-seal-row">
+                                <span>Home Domain</span>
+                                <code>{accountState.homeDomain ?? "None"}</code>
+                              </div>
+                              <div className="aw-seal-row">
+                                <span>Account Flags</span>
+                                <code>
+                                  {[
+                                    accountState.flags?.authRequired ? "AUTH_REQ" : null,
+                                    accountState.flags?.authRevocable ? "AUTH_REV" : null,
+                                    accountState.flags?.authImmutable ? "IMMUTABLE" : null,
+                                    accountState.flags?.authClawbackEnabled ? "CLAWBACK" : null,
+                                  ]
+                                    .filter(Boolean)
+                                    .join(" · ") || "Standard (Permissionless)"}
+                                </code>
                               </div>
                             </div>
 
-                            <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", justifyItems: "end", gap: 4, marginLeft: "auto", minWidth: 0 }}>
-                              <div
-                                className="tabular-nums"
-                                style={{
-                                  fontWeight: 700,
-                                  color: inbound
-                                    ? "var(--aw-safe-emerald)"
-                                    : "var(--aw-ink-primary)",
-                                }}
-                              >
-                                {inbound ? "+" : "-"}
-                                {p.amount} {p.assetCode}
-                              </div>
-                              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
-                                <button
-                                  type="button"
-                                  className="aw-mini-chip"
-                                  onClick={() => void handleCopyTxHash(p.txHash)}
-                                >
-                                  {copiedTxId === p.txHash ? "Copied Hash" : "Copy Tx"}
-                                </button>
-                                {config.explorerBaseUrl && (
-                                  <a
-                                    href={`${config.explorerBaseUrl.replace(/\/+$/, "")}/tx/${p.txHash}`}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="aw-mini-chip"
-                                  >
-                                    Explorer ↗
-                                  </a>
-                                )}
-                              </div>
+                            <div style={{ fontWeight: 700, fontSize: 13 }}>
+                              Multi-Sig Signers ({accountState.signers?.length ?? 0})
                             </div>
-                          </div>
-                        );
-                      })
+                            {(accountState.signers ?? []).map((s) => (
+                              <div key={s.key} className="aw-seal-row" style={{ fontSize: 12 }}>
+                                <code>
+                                  {s.key.slice(0, 8)}…{s.key.slice(-6)} ({s.type})
+                                </code>
+                                <span className="glass-pill tabular-nums">Weight {s.weight}</span>
+                              </div>
+                            ))}
+
+                            <div style={{ fontWeight: 700, fontSize: 13 }}>
+                              On-Chain Data Entries ({accountState.dataEntries?.length ?? 0})
+                            </div>
+                            {!accountState.dataEntries || accountState.dataEntries.length === 0 ? (
+                              <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                                No ManageData key/value entries stored on this account.
+                              </div>
+                            ) : (
+                              accountState.dataEntries.map((d) => (
+                                <div key={d.key} className="aw-seal-row" style={{ fontSize: 12 }}>
+                                  <strong>{d.key}</strong>
+                                  <code>{d.value}</code>
+                                </div>
+                              ))
+                            )}
+                          </>
+                        )}
+                      </div>
                     )}
                   </section>
                 )}
@@ -2709,7 +3024,13 @@ function WalletShell({
   );
 }
 
-function RoutedExperience() {
+function RoutedExperience({
+  onSwitchNetwork,
+  canSwitchNetwork,
+}: {
+  onSwitchNetwork?: ((next: StellarNetwork) => void) | undefined;
+  canSwitchNetwork?: boolean | undefined;
+}) {
   const { startParamRoute } = useTelegram();
   const [route, setRoute] = useState(() => readLocationRoute());
   const [requestedTab, setRequestedTab] = useState<AppDockTab>(
@@ -2796,11 +3117,21 @@ function RoutedExperience() {
       onClearIntent={handleDismissIntent}
       connectRoute={effectiveConnect}
       onClearConnect={handleDismissConnect}
+      onSwitchNetwork={onSwitchNetwork}
+      canSwitchNetwork={canSwitchNetwork}
     />
   );
 }
 
-function MiniAppGate({ config }: { config: PwaConfig }) {
+function MiniAppGate({
+  config,
+  onSwitchNetwork,
+  canSwitchNetwork,
+}: {
+  config: PwaConfig;
+  onSwitchNetwork?: ((next: StellarNetwork) => void) | undefined;
+  canSwitchNetwork?: boolean | undefined;
+}) {
   const { allowed, authStatus, authError, tgUser, refreshTelegramAuth } = useTelegram();
 
   if (!allowed) {
@@ -2816,13 +3147,25 @@ function MiniAppGate({ config }: { config: PwaConfig }) {
 
   return (
     <WalletProvider key={tgUser?.id ?? "dev"} storageScopeId={tgUser?.id} config={config}>
-      <RoutedExperience />
+      <RoutedExperience
+        onSwitchNetwork={onSwitchNetwork}
+        canSwitchNetwork={canSwitchNetwork}
+      />
     </WalletProvider>
   );
 }
 
 export function App() {
   const env = loadPwaEnv();
+  const [selectedNetwork, setSelectedNetwork] = useState<StellarNetwork | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const saved = window.localStorage.getItem("aw_selected_network");
+      return saved === "mainnet" || saved === "testnet" ? saved : null;
+    } catch {
+      return null;
+    }
+  });
 
   if (!env.ok) {
     return (
@@ -2856,9 +3199,28 @@ export function App() {
     );
   }
 
+  const effectiveConfig = selectedNetwork
+    ? applyPwaNetworkProfile(env.config, selectedNetwork)
+    : env.config;
+
+  const handleSwitchNetwork = (next: StellarNetwork) => {
+    setSelectedNetwork(next);
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem("aw_selected_network", next);
+      } catch {
+        // Ignore storage quota errors
+      }
+    }
+  };
+
   return (
-    <TelegramProvider config={env.config}>
-      <MiniAppGate config={env.config} />
+    <TelegramProvider config={effectiveConfig}>
+      <MiniAppGate
+        config={effectiveConfig}
+        onSwitchNetwork={handleSwitchNetwork}
+        canSwitchNetwork={Boolean(env.config.altNetworkProfile)}
+      />
     </TelegramProvider>
   );
 }

@@ -321,6 +321,24 @@ const RawPwaEnvSchema = z
         .max(1_000_000)
         .default(250),
     ),
+    VITE_ALT_STELLAR_NETWORK: z.preprocess(emptyToUndefined, StellarNetworkSchema.optional()),
+    VITE_ALT_STELLAR_NETWORK_PASSPHRASE: OptionalNonEmptyStringSchema,
+    VITE_ALT_STELLAR_RPC_URLS: parseUrlCsv("VITE_ALT_STELLAR_RPC_URLS", false),
+    VITE_ALT_HORIZON_URLS: parseUrlCsv("VITE_ALT_HORIZON_URLS", false),
+    VITE_ALT_TON_NETWORK: z.preprocess(emptyToUndefined, TonNetworkSchema.optional()),
+    VITE_ALT_TON_RPC_URLS: parseUrlCsv("VITE_ALT_TON_RPC_URLS", false),
+    VITE_ALT_TON_EXPLORER_BASE_URL: OptionalUrlSchema("VITE_ALT_TON_EXPLORER_BASE_URL"),
+    VITE_ALT_FRIENDBOT_URL: OptionalUrlSchema("VITE_ALT_FRIENDBOT_URL"),
+    VITE_ALT_CLAIM_ESCROW_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
+    VITE_ALT_SOROBITS_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
+    VITE_ALT_SEP42_ASSET_LIST_URLS: parseUrlCsv("VITE_ALT_SEP42_ASSET_LIST_URLS", false),
+    VITE_ALT_EXPLORER_BASE_URL: OptionalUrlSchema("VITE_ALT_EXPLORER_BASE_URL"),
   })
   .superRefine((env, ctx) => {
     if (env.VITE_STELLAR_NETWORK === "mainnet" && env.VITE_FRIENDBOT_URL) {
@@ -360,7 +378,69 @@ const RawPwaEnvSchema = z
       "VITE_STELLAR_NETWORK_PASSPHRASE",
       "VITE_STELLAR_NETWORK",
     );
+    if (env.VITE_ALT_STELLAR_NETWORK) {
+      if (!env.VITE_ALT_STELLAR_NETWORK_PASSPHRASE) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["VITE_ALT_STELLAR_NETWORK_PASSPHRASE"],
+          message: "VITE_ALT_STELLAR_NETWORK_PASSPHRASE is required when VITE_ALT_STELLAR_NETWORK is set",
+        });
+      }
+      if (env.VITE_ALT_STELLAR_RPC_URLS.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["VITE_ALT_STELLAR_RPC_URLS"],
+          message: "VITE_ALT_STELLAR_RPC_URLS is required when VITE_ALT_STELLAR_NETWORK is set",
+        });
+      }
+      if (env.VITE_ALT_HORIZON_URLS.length === 0) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["VITE_ALT_HORIZON_URLS"],
+          message: "VITE_ALT_HORIZON_URLS is required when VITE_ALT_STELLAR_NETWORK is set",
+        });
+      }
+      if (env.VITE_ALT_STELLAR_NETWORK === "mainnet" && env.VITE_ALT_FRIENDBOT_URL) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["VITE_ALT_FRIENDBOT_URL"],
+          message: "VITE_ALT_FRIENDBOT_URL is strictly forbidden when VITE_ALT_STELLAR_NETWORK=mainnet",
+        });
+      }
+      if (env.VITE_ALT_STELLAR_NETWORK_PASSPHRASE) {
+        validateNetworkCoherence(
+          env.VITE_ALT_STELLAR_NETWORK,
+          env.VITE_ALT_STELLAR_NETWORK_PASSPHRASE,
+          [
+            ...env.VITE_ALT_STELLAR_RPC_URLS,
+            ...env.VITE_ALT_HORIZON_URLS,
+            ...env.VITE_ALT_SEP42_ASSET_LIST_URLS,
+            env.VITE_ALT_EXPLORER_BASE_URL,
+            ...env.VITE_ALT_TON_RPC_URLS,
+            env.VITE_ALT_TON_EXPLORER_BASE_URL,
+          ],
+          ctx,
+          "VITE_ALT_STELLAR_NETWORK_PASSPHRASE",
+          "VITE_ALT_STELLAR_NETWORK",
+        );
+      }
+    }
   });
+
+export interface PwaNetworkProfile {
+  network: StellarNetwork;
+  networkPassphrase: string;
+  rpcUrls: string[];
+  horizonUrls: string[];
+  tonNetwork: TonNetwork;
+  tonRpcUrls: string[];
+  tonExplorerBaseUrl?: string | undefined;
+  friendbotUrl?: string | undefined;
+  claimEscrowContractId?: string | undefined;
+  sorobitsContractId?: string | undefined;
+  sep42AssetListUrls: string[];
+  explorerBaseUrl?: string | undefined;
+}
 
 export interface PwaConfig {
   network: StellarNetwork;
@@ -393,10 +473,29 @@ export interface PwaConfig {
   moonPayWidgetUrl?: string | undefined;
   transakWidgetUrl?: string | undefined;
   highValueReauthXlm: number;
+  altNetworkProfile?: PwaNetworkProfile | undefined;
 }
 
 export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
   const parsed = RawPwaEnvSchema.parse(rawEnv);
+  const altNetworkProfile: PwaNetworkProfile | undefined =
+    parsed.VITE_ALT_STELLAR_NETWORK && parsed.VITE_ALT_STELLAR_NETWORK_PASSPHRASE
+      ? {
+          network: parsed.VITE_ALT_STELLAR_NETWORK,
+          networkPassphrase: parsed.VITE_ALT_STELLAR_NETWORK_PASSPHRASE,
+          rpcUrls: parsed.VITE_ALT_STELLAR_RPC_URLS,
+          horizonUrls: parsed.VITE_ALT_HORIZON_URLS,
+          tonNetwork: parsed.VITE_ALT_TON_NETWORK ?? parsed.VITE_ALT_STELLAR_NETWORK,
+          tonRpcUrls: parsed.VITE_ALT_TON_RPC_URLS,
+          tonExplorerBaseUrl: parsed.VITE_ALT_TON_EXPLORER_BASE_URL,
+          friendbotUrl: parsed.VITE_ALT_FRIENDBOT_URL,
+          claimEscrowContractId: parsed.VITE_ALT_CLAIM_ESCROW_CONTRACT_ID,
+          sorobitsContractId: parsed.VITE_ALT_SOROBITS_CONTRACT_ID,
+          sep42AssetListUrls: parsed.VITE_ALT_SEP42_ASSET_LIST_URLS,
+          explorerBaseUrl: parsed.VITE_ALT_EXPLORER_BASE_URL,
+        }
+      : undefined;
+
   return {
     network: parsed.VITE_STELLAR_NETWORK,
     networkPassphrase: parsed.VITE_STELLAR_NETWORK_PASSPHRASE,
@@ -428,6 +527,54 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     moonPayWidgetUrl: parsed.VITE_MOONPAY_WIDGET_URL,
     transakWidgetUrl: parsed.VITE_TRANSAK_WIDGET_URL,
     highValueReauthXlm: parsed.VITE_HIGH_VALUE_REAUTH_XLM,
+    ...(altNetworkProfile ? { altNetworkProfile } : {}),
+  };
+}
+
+/**
+ * Returns a `PwaConfig` active on `targetNetwork`, swapping in `altNetworkProfile`
+ * when `targetNetwork !== config.network` and keeping `altNetworkProfile` intact
+ * so the user can switch back seamlessly.
+ */
+export function applyPwaNetworkProfile(
+  config: PwaConfig,
+  targetNetwork: StellarNetwork,
+): PwaConfig {
+  if (config.network === targetNetwork || !config.altNetworkProfile) {
+    return config;
+  }
+  if (config.altNetworkProfile.network !== targetNetwork) {
+    return config;
+  }
+  const alt = config.altNetworkProfile;
+  return {
+    ...config,
+    network: alt.network,
+    networkPassphrase: alt.networkPassphrase,
+    rpcUrls: alt.rpcUrls,
+    horizonUrls: alt.horizonUrls,
+    tonNetwork: alt.tonNetwork,
+    tonRpcUrls: alt.tonRpcUrls,
+    tonExplorerBaseUrl: alt.tonExplorerBaseUrl,
+    friendbotUrl: alt.friendbotUrl,
+    claimEscrowContractId: alt.claimEscrowContractId,
+    sorobitsContractId: alt.sorobitsContractId,
+    sep42AssetListUrls: alt.sep42AssetListUrls,
+    explorerBaseUrl: alt.explorerBaseUrl,
+    altNetworkProfile: {
+      network: config.network,
+      networkPassphrase: config.networkPassphrase,
+      rpcUrls: config.rpcUrls,
+      horizonUrls: config.horizonUrls,
+      tonNetwork: config.tonNetwork,
+      tonRpcUrls: config.tonRpcUrls,
+      tonExplorerBaseUrl: config.tonExplorerBaseUrl,
+      friendbotUrl: config.friendbotUrl,
+      claimEscrowContractId: config.claimEscrowContractId,
+      sorobitsContractId: config.sorobitsContractId,
+      sep42AssetListUrls: config.sep42AssetListUrls,
+      explorerBaseUrl: config.explorerBaseUrl,
+    },
   };
 }
 

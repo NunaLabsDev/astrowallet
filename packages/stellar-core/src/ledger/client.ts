@@ -46,6 +46,18 @@ import {
   resolveSacContractId,
 } from "../smart-account/index.js";
 
+export interface AccountSignerRecord {
+  key: string;
+  weight: number;
+  type: string;
+  sponsor?: string | undefined;
+}
+
+export interface AccountDataEntryRecord {
+  key: string;
+  value: string;
+}
+
 export interface StellarAccountState {
   funded: boolean;
   balances: AssetBalance[];
@@ -56,6 +68,36 @@ export interface StellarAccountState {
   spendableXlm: string;
   reclaimableXlm: string;
   reclaimableTrustlines: readonly ZeroBalanceTrustline[];
+  sequence?: string | undefined;
+  lastModifiedLedger?: number | undefined;
+  homeDomain?: string | undefined;
+  sponsor?: string | undefined;
+  thresholds?: { lowThreshold: number; medThreshold: number; highThreshold: number } | undefined;
+  flags?:
+    | {
+        authRequired: boolean;
+        authRevocable: boolean;
+        authImmutable: boolean;
+        authClawbackEnabled: boolean;
+      }
+    | undefined;
+  signers?: readonly AccountSignerRecord[] | undefined;
+  dataEntries?: readonly AccountDataEntryRecord[] | undefined;
+}
+
+export interface AccountTradeRecord {
+  id: string;
+  ledgerCloseTime: string;
+  baseAssetCode: string;
+  baseAssetIssuer?: string | undefined;
+  baseAmount: string;
+  counterAssetCode: string;
+  counterAssetIssuer?: string | undefined;
+  counterAmount: string;
+  price: string;
+  baseIsSeller: boolean;
+  baseAccount?: string | undefined;
+  counterAccount?: string | undefined;
 }
 
 export interface ClaimableBalanceRecord {
@@ -108,6 +150,7 @@ export interface BuildAndSubmitPaymentInput {
 export interface StellarClient {
   fetchAccountState(address: string): Promise<StellarAccountState>;
   fetchRecentPayments(address: string, limit?: number): Promise<RecentPaymentRecord[]>;
+  fetchRecentTrades(address: string, limit?: number): Promise<AccountTradeRecord[]>;
   fetchClaimableBalances(address: string, limit?: number): Promise<ClaimableBalanceRecord[]>;
   fetchOpenOffers(address: string, limit?: number): Promise<SdexOfferRecord[]>;
   fundWithFriendbot(address: string): Promise<{ funded: true }>;
@@ -202,19 +245,49 @@ function isHorizonNotFound(err: unknown): boolean {
 }
 
 function normalizeBalanceLine(line: Horizon.HorizonApi.BalanceLine): AssetBalance | null {
-  if (line.asset_type === "native") {
+  const raw = line as unknown as {
+    asset_type?: string;
+    asset_code?: string;
+    asset_issuer?: string;
+    balance: string;
+    limit?: string;
+    buying_liabilities?: string;
+    selling_liabilities?: string;
+    is_authorized?: boolean;
+    is_authorized_to_maintain_liabilities?: boolean;
+    is_clawback_enabled?: boolean;
+    sponsor?: string;
+    last_modified_ledger?: number;
+  };
+  if (raw.asset_type === "native") {
     return {
       assetCode: "XLM",
-      balance: line.balance,
+      balance: raw.balance,
       isVerifiedAsset: true,
+      ...(raw.buying_liabilities ? { buyingLiabilities: raw.buying_liabilities } : {}),
+      ...(raw.selling_liabilities ? { sellingLiabilities: raw.selling_liabilities } : {}),
     };
   }
-  if (line.asset_type === "credit_alphanum4" || line.asset_type === "credit_alphanum12") {
+  if (raw.asset_type === "credit_alphanum4" || raw.asset_type === "credit_alphanum12") {
     return {
-      assetCode: line.asset_code,
-      assetIssuer: line.asset_issuer,
-      balance: line.balance,
+      assetCode: raw.asset_code ?? "ASSET",
+      assetIssuer: raw.asset_issuer,
+      balance: raw.balance,
       isVerifiedAsset: false,
+      ...(raw.limit ? { limit: raw.limit } : {}),
+      ...(raw.buying_liabilities ? { buyingLiabilities: raw.buying_liabilities } : {}),
+      ...(raw.selling_liabilities ? { sellingLiabilities: raw.selling_liabilities } : {}),
+      ...(typeof raw.is_authorized === "boolean" ? { isAuthorized: raw.is_authorized } : {}),
+      ...(typeof raw.is_authorized_to_maintain_liabilities === "boolean"
+        ? { isAuthorizedToMaintainLiabilities: raw.is_authorized_to_maintain_liabilities }
+        : {}),
+      ...(typeof raw.is_clawback_enabled === "boolean"
+        ? { isClawbackEnabled: raw.is_clawback_enabled }
+        : {}),
+      ...(raw.sponsor ? { sponsor: raw.sponsor } : {}),
+      ...(typeof raw.last_modified_ledger === "number"
+        ? { lastModifiedLedger: raw.last_modified_ledger }
+        : {}),
     };
   }
   return null;
@@ -584,6 +657,46 @@ export function createStellarClient(
         balances,
       });
 
+      const rawAccount = account as unknown as {
+        sequence?: string;
+        last_modified_ledger?: number;
+        home_domain?: string;
+        sponsor?: string;
+        thresholds?: { low_threshold?: number; med_threshold?: number; high_threshold?: number };
+        flags?: {
+          auth_required?: boolean;
+          auth_revocable?: boolean;
+          auth_immutable?: boolean;
+          auth_clawback_enabled?: boolean;
+        };
+        signers?: Array<{ key?: string; weight?: number; type?: string; sponsor?: string }>;
+        data_attr?: Record<string, string>;
+      };
+
+      const signers: AccountSignerRecord[] = (rawAccount.signers ?? [])
+        .filter((s): s is { key: string; weight: number; type: string; sponsor?: string } =>
+          typeof s.key === "string" && typeof s.weight === "number",
+        )
+        .map((s) => ({
+          key: s.key,
+          weight: s.weight,
+          type: s.type ?? "ed25519_public_key",
+          ...(s.sponsor ? { sponsor: s.sponsor } : {}),
+        }));
+
+      const dataEntries: AccountDataEntryRecord[] = Object.entries(rawAccount.data_attr ?? {}).map(
+        ([key, b64]) => {
+          let decoded = b64;
+          try {
+            const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+            decoded = new TextDecoder().decode(bytes);
+          } catch {
+            // Keep base64 if non-UTF8
+          }
+          return { key, value: decoded };
+        },
+      );
+
       return {
         funded: true,
         balances,
@@ -594,6 +707,33 @@ export function createStellarClient(
         spendableXlm: reserve.spendableXlm,
         reclaimableXlm: reserve.reclaimableXlm,
         reclaimableTrustlines: reserve.reclaimableTrustlines,
+        ...(rawAccount.sequence ? { sequence: rawAccount.sequence } : {}),
+        ...(typeof rawAccount.last_modified_ledger === "number"
+          ? { lastModifiedLedger: rawAccount.last_modified_ledger }
+          : {}),
+        ...(rawAccount.home_domain ? { homeDomain: rawAccount.home_domain } : {}),
+        ...(rawAccount.sponsor ? { sponsor: rawAccount.sponsor } : {}),
+        ...(rawAccount.thresholds
+          ? {
+              thresholds: {
+                lowThreshold: rawAccount.thresholds.low_threshold ?? 0,
+                medThreshold: rawAccount.thresholds.med_threshold ?? 0,
+                highThreshold: rawAccount.thresholds.high_threshold ?? 0,
+              },
+            }
+          : {}),
+        ...(rawAccount.flags
+          ? {
+              flags: {
+                authRequired: Boolean(rawAccount.flags.auth_required),
+                authRevocable: Boolean(rawAccount.flags.auth_revocable),
+                authImmutable: Boolean(rawAccount.flags.auth_immutable),
+                authClawbackEnabled: Boolean(rawAccount.flags.auth_clawback_enabled),
+              },
+            }
+          : {}),
+        ...(signers.length > 0 ? { signers } : {}),
+        ...(dataEntries.length > 0 ? { dataEntries } : {}),
       };
     } catch (err) {
       if (isHorizonNotFound(err)) {
@@ -687,6 +827,65 @@ export function createStellarClient(
           to: address,
           amount: "0",
           assetCode: "XLM",
+        };
+      });
+    } catch (err) {
+      if (isHorizonNotFound(err)) {
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  async function fetchRecentTrades(
+    address: string,
+    limit = 20,
+  ): Promise<AccountTradeRecord[]> {
+    const lookupAddress = address.startsWith("M")
+      ? decodeMuxedAddress(address as MuxedAddress).baseAddress
+      : address;
+    if (lookupAddress.startsWith("C")) {
+      return [];
+    }
+    try {
+      const page = await withHorizonFailover((server) =>
+        server.trades().forAccount(lookupAddress).order("desc").limit(limit).call(),
+      );
+      return page.records.map((rec) => {
+        const raw = rec as unknown as {
+          id: string;
+          ledger_close_time: string;
+          base_asset_type?: string;
+          base_asset_code?: string;
+          base_asset_issuer?: string;
+          base_amount: string;
+          counter_asset_type?: string;
+          counter_asset_code?: string;
+          counter_asset_issuer?: string;
+          counter_amount: string;
+          price?: { n?: string | number; d?: string | number };
+          base_is_seller?: boolean;
+          base_account?: string;
+          counter_account?: string;
+        };
+        const n = Number(raw.price?.n ?? 0);
+        const d = Number(raw.price?.d ?? 1);
+        const price =
+          Number.isFinite(n) && Number.isFinite(d) && d > 0 ? (n / d).toPrecision(6) : "0";
+        return {
+          id: raw.id,
+          ledgerCloseTime: raw.ledger_close_time,
+          baseAssetCode: raw.base_asset_type === "native" ? "XLM" : (raw.base_asset_code ?? "ASSET"),
+          baseAssetIssuer: raw.base_asset_issuer,
+          baseAmount: raw.base_amount,
+          counterAssetCode:
+            raw.counter_asset_type === "native" ? "XLM" : (raw.counter_asset_code ?? "ASSET"),
+          counterAssetIssuer: raw.counter_asset_issuer,
+          counterAmount: raw.counter_amount,
+          price,
+          baseIsSeller: Boolean(raw.base_is_seller),
+          baseAccount: raw.base_account,
+          counterAccount: raw.counter_account,
         };
       });
     } catch (err) {
@@ -1044,6 +1243,7 @@ export function createStellarClient(
   return {
     fetchAccountState,
     fetchRecentPayments,
+    fetchRecentTrades,
     fetchClaimableBalances,
     fetchOpenOffers,
     fundWithFriendbot,

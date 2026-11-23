@@ -1010,14 +1010,38 @@ export function createTelegramBot(
     }
 
     const amount = parsePositiveAmount(args[0] ?? "");
-    const fromAsset = (args[1] ?? "").trim();
-    const toAsset = (args[2] ?? "").trim();
-    if (!amount || !fromAsset || !toAsset) {
+    const rawFromAsset = (args[1] ?? "").trim();
+    const rawToAsset = (args[2] ?? "").trim();
+    if (!amount || !rawFromAsset || !rawToAsset) {
       await ctx.reply("Invalid swap parameters.", { parse_mode: "HTML" });
       return;
     }
 
     try {
+      const linked = await repo.listLinkedAddresses(tgId);
+      const defaultClassic =
+        linked.find((a) => a.isDefault && a.kind === "classic" && a.address.startsWith("G")) ??
+        linked.find((a) => a.kind === "classic" && a.address.startsWith("G"));
+
+      const [fromResolved, toResolved] = await Promise.all([
+        resolveCommandAsset(rawFromAsset, defaultClassic?.address),
+        resolveCommandAsset(rawToAsset, defaultClassic?.address),
+      ]);
+      if (!fromResolved.ok) {
+        await ctx.reply(fromResolved.message, { parse_mode: "HTML" });
+        return;
+      }
+      if (!toResolved.ok) {
+        await ctx.reply(toResolved.message, { parse_mode: "HTML" });
+        return;
+      }
+      const fromAsset = fromResolved.assetIssuer
+        ? `${fromResolved.assetCode}:${fromResolved.assetIssuer}`
+        : fromResolved.assetCode;
+      const toAsset = toResolved.assetIssuer
+        ? `${toResolved.assetCode}:${toResolved.assetIssuer}`
+        : toResolved.assetCode;
+
       let quote:
         | {
             inputAmount: string;
@@ -1054,11 +1078,6 @@ export function createTelegramBot(
             const out = parseSoroswapQuoteOutput(data);
             if (out) {
               let unsignedXdr: string | undefined;
-              const linked = await repo.listLinkedAddresses(tgId);
-              const defaultClassic =
-                linked.find(
-                  (a) => a.isDefault && a.kind === "classic" && a.address.startsWith("G"),
-                ) ?? linked.find((a) => a.kind === "classic" && a.address.startsWith("G"));
               if (defaultClassic) {
                 const buildRes = await fetchFn(
                   `${cleanBase}/quote/build?network=${config.network}`,
@@ -1161,14 +1180,15 @@ export function createTelegramBot(
 
     if (verb === "pay" && parts.length >= 4) {
       const amount = parsePositiveAmount(parts[1] ?? "");
-      const assetCode = parseAssetCode(parts[2] ?? "");
-      if (amount && assetCode) {
+      const assetRes = await resolveCommandAsset(parts[2] ?? "", undefined);
+      if (amount && assetRes.ok) {
         const resolved = await resolveRecipient(repo, parts[3] ?? "");
         if (resolved.ok) {
           const now = Math.floor(Date.now() / 1000);
           const payload = {
             amount,
-            assetCode,
+            assetCode: assetRes.assetCode,
+            ...(assetRes.assetIssuer ? { assetIssuer: assetRes.assetIssuer } : {}),
             destination: resolved.address,
             recipientLabel: resolved.label,
             senderLabel: username,
@@ -1204,13 +1224,13 @@ export function createTelegramBot(
               {
                 type: "article",
                 id: intent.intentId,
-                title: `Send ${amount} ${assetCode} to ${resolved.label}`,
+                title: `Send ${amount} ${assetRes.assetCode} to ${resolved.label}`,
                 description: `Create a signed ${config.network} payment card`,
                 input_message_content: {
                   message_text: formatPaymentIntentCard({
                     status: "pending",
                     amount,
-                    assetCode,
+                    assetCode: assetRes.assetCode,
                     senderLabel: username,
                     recipientLabel: resolved.label,
                     network: config.network,

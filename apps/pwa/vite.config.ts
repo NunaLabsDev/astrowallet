@@ -66,14 +66,33 @@ function loadFallbackEnvExample(dir: string): Record<string, string> {
 }
 
 export default defineConfig(({ mode }) => {
-  const exampleEnv = loadFallbackEnvExample(process.cwd());
   const fileEnv = loadEnv(mode, process.cwd(), "VITE_");
-  for (const [k, v] of Object.entries(exampleEnv)) {
-    if (process.env[k] === undefined && fileEnv[k] === undefined) {
-      process.env[k] = v;
+  const hasExplicitNetwork = Boolean(
+    fileEnv.VITE_STELLAR_NETWORK?.trim() || process.env.VITE_STELLAR_NETWORK?.trim(),
+  );
+  const exampleEnv = hasExplicitNetwork ? {} : loadFallbackEnvExample(process.cwd());
+  if (!hasExplicitNetwork) {
+    for (const [k, v] of Object.entries(exampleEnv)) {
+      if (process.env[k] === undefined && fileEnv[k] === undefined) {
+        process.env[k] = v;
+      }
     }
   }
-  const combinedEnv = { ...exampleEnv, ...fileEnv, ...process.env };
+  const combinedEnv: Record<string, string | undefined> = {
+    ...exampleEnv,
+    ...fileEnv,
+    ...process.env,
+  };
+  if (combinedEnv.VITE_STELLAR_NETWORK?.trim() === "mainnet") {
+    if (combinedEnv.VITE_FRIENDBOT_URL?.trim()) {
+      throw new Error("Mainnet build aborted: VITE_FRIENDBOT_URL must be empty on mainnet");
+    }
+    if (combinedEnv.VITE_ALLOW_DEV_OUTSIDE_TELEGRAM?.trim().toLowerCase() === "true") {
+      throw new Error(
+        "Mainnet build aborted: VITE_ALLOW_DEV_OUTSIDE_TELEGRAM cannot be true on mainnet",
+      );
+    }
+  }
   return {
     plugins: [react(), cspConnectSrcPlugin(combinedEnv)],
     worker: {

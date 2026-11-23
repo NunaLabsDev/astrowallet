@@ -2330,9 +2330,9 @@ function WalletShell({
                           </div>
                         ) : (
                           <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                            Set <code>VITE_SMART_ACCOUNT_WASM_HASH</code> to enable counterfactual{" "}
-                            <code>C...</code> Smart Account pairing with your <code>G...</code>{" "}
-                            Recovery Guardian.
+                            Counterfactual <code>C...</code> Smart Account pairing is staged for an
+                            upcoming release. Your Classic <code>G...</code> Guardian and TON vaults
+                            are active on {config.network.toUpperCase()}.
                           </div>
                         )}
                       </div>

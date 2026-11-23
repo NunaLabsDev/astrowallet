@@ -178,17 +178,20 @@ export function CollectiblesSheet() {
               100% on-chain 32&times;32 genomic pixel art via Stellar Soroban RPC
             </div>
           </div>
-          <span className="glass-pill glass-pill--trust">
-            {ownedSorobits.length > 0
-              ? `${ownedSorobits.length} Owned`
-              : `${showcaseSorobits.length} Showcase · ${totalSupply} Supply`}
-          </span>
+          {config.sorobitsContractId && (
+            <span className="glass-pill glass-pill--trust">
+              {ownedSorobits.length > 0
+                ? `${ownedSorobits.length} Owned`
+                : `${showcaseSorobits.length} Showcase · ${totalSupply} Supply`}
+            </span>
+          )}
         </div>
 
         {!config.sorobitsContractId ? (
           <div className="aw-banner" style={{ fontSize: 12 }}>
-            Set <code>VITE_SOROBITS_CONTRACT_ID</code> in environment config to inspect your
-            on-chain Sorobits NFTs on {config.network.toUpperCase()}.
+            On-chain Sorobits (SEP-50) collectibles are not yet deployed on{" "}
+            {config.network.toUpperCase()}. Your deterministic Astro Navigator Guardian above is
+            active for this account.
           </div>
         ) : loading ? (
           <div className="aw-sorobit-grid">

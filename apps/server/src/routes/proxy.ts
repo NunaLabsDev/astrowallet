@@ -11,6 +11,7 @@ import {
   createSecurityShield,
   decodeTransactionEnvelope,
   extractBaseDestination,
+  fetchSep42VerifiedAssets,
   type DirectoryTagEntry,
 } from "@astrowallet/security-shield";
 import type { KVNamespace } from "@cloudflare/workers-types";
@@ -426,10 +427,34 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       );
     }
 
+    const resolveBareAsset = async (raw: string): Promise<string> => {
+      const trimmed = raw.trim();
+      const upper = trimmed.toUpperCase();
+      if (!trimmed || upper === "XLM" || upper === "NATIVE" || trimmed.includes(":")) {
+        return trimmed;
+      }
+      if (config.sep42AssetListUrls.length === 0) return trimmed;
+      const verified = await fetchSep42VerifiedAssets(config.sep42AssetListUrls, {
+        fetchFn,
+      }).catch(() => []);
+      const match = verified.find((v) => v.code.toUpperCase() === upper);
+      return match ? `${match.code}:${match.issuer}` : trimmed;
+    };
+
+    const [fromAssetResolved, toAssetResolved] = await Promise.all([
+      resolveBareAsset(reqBody.fromAsset),
+      resolveBareAsset(reqBody.toAsset),
+    ]);
+    const resolvedReq = {
+      ...reqBody,
+      fromAsset: fromAssetResolved,
+      toAsset: toAssetResolved,
+    };
+
     if (config.soroswapApiBase && config.soroswapApiKey) {
       try {
         const cleanBase = config.soroswapApiBase.replace(/\/+$/, "");
-        const quoteBody = buildSoroswapQuoteBody(reqBody, config.networkPassphrase);
+        const quoteBody = buildSoroswapQuoteBody(resolvedReq, config.networkPassphrase);
         const authHeaders = {
           "Content-Type": "application/json",
           Authorization: `Bearer ${config.soroswapApiKey}`,
@@ -449,11 +474,11 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
           const out = parseSoroswapQuoteOutput(data);
           if (out) {
             let unsignedXdr: string | undefined;
-            if (reqBody.sourceAddress) {
+            if (resolvedReq.sourceAddress) {
               const buildRes = await fetchFn(`${cleanBase}/quote/build?network=${config.network}`, {
                 method: "POST",
                 headers: authHeaders,
-                body: JSON.stringify({ quote: data, from: reqBody.sourceAddress }),
+                body: JSON.stringify({ quote: data, from: resolvedReq.sourceAddress }),
                 signal: AbortSignal.timeout(8000),
               }).catch(() => null);
               if (buildRes?.ok) {
@@ -463,7 +488,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             }
             return c.json({
               provider: "soroswap",
-              inputAmount: reqBody.amount,
+              inputAmount: resolvedReq.amount,
               expectedOutputAmount: out,
               priceImpactPct: data.priceImpactPct ?? "N/A",
               unsignedXdr,
@@ -480,7 +505,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         horizonUrls: config.horizonUrls,
         fetchFn,
       });
-      const quote = await horizonSwap.getQuote(reqBody);
+      const quote = await horizonSwap.getQuote(resolvedReq);
       return c.json(quote);
     } catch (err) {
       return c.json(

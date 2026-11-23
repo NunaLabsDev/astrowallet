@@ -881,7 +881,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     const staleTtlSec = 86_400;
 
     return serveEdgeCachedJson(c, {
-      cacheKey: `hist:${config.network}:${code}:${rawIssuer || "native"}:${timeframe}:${counterCode || "XLM"}:${rawCounterIssuer || "native"}`,
+      cacheKey: `hist2:${config.network}:${code}:${rawIssuer || "native"}:${timeframe}:${counterCode || "XLM"}:${rawCounterIssuer || "native"}`,
       freshTtlSec,
       staleTtlSec,
       compute: () =>

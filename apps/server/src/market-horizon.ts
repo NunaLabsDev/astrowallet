@@ -64,6 +64,208 @@ function parseTradePrice(price?: { n?: string | number; d?: string | number }): 
   return Number.isFinite(val) && val > 0 ? val : null;
 }
 
+interface RawOhlcvCandle {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  baseVolume: number;
+  avg?: number | undefined;
+}
+
+function medianOf(nums: readonly number[]): number {
+  if (nums.length === 0) return 0;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+function rollupCandles(candles: readonly RawOhlcvCandle[], bucketMs: number): RawOhlcvCandle[] {
+  if (candles.length === 0) return [];
+  const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  const buckets = new Map<number, RawOhlcvCandle & { weightedSum: number; weightVol: number }>();
+
+  for (const c of sorted) {
+    const bucketTs = Math.floor(c.timestamp / bucketMs) * bucketMs;
+    const prev = buckets.get(bucketTs);
+    const weight = c.baseVolume > 0 ? c.baseVolume : 0;
+    const avgPrice = c.avg && c.avg > 0 ? c.avg : c.close;
+    if (!prev) {
+      buckets.set(bucketTs, {
+        timestamp: bucketTs,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        baseVolume: c.baseVolume,
+        avg: avgPrice,
+        weightedSum: avgPrice * weight,
+        weightVol: weight,
+      });
+    } else {
+      prev.high = Math.max(prev.high, c.high);
+      prev.low = Math.min(prev.low, c.low);
+      prev.close = c.close;
+      prev.baseVolume += c.baseVolume;
+      prev.weightedSum += avgPrice * weight;
+      prev.weightVol += weight;
+      prev.avg = prev.weightVol > 0 ? prev.weightedSum / prev.weightVol : prev.close;
+    }
+  }
+
+  return Array.from(buckets.values())
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map(({ timestamp, open, high, low, close, baseVolume, avg }) => ({
+      timestamp,
+      open,
+      high,
+      low,
+      close,
+      baseVolume,
+      ...(avg !== undefined ? { avg } : {}),
+    }));
+}
+
+/**
+ * Sanitizes Stellar SDEX/AMM OHLCV candles by guarding against 1-stroop dust trades
+ * and clamping extreme outlier wicks relative to rolling median consensus & VWAP.
+ */
+export function sanitizeOhlcvCandles(
+  candles: readonly RawOhlcvCandle[],
+  opts?: { maxWickFloorPct?: number },
+): Array<{
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  baseVolume: number;
+}> {
+  if (candles.length === 0) return [];
+  const deduped = new Map<number, RawOhlcvCandle>();
+  for (const c of candles) {
+    if (
+      Number.isFinite(c.timestamp) &&
+      c.open > 0 &&
+      c.high > 0 &&
+      c.low > 0 &&
+      c.close > 0
+    ) {
+      deduped.set(c.timestamp, c);
+    }
+  }
+  const sorted = Array.from(deduped.values()).sort((a, b) => a.timestamp - b.timestamp);
+  if (sorted.length === 0) return [];
+
+  const allAnchors = sorted.map((c) => (c.avg && c.avg > 0 ? c.avg : c.close));
+  const seriesMedian = medianOf(allAnchors);
+  const medianVol = medianOf(sorted.map((c) => c.baseVolume).filter((v) => v > 0));
+
+  const bodyChanges = sorted
+    .map((c) => (c.close > 0 ? Math.abs(c.close - c.open) / c.close : 0))
+    .filter((v) => Number.isFinite(v) && v >= 0);
+  const robustVol = medianOf(bodyChanges) * 4;
+  const maxWickFloor = opts?.maxWickFloorPct ?? 0.12;
+  const maxWickPct = Math.max(maxWickFloor, Math.min(0.35, robustVol));
+
+  return sorted.map((c, idx) => {
+    const start = Math.max(0, idx - 3);
+    const end = Math.min(sorted.length, idx + 4);
+    const windowAnchors = allAnchors.slice(start, end);
+    const localMed = windowAnchors.length >= 3 ? medianOf(windowAnchors) : seriesMedian;
+
+    let open = c.open;
+    let close = c.close;
+    let high = c.high;
+    let low = c.low;
+
+    const avgValid = c.avg !== undefined && c.avg > 0 && localMed > 0 && c.avg >= 0.4 * localMed && c.avg <= 2.5 * localMed;
+    if (avgValid && c.avg !== undefined) {
+      if (open > c.avg * 2.0 || open < c.avg * 0.5) open = c.avg;
+      if (close > c.avg * 2.0 || close < c.avg * 0.5) close = c.avg;
+    }
+
+    if (
+      localMed > 0 &&
+      medianVol > 0 &&
+      c.baseVolume < 0.05 * medianVol &&
+      (close > 3.5 * localMed || close < localMed / 3.5)
+    ) {
+      open = localMed;
+      close = localMed;
+      high = localMed;
+      low = localMed;
+    }
+
+    const bodyMax = Math.max(open, close, avgValid && c.avg ? c.avg : close);
+    const bodyMin = Math.min(open, close, avgValid && c.avg ? c.avg : close);
+    high = Math.max(Math.max(open, close), Math.min(high, bodyMax * (1 + maxWickPct)));
+    low = Math.min(Math.min(open, close), Math.max(low, bodyMin / (1 + maxWickPct)));
+
+    return {
+      timestamp: c.timestamp,
+      open,
+      high,
+      low,
+      close,
+      baseVolume: c.baseVolume,
+    };
+  });
+}
+
+async function fetchKrakenXlmWeeklyOhlcv(fetchFn: FetchLike): Promise<RawOhlcvCandle[]> {
+  try {
+    const res = await fetchFn("https://api.kraken.com/0/public/OHLC?pair=XLMUSD&interval=10080", {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return [];
+    const body = (await res.json()) as {
+      error?: string[];
+      result?: Record<string, Array<[number, string, string, string, string, string, string, number]>>;
+    };
+    if (body.error && body.error.length > 0) return [];
+    const pairKey = Object.keys(body.result ?? {}).find((k) => k !== "last");
+    if (!pairKey) return [];
+    const rows = body.result?.[pairKey] ?? [];
+    return rows
+      .map((row): RawOhlcvCandle | null => {
+        const tsSec = Number(row[0]);
+        const open = parseFinite(row[1]);
+        const high = parseFinite(row[2]);
+        const low = parseFinite(row[3]);
+        const close = parseFinite(row[4]);
+        const vwap = parseFinite(row[5]);
+        const vol = parseFinite(row[6]) ?? 0;
+        if (
+          !Number.isFinite(tsSec) ||
+          tsSec <= 0 ||
+          open === null ||
+          high === null ||
+          low === null ||
+          close === null ||
+          close <= 0
+        ) {
+          return null;
+        }
+        return {
+          timestamp: tsSec * 1000,
+          open,
+          high,
+          low,
+          close,
+          baseVolume: vol,
+          ...(vwap !== null && vwap > 0 ? { avg: vwap } : {}),
+        };
+      })
+      .filter((c): c is RawOhlcvCandle => c !== null)
+      .sort((a, b) => a.timestamp - b.timestamp);
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchMarketPriceHistory(input: {
   horizonUrls: readonly string[];
   assetCode: string;
@@ -93,23 +295,22 @@ export async function fetchMarketPriceHistory(input: {
     };
   }
 
-  const tfConfig: Record<MarketTimeframe, { lookbackMs: number; resolutionMs: number; limit: number }> = {
-    "24h": { lookbackMs: 24 * 60 * 60 * 1000, resolutionMs: 3_600_000, limit: 24 },
-    "7d": { lookbackMs: 7 * 24 * 60 * 60 * 1000, resolutionMs: 14_400_000, limit: 42 },
-    "30d": { lookbackMs: 30 * 24 * 60 * 60 * 1000, resolutionMs: 86_400_000, limit: 30 },
-    "1y": { lookbackMs: 365 * 24 * 60 * 60 * 1000, resolutionMs: 86_400_000, limit: 200 },
-    "all": { lookbackMs: 10 * 365 * 24 * 60 * 60 * 1000, resolutionMs: 604_800_000, limit: 200 },
-  };
-  const cfg = tfConfig[input.timeframe];
   const baseParams = resolveAssetParams("base", input.assetCode, input.assetIssuer);
   const counterParams = resolveAssetParams("counter", quoteCode, quoteIssuer);
+  const isMainnet = !input.horizonUrls.some((u) => u.includes("testnet"));
+  const wickFloor = input.timeframe === "24h" || input.timeframe === "7d" ? 0.08 : 0.15;
 
-  async function queryAgg(lookbackMs: number, resolutionMs: number, limit: number) {
+  async function queryAggRange(
+    startMs: number,
+    endMs: number,
+    resolutionMs: number,
+    limit: number,
+  ): Promise<RawOhlcvCandle[]> {
     const params = new URLSearchParams({
       ...baseParams,
       ...counterParams,
-      start_time: String(Math.max(0, input.nowMs - lookbackMs)),
-      end_time: String(input.nowMs),
+      start_time: String(Math.max(0, startMs)),
+      end_time: String(endMs),
       resolution: String(resolutionMs),
       limit: String(limit),
       order: "desc",
@@ -122,35 +323,98 @@ export async function fetchMarketPriceHistory(input: {
           high?: string;
           low?: string;
           close?: string;
+          avg?: string;
           base_volume?: string;
         }>;
       };
     }>(input.horizonUrls, `/trade_aggregations?${params.toString()}`, fetchFn);
 
     return (body?._embedded?.records ?? [])
-      .map((rec) => {
+      .map((rec): RawOhlcvCandle | null => {
         const ts = parseFinite(rec.timestamp);
         const open = parseFinite(rec.open);
         const high = parseFinite(rec.high);
         const low = parseFinite(rec.low);
         const close = parseFinite(rec.close);
+        const avg = parseFinite(rec.avg);
         const baseVolume = parseFinite(rec.base_volume) ?? 0;
         if (ts === null || open === null || high === null || low === null || close === null || close <= 0) {
           return null;
         }
-        return { timestamp: ts, open, high, low, close, baseVolume };
+        return {
+          timestamp: ts,
+          open,
+          high,
+          low,
+          close,
+          baseVolume,
+          ...(avg !== null && avg > 0 ? { avg } : {}),
+        };
       })
-      .filter((c): c is NonNullable<typeof c> => c !== null)
+      .filter((c): c is RawOhlcvCandle => c !== null)
       .reverse();
   }
 
   try {
-    let candles = await queryAgg(cfg.lookbackMs, cfg.resolutionMs, cfg.limit);
-    if (input.timeframe === "all" && candles.length < 2) {
-      const daily = await queryAgg(365 * 24 * 60 * 60 * 1000, 86_400_000, 200);
-      if (daily.length > candles.length) candles = daily;
+    if (
+      input.timeframe === "all" &&
+      isBaseNative &&
+      isMainnet &&
+      (quoteCode.toUpperCase() === "USDC" || quoteCode.toUpperCase() === "USD")
+    ) {
+      const krakenRaw = await fetchKrakenXlmWeeklyOhlcv(fetchFn);
+      if (krakenRaw.length >= 10) {
+        const candles = sanitizeOhlcvCandles(krakenRaw, { maxWickFloorPct: wickFloor });
+        const first = candles[0]!;
+        const last = candles[candles.length - 1]!;
+        return {
+          timeframe: input.timeframe,
+          quoteCode,
+          ...(quoteIssuer ? { quoteIssuer } : {}),
+          candles,
+          latestPriceXlm: last.close,
+          changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
+          high: Math.max(...candles.map((c) => c.high)),
+          low: Math.min(...candles.map((c) => c.low)),
+          volumeBase: candles.reduce((s, c) => s + c.baseVolume, 0),
+          source: "kraken_ohlc" as const,
+        };
+      }
     }
-    if (candles.length > 0) {
+
+    const DAY_MS = 86_400_000;
+    let rawCandles: RawOhlcvCandle[] = [];
+
+    if (input.timeframe === "24h") {
+      rawCandles = await queryAggRange(input.nowMs - DAY_MS, input.nowMs, 900_000, 96);
+      if (rawCandles.length < 2) {
+        const hourly = await queryAggRange(input.nowMs - DAY_MS, input.nowMs, 3_600_000, 24);
+        if (hourly.length > rawCandles.length) rawCandles = hourly;
+      }
+    } else if (input.timeframe === "7d") {
+      const hourly = await queryAggRange(input.nowMs - 7 * DAY_MS, input.nowMs, 3_600_000, 168);
+      rawCandles = rollupCandles(hourly, 14_400_000);
+    } else if (input.timeframe === "30d") {
+      rawCandles = await queryAggRange(input.nowMs - 30 * DAY_MS, input.nowMs, DAY_MS, 30);
+    } else if (input.timeframe === "1y") {
+      const splitMs = input.nowMs - 200 * DAY_MS;
+      const [recent, older] = await Promise.all([
+        queryAggRange(splitMs, input.nowMs, DAY_MS, 200),
+        queryAggRange(input.nowMs - 365 * DAY_MS, splitMs, DAY_MS, 170).catch(() => []),
+      ]);
+      rawCandles = [...older, ...recent];
+    } else {
+      const splitMs = input.nowMs - 200 * DAY_MS;
+      const [recent, older] = await Promise.all([
+        queryAggRange(splitMs, input.nowMs, DAY_MS, 200),
+        queryAggRange(input.nowMs - 400 * DAY_MS, splitMs, DAY_MS, 200).catch(() => []),
+      ]);
+      const combined = [...older, ...recent];
+      rawCandles = combined.length > 100 ? rollupCandles(combined, 604_800_000) : combined;
+    }
+
+    if (rawCandles.length > 0) {
+      const candles = sanitizeOhlcvCandles(rawCandles, { maxWickFloorPct: wickFloor });
       const first = candles[0]!;
       const last = candles[candles.length - 1]!;
       return {
@@ -187,8 +451,8 @@ export async function fetchMarketPriceHistory(input: {
       };
     }>(input.horizonUrls, `/trades?${tradeParams.toString()}`, fetchFn);
 
-    const points = (tradesBody?._embedded?.records ?? [])
-      .map((t) => {
+    const rawPoints = (tradesBody?._embedded?.records ?? [])
+      .map((t): RawOhlcvCandle | null => {
         const p = parseTradePrice(t.price);
         const ts = t.ledger_close_time ? Date.parse(t.ledger_close_time) : NaN;
         if (p === null || !Number.isFinite(ts)) return null;
@@ -201,10 +465,11 @@ export async function fetchMarketPriceHistory(input: {
           baseVolume: parseFinite(t.base_amount) ?? 0,
         };
       })
-      .filter((c): c is NonNullable<typeof c> => c !== null)
+      .filter((c): c is RawOhlcvCandle => c !== null)
       .reverse();
 
-    if (points.length > 0) {
+    if (rawPoints.length > 0) {
+      const points = sanitizeOhlcvCandles(rawPoints, { maxWickFloorPct: wickFloor });
       const first = points[0]!;
       const last = points[points.length - 1]!;
       return {

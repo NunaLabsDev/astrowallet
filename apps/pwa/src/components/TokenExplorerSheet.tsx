@@ -6,7 +6,6 @@ import {
   type StellarTokenDetails,
   type TokenCatalogItem,
   type TokenOrderbookSnapshot,
-  type TokenPriceCandle,
   type TokenPriceHistoryResult,
   type TokenPriceTimeframe,
   type TokenRecentTradeRecord,
@@ -34,6 +33,7 @@ import {
   IconShield,
   IconSwap,
 } from "./Icons.js";
+import { LightweightPriceChart } from "./LightweightPriceChart.js";
 import { TokenBadge } from "./TokenBadge.js";
 import {
   buildTokenCatalog,
@@ -80,216 +80,6 @@ function computeOnChainAssetScore(input: {
   if (!input.details?.flags.authRevocable) score += 0.5;
   if ((input.details?.numAccounts ?? 0) >= 100 || input.poolCount > 0) score += 0.5;
   return Math.min(10.0, Math.round(score * 10) / 10);
-}
-
-function InteractiveMarketChart({
-  candles,
-  quoteCode,
-  positive,
-  chartMode,
-  expanded = false,
-}: {
-  candles: readonly TokenPriceCandle[];
-  quoteCode: string;
-  positive: boolean;
-  chartMode: "area" | "candles";
-  expanded?: boolean;
-}) {
-  const [activeIdx, setActiveIdx] = useState<number | null>(null);
-
-  if (candles.length === 0) {
-    return (
-      <div className="aw-token-chart-box">
-        <div className="aw-empty-state" style={{ padding: "24px 12px" }}>
-          <IconChart size={20} />
-          <div style={{ fontWeight: 600, fontSize: 13 }}>No historical SDEX trades in this window</div>
-          <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-            Switch timeframe (7D / 30D / 1Y / ALL) or check the Orderbook tab for resting liquidity.
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  const width = expanded ? 560 : 320;
-  const height = expanded ? 240 : 140;
-  const padX = 12;
-  const padTop = 14;
-  const padBottom = 22;
-  const lows = candles.map((c) => Math.min(c.low, c.open, c.close));
-  const highs = candles.map((c) => Math.max(c.high, c.open, c.close));
-  const volumes = candles.map((c) => c.baseVolume ?? 0);
-  const minVal = Math.min(...lows);
-  const maxVal = Math.max(...highs);
-  const range = maxVal - minVal;
-  const maxVol = Math.max(...volumes, 1);
-
-  const yForPrice = (price: number): number => {
-    const norm = range > 0 ? (price - minVal) / range : 0.5;
-    return height - padBottom - norm * (height - padTop - padBottom);
-  };
-
-  const points = candles.map((c, idx) => {
-    const x =
-      candles.length === 1
-        ? width / 2
-        : padX + (idx / (candles.length - 1)) * (width - padX * 2);
-    return {
-      x,
-      yOpen: yForPrice(c.open),
-      yHigh: yForPrice(c.high),
-      yLow: yForPrice(c.low),
-      yClose: yForPrice(c.close),
-      volHeight: Math.max(1.5, ((c.baseVolume ?? 0) / maxVol) * 16),
-      candle: c,
-    };
-  });
-
-  const strokeColor = positive ? "#10B981" : "#F15A24";
-  const linePath = points
-    .map((p, idx) => `${idx === 0 ? "M" : "L"}${p.x.toFixed(1)},${p.yClose.toFixed(1)}`)
-    .join(" ");
-  const firstPoint = points[0]!;
-  const lastPoint = points[points.length - 1]!;
-  const areaPath =
-    points.length === 1
-      ? ""
-      : `${linePath} L${lastPoint.x.toFixed(1)},${(height - padBottom).toFixed(1)} L${firstPoint.x.toFixed(1)},${(height - padBottom).toFixed(1)} Z`;
-
-  const inspected =
-    activeIdx !== null && points[activeIdx] ? points[activeIdx]! : lastPoint;
-  const candleWidth = Math.max(
-    2.5,
-    Math.min(expanded ? 12 : 8, ((width - padX * 2) / Math.max(points.length, 1)) * 0.68),
-  );
-
-  const handlePointerScrub = (clientX: number, rect: DOMRect) => {
-    if (points.length <= 1 || rect.width <= 0) return;
-    const rel = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const idx = Math.round(rel * (points.length - 1));
-    setActiveIdx(idx);
-  };
-
-  return (
-    <div className="aw-token-chart-box">
-      <div className="aw-token-chart-readout">
-        <span className="tabular-nums" style={{ minWidth: 0 }}>
-          <strong style={{ color: "var(--aw-ink-primary)" }}>
-            {formatTokenPriceValue(inspected.candle.close)} {quoteCode}
-          </strong>{" "}
-          · {new Date(inspected.candle.timestamp).toLocaleDateString()}
-        </span>
-        <span className="tabular-nums" style={{ flexShrink: 0 }}>
-          {chartMode === "candles"
-            ? `O:${formatTokenPriceValue(inspected.candle.open)} H:${formatTokenPriceValue(inspected.candle.high)} L:${formatTokenPriceValue(inspected.candle.low)}`
-            : `H: ${formatTokenPriceValue(inspected.candle.high)} · L: ${formatTokenPriceValue(inspected.candle.low)}`}
-        </span>
-      </div>
-
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        style={{ width: "100%", height: "auto", display: "block", touchAction: "pan-y", userSelect: "none" }}
-        role="img"
-        aria-label={`Historical price chart in ${quoteCode}`}
-        onPointerDown={(e) => handlePointerScrub(e.clientX, e.currentTarget.getBoundingClientRect())}
-        onPointerMove={(e) => {
-          if (e.buttons > 0 || e.pointerType === "mouse") {
-            handlePointerScrub(e.clientX, e.currentTarget.getBoundingClientRect());
-          }
-        }}
-        onPointerLeave={() => setActiveIdx(null)}
-      >
-        <defs>
-          <linearGradient id="aw-token-chart-grad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={strokeColor} stopOpacity="0.38" />
-            <stop offset="100%" stopColor={strokeColor} stopOpacity="0.02" />
-          </linearGradient>
-        </defs>
-        <line
-          x1={padX}
-          y1={(height - padBottom + padTop) / 2}
-          x2={width - padX}
-          y2={(height - padBottom + padTop) / 2}
-          stroke="rgba(165, 139, 224, 0.16)"
-          strokeDasharray="3 3"
-        />
-
-        {/* Subtle volume bars at bottom */}
-        {points.map((pt) => (
-          <rect
-            key={`vol-${pt.candle.timestamp}`}
-            x={pt.x - candleWidth / 2}
-            y={height - pt.volHeight - 2}
-            width={candleWidth}
-            height={pt.volHeight}
-            rx={1}
-            fill="rgba(165, 139, 224, 0.22)"
-          />
-        ))}
-
-        {chartMode === "area" ? (
-          <>
-            {areaPath && <path d={areaPath} fill="url(#aw-token-chart-grad)" />}
-            {points.length > 1 && (
-              <path
-                d={linePath}
-                fill="none"
-                stroke={strokeColor}
-                strokeWidth="2.2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            )}
-            <circle
-              cx={inspected.x}
-              cy={inspected.yClose}
-              r={4.2}
-              fill="#F5C928"
-            />
-          </>
-        ) : (
-          points.map((pt, idx) => {
-            const bull = pt.candle.close >= pt.candle.open;
-            const cColor = bull ? "#10B981" : "#F15A24";
-            const bodyTop = Math.min(pt.yOpen, pt.yClose);
-            const bodyH = Math.max(1.8, Math.abs(pt.yClose - pt.yOpen));
-            const isSel = activeIdx === idx;
-            return (
-              <g key={pt.candle.timestamp} opacity={isSel ? 1 : 0.9}>
-                <line
-                  x1={pt.x}
-                  y1={pt.yHigh}
-                  x2={pt.x}
-                  y2={pt.yLow}
-                  stroke={isSel ? "#F5C928" : cColor}
-                  strokeWidth={1.3}
-                />
-                <rect
-                  x={pt.x - candleWidth / 2}
-                  y={bodyTop}
-                  width={candleWidth}
-                  height={bodyH}
-                  rx={1.2}
-                  fill={isSel ? "#F5C928" : cColor}
-                />
-              </g>
-            );
-          })
-        )}
-
-        {activeIdx !== null && (
-          <line
-            x1={inspected.x}
-            y1={padTop}
-            x2={inspected.x}
-            y2={height - padBottom}
-            stroke="rgba(245, 201, 40, 0.45)"
-            strokeDasharray="2 2"
-          />
-        )}
-      </svg>
-    </div>
-  );
 }
 
 export function TokenExplorerSheet({
@@ -1107,11 +897,12 @@ export function TokenExplorerSheet({
               Loading Horizon trade aggregations...
             </div>
           ) : (
-            <InteractiveMarketChart
+            <LightweightPriceChart
               candles={priceHistory?.candles ?? []}
               quoteCode={quoteCode}
               positive={positiveChange}
               chartMode={chartMode}
+              timeframe={timeframe}
             />
           )}
 
@@ -1165,11 +956,12 @@ export function TokenExplorerSheet({
                     </button>
                   ))}
                 </div>
-                <InteractiveMarketChart
+                <LightweightPriceChart
                   candles={priceHistory?.candles ?? []}
                   quoteCode={quoteCode}
                   positive={positiveChange}
                   chartMode={chartMode}
+                  timeframe={timeframe}
                   expanded
                 />
               </div>

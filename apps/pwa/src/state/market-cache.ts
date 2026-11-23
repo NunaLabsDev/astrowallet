@@ -21,7 +21,7 @@ interface StoredCacheEnvelope<T> {
   data: T;
 }
 
-const CACHE_PREFIX = "aw_swr_v1:";
+const CACHE_PREFIX = "aw_swr_v2:";
 const MAX_DEVICE_CACHE_BYTES = 64 * 1024;
 const memoryCache = new Map<string, StoredCacheEnvelope<unknown>>();
 const inflightRequests = new Map<string, Promise<unknown>>();

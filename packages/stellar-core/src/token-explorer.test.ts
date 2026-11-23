@@ -461,7 +461,60 @@ name = "Euro Coin"
     expect(heldMeta[`EURC:${issuerNoImage}`]?.image).toBeUndefined();
   });
 
-  it("supports 1y and all timeframes (stepping down to daily if weekly sparse) and fetches recent token trades", async () => {
+  it("uses valid Horizon 1h resolution for 7d rollup, supports all timeframe, and clamps dust outlier wicks", async () => {
+    const requestedResolutions: string[] = [];
+    const agg7d = await fetchTokenPriceHistoryAgainstXlm({
+      horizonUrls: ["https://horizon-test.example"],
+      assetCode: "USDC",
+      assetIssuer: ISSUER_USDC,
+      timeframe: "7d",
+      nowMs: 1_760_000_000_000,
+      fetchFn: async (input) => {
+        const url = new URL(String(input));
+        requestedResolutions.push(url.searchParams.get("resolution") ?? "");
+        return new Response(
+          JSON.stringify({
+            _embedded: {
+              records: [
+                {
+                  timestamp: "1759982400000",
+                  open: "0.15",
+                  high: "1.00",
+                  low: "0.148",
+                  close: "0.152",
+                  avg: "0.151",
+                  base_volume: "12000.0",
+                },
+                {
+                  timestamp: "1759978800000",
+                  open: "0.149",
+                  high: "0.153",
+                  low: "0.147",
+                  close: "0.150",
+                  avg: "0.150",
+                  base_volume: "9500.0",
+                },
+                {
+                  timestamp: "1759975200000",
+                  open: "0.148",
+                  high: "0.151",
+                  low: "0.146",
+                  close: "0.149",
+                  avg: "0.149",
+                  base_volume: "8200.0",
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      },
+    });
+    expect(requestedResolutions).toContain("3600000");
+    expect(requestedResolutions).not.toContain("14400000");
+    expect(agg7d.candles.length).toBeGreaterThanOrEqual(1);
+    expect(agg7d.high).toBeLessThan(0.25);
+
     const aggAll = await fetchTokenPriceHistoryAgainstXlm({
       horizonUrls: ["https://horizon-test.example"],
       assetCode: "USDC",
@@ -470,10 +523,7 @@ name = "Euro Coin"
       nowMs: 1_760_000_000_000,
       fetchFn: async (input) => {
         const url = String(input);
-        if (url.includes("resolution=604800000")) {
-          // Sparse weekly response (< 2 candles) -> should step down to daily 86400000
-          return new Response(JSON.stringify({ _embedded: { records: [] } }), { status: 200 });
-        }
+        expect(url).toContain("resolution=86400000");
         return new Response(
           JSON.stringify({
             _embedded: {

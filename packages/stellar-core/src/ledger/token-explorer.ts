@@ -76,7 +76,7 @@ export interface TokenPriceHistoryResult {
   high: number | null;
   low: number | null;
   volumeBase: number;
-  source: "trade_aggregations" | "order_book" | "trades" | "parity";
+  source: "trade_aggregations" | "kraken_ohlc" | "order_book" | "trades" | "parity";
 }
 
 export interface TokenOrderbookLevel {
@@ -144,6 +144,7 @@ interface HorizonTradeAggRecord {
   high?: string;
   low?: string;
   close?: string;
+  avg?: string;
   base_volume?: string;
 }
 
@@ -929,6 +930,132 @@ export async function fetchTokenOnChainDetails(input: {
  * Fetches historical OHLC candles from Horizon `/trade_aggregations` with graceful fallback
  * to `/order_book` mid-price or `/trades` when a pair has sparse aggregation candles.
  */
+interface RawTokenCandle extends TokenPriceCandle {
+  avg?: number | undefined;
+}
+
+function medianNumber(nums: readonly number[]): number {
+  if (nums.length === 0) return 0;
+  const sorted = [...nums].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+function rollupTokenCandles(candles: readonly RawTokenCandle[], bucketMs: number): RawTokenCandle[] {
+  if (candles.length === 0) return [];
+  const sorted = [...candles].sort((a, b) => a.timestamp - b.timestamp);
+  const buckets = new Map<number, RawTokenCandle & { weightedSum: number; weightVol: number }>();
+
+  for (const c of sorted) {
+    const bucketTs = Math.floor(c.timestamp / bucketMs) * bucketMs;
+    const prev = buckets.get(bucketTs);
+    const weight = c.baseVolume > 0 ? c.baseVolume : 0;
+    const avgPrice = c.avg && c.avg > 0 ? c.avg : c.close;
+    if (!prev) {
+      buckets.set(bucketTs, {
+        timestamp: bucketTs,
+        open: c.open,
+        high: c.high,
+        low: c.low,
+        close: c.close,
+        baseVolume: c.baseVolume,
+        avg: avgPrice,
+        weightedSum: avgPrice * weight,
+        weightVol: weight,
+      });
+    } else {
+      prev.high = Math.max(prev.high, c.high);
+      prev.low = Math.min(prev.low, c.low);
+      prev.close = c.close;
+      prev.baseVolume += c.baseVolume;
+      prev.weightedSum += avgPrice * weight;
+      prev.weightVol += weight;
+      prev.avg = prev.weightVol > 0 ? prev.weightedSum / prev.weightVol : prev.close;
+    }
+  }
+
+  return Array.from(buckets.values())
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map(({ timestamp, open, high, low, close, baseVolume, avg }) => ({
+      timestamp,
+      open,
+      high,
+      low,
+      close,
+      baseVolume,
+      ...(avg !== undefined ? { avg } : {}),
+    }));
+}
+
+export function sanitizeOhlcvCandles(
+  candles: readonly RawTokenCandle[],
+  opts?: { maxWickFloorPct?: number },
+): TokenPriceCandle[] {
+  if (candles.length === 0) return [];
+  const deduped = new Map<number, RawTokenCandle>();
+  for (const c of candles) {
+    if (Number.isFinite(c.timestamp) && c.open > 0 && c.high > 0 && c.low > 0 && c.close > 0) {
+      deduped.set(c.timestamp, c);
+    }
+  }
+  const sorted = Array.from(deduped.values()).sort((a, b) => a.timestamp - b.timestamp);
+  if (sorted.length === 0) return [];
+
+  const allAnchors = sorted.map((c) => (c.avg && c.avg > 0 ? c.avg : c.close));
+  const seriesMedian = medianNumber(allAnchors);
+  const medianVol = medianNumber(sorted.map((c) => c.baseVolume).filter((v) => v > 0));
+  const bodyChanges = sorted
+    .map((c) => (c.close > 0 ? Math.abs(c.close - c.open) / c.close : 0))
+    .filter((v) => Number.isFinite(v) && v >= 0);
+  const robustVol = medianNumber(bodyChanges) * 4;
+  const maxWickPct = Math.max(opts?.maxWickFloorPct ?? 0.12, Math.min(0.35, robustVol));
+
+  return sorted.map((c, idx) => {
+    const start = Math.max(0, idx - 3);
+    const end = Math.min(sorted.length, idx + 4);
+    const windowAnchors = allAnchors.slice(start, end);
+    const localMed = windowAnchors.length >= 3 ? medianNumber(windowAnchors) : seriesMedian;
+
+    let open = c.open;
+    let close = c.close;
+    let high = c.high;
+    let low = c.low;
+
+    const avgValid =
+      c.avg !== undefined && c.avg > 0 && localMed > 0 && c.avg >= 0.4 * localMed && c.avg <= 2.5 * localMed;
+    if (avgValid && c.avg !== undefined) {
+      if (open > c.avg * 2.0 || open < c.avg * 0.5) open = c.avg;
+      if (close > c.avg * 2.0 || close < c.avg * 0.5) close = c.avg;
+    }
+
+    if (
+      localMed > 0 &&
+      medianVol > 0 &&
+      c.baseVolume < 0.05 * medianVol &&
+      (close > 3.5 * localMed || close < localMed / 3.5)
+    ) {
+      open = localMed;
+      close = localMed;
+      high = localMed;
+      low = localMed;
+    }
+
+    const bodyMax = Math.max(open, close, avgValid && c.avg ? c.avg : close);
+    const bodyMin = Math.min(open, close, avgValid && c.avg ? c.avg : close);
+    high = Math.max(Math.max(open, close), Math.min(high, bodyMax * (1 + maxWickPct)));
+    low = Math.min(Math.min(open, close), Math.max(low, bodyMin / (1 + maxWickPct)));
+
+    return {
+      timestamp: c.timestamp,
+      open,
+      high,
+      low,
+      close,
+      baseVolume: c.baseVolume,
+    };
+  });
+}
+
 export async function fetchTokenPriceHistoryAgainstXlm(input: {
   horizonUrls: readonly string[];
   assetCode: string;
@@ -959,27 +1086,21 @@ export async function fetchTokenPriceHistoryAgainstXlm(input: {
   }
 
   const nowMs = input.nowMs ?? Date.now();
-  const timeframeConfig: Record<
-    TokenPriceTimeframe,
-    { lookbackMs: number; resolutionMs: number; limit: number }
-  > = {
-    "24h": { lookbackMs: 24 * 60 * 60 * 1000, resolutionMs: 3_600_000, limit: 24 },
-    "7d": { lookbackMs: 7 * 24 * 60 * 60 * 1000, resolutionMs: 14_400_000, limit: 42 },
-    "30d": { lookbackMs: 30 * 24 * 60 * 60 * 1000, resolutionMs: 86_400_000, limit: 30 },
-    "1y": { lookbackMs: 365 * 24 * 60 * 60 * 1000, resolutionMs: 86_400_000, limit: 200 },
-    "all": { lookbackMs: 10 * 365 * 24 * 60 * 60 * 1000, resolutionMs: 604_800_000, limit: 200 },
-  };
-  const cfg = timeframeConfig[input.timeframe];
-
   const baseParams = resolveAssetQueryParams("base", input.assetCode, input.assetIssuer);
   const counterParams = resolveAssetQueryParams("counter", quoteCode, quoteIssuer);
+  const wickFloor = input.timeframe === "24h" || input.timeframe === "7d" ? 0.08 : 0.15;
 
-  async function queryAggCandles(lookbackMs: number, resolutionMs: number, limit: number) {
+  async function queryAggRange(
+    startMs: number,
+    endMs: number,
+    resolutionMs: number,
+    limit: number,
+  ): Promise<RawTokenCandle[]> {
     const aggParams = new URLSearchParams({
       ...baseParams,
       ...counterParams,
-      start_time: String(Math.max(0, nowMs - lookbackMs)),
-      end_time: String(nowMs),
+      start_time: String(Math.max(0, startMs)),
+      end_time: String(endMs),
       resolution: String(resolutionMs),
       limit: String(limit),
       order: "desc",
@@ -989,12 +1110,13 @@ export async function fetchTokenPriceHistoryAgainstXlm(input: {
     }>(input.horizonUrls, `/trade_aggregations?${aggParams.toString()}`, fetchFn);
 
     return (aggBody?._embedded?.records ?? [])
-      .map((rec): TokenPriceCandle | null => {
+      .map((rec): RawTokenCandle | null => {
         const ts = parseFiniteNumber(rec.timestamp);
         const open = parseFiniteNumber(rec.open);
         const high = parseFiniteNumber(rec.high);
         const low = parseFiniteNumber(rec.low);
         const close = parseFiniteNumber(rec.close);
+        const avg = parseFiniteNumber(rec.avg);
         const baseVolume = parseFiniteNumber(rec.base_volume) ?? 0;
         if (
           ts === null ||
@@ -1006,23 +1128,54 @@ export async function fetchTokenPriceHistoryAgainstXlm(input: {
         ) {
           return null;
         }
-        return { timestamp: ts, open, high, low, close, baseVolume };
+        return {
+          timestamp: ts,
+          open,
+          high,
+          low,
+          close,
+          baseVolume,
+          ...(avg !== null && avg > 0 ? { avg } : {}),
+        };
       })
-      .filter((c): c is TokenPriceCandle => c !== null)
+      .filter((c): c is RawTokenCandle => c !== null)
       .reverse();
   }
 
   try {
-    let parsedCandles = await queryAggCandles(cfg.lookbackMs, cfg.resolutionMs, cfg.limit);
-    // For newer tokens on "all" where weekly candles are sparse (< 2), step down to daily candles.
-    if (input.timeframe === "all" && parsedCandles.length < 2) {
-      const dailyCandles = await queryAggCandles(365 * 24 * 60 * 60 * 1000, 86_400_000, 200);
-      if (dailyCandles.length > parsedCandles.length) {
-        parsedCandles = dailyCandles;
+    const DAY_MS = 86_400_000;
+    let rawCandles: RawTokenCandle[] = [];
+
+    if (input.timeframe === "24h") {
+      rawCandles = await queryAggRange(nowMs - DAY_MS, nowMs, 900_000, 96);
+      if (rawCandles.length < 2) {
+        const hourly = await queryAggRange(nowMs - DAY_MS, nowMs, 3_600_000, 24);
+        if (hourly.length > rawCandles.length) rawCandles = hourly;
       }
+    } else if (input.timeframe === "7d") {
+      const hourly = await queryAggRange(nowMs - 7 * DAY_MS, nowMs, 3_600_000, 168);
+      rawCandles = rollupTokenCandles(hourly, 14_400_000);
+    } else if (input.timeframe === "30d") {
+      rawCandles = await queryAggRange(nowMs - 30 * DAY_MS, nowMs, DAY_MS, 30);
+    } else if (input.timeframe === "1y") {
+      const splitMs = nowMs - 200 * DAY_MS;
+      const [recent, older] = await Promise.all([
+        queryAggRange(splitMs, nowMs, DAY_MS, 200),
+        queryAggRange(nowMs - 365 * DAY_MS, splitMs, DAY_MS, 170).catch(() => []),
+      ]);
+      rawCandles = [...older, ...recent];
+    } else {
+      const splitMs = nowMs - 200 * DAY_MS;
+      const [recent, older] = await Promise.all([
+        queryAggRange(splitMs, nowMs, DAY_MS, 200),
+        queryAggRange(nowMs - 400 * DAY_MS, splitMs, DAY_MS, 200).catch(() => []),
+      ]);
+      const combined = [...older, ...recent];
+      rawCandles = combined.length > 100 ? rollupTokenCandles(combined, 604_800_000) : combined;
     }
 
-    if (parsedCandles.length > 0) {
+    if (rawCandles.length > 0) {
+      const parsedCandles = sanitizeOhlcvCandles(rawCandles, { maxWickFloorPct: wickFloor });
       const first = parsedCandles[0]!;
       const last = parsedCandles[parsedCandles.length - 1]!;
       const high = Math.max(...parsedCandles.map((c) => c.high));
@@ -1059,18 +1212,19 @@ export async function fetchTokenPriceHistoryAgainstXlm(input: {
       _embedded?: { records?: HorizonTradeRecord[] };
     }>(input.horizonUrls, `/trades?${tradeParams.toString()}`, fetchFn);
 
-    const points = (tradesBody?._embedded?.records ?? [])
-      .map((t): TokenPriceCandle | null => {
+    const rawPoints = (tradesBody?._embedded?.records ?? [])
+      .map((t): RawTokenCandle | null => {
         const p = parseTradePrice(t.price);
         const ts = t.ledger_close_time ? Date.parse(t.ledger_close_time) : NaN;
         if (p === null || !Number.isFinite(ts)) return null;
         const vol = parseFiniteNumber(t.base_amount) ?? 0;
         return { timestamp: ts, open: p, high: p, low: p, close: p, baseVolume: vol };
       })
-      .filter((c): c is TokenPriceCandle => c !== null)
+      .filter((c): c is RawTokenCandle => c !== null)
       .reverse();
 
-    if (points.length > 0) {
+    if (rawPoints.length > 0) {
+      const points = sanitizeOhlcvCandles(rawPoints, { maxWickFloorPct: wickFloor });
       const first = points[0]!;
       const last = points[points.length - 1]!;
       const high = Math.max(...points.map((c) => c.high));

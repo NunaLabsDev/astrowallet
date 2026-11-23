@@ -100,6 +100,8 @@ export function ConnectRequestSheet({
   const [error, setError] = useState<string | null>(null);
   const [completedMsg, setCompletedMsg] = useState<string | null>(null);
   const [completedReturnUrl, setCompletedReturnUrl] = useState<string | null>(null);
+  const [completedTxHash, setCompletedTxHash] = useState<string | null>(null);
+  const [autoReturnCancelled, setAutoReturnCancelled] = useState(false);
   const [scanReport, setScanReport] = useState<ScanReport | null>(null);
   const [scanningXdr, setScanningXdr] = useState(false);
   const [warningAcknowledged, setWarningAcknowledged] = useState(false);
@@ -292,6 +294,7 @@ export function ConnectRequestSheet({
             signedXdr: res.signedXdr,
           });
           triggerTelegramHaptic("success");
+          setCompletedTxHash(res.hash);
           setCompletedMsg(
             `Transaction confirmed on Stellar (${res.hash.slice(0, 8)}…${res.hash.slice(-8)}).`,
           );
@@ -333,6 +336,36 @@ export function ConnectRequestSheet({
       setBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (!completedMsg || autoReturnCancelled) return undefined;
+    if (typeof window !== "undefined" && window.opener && !window.opener.closed) {
+      try {
+        window.opener.postMessage(
+          {
+            type: "ASTRO_SIGN_COMPLETE",
+            status: "approved",
+            requestId: route.requestId,
+            txHash: completedTxHash,
+          },
+          "*",
+        );
+      } catch {
+        // Ignore postMessage error
+      }
+      const timer = window.setTimeout(() => {
+        window.close();
+      }, 900);
+      return () => window.clearTimeout(timer);
+    }
+    if (completedReturnUrl) {
+      const timer = window.setTimeout(() => {
+        openBoomerang(completedReturnUrl);
+      }, 900);
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [completedMsg, autoReturnCancelled, route.requestId, completedTxHash, completedReturnUrl]);
 
   const openBoomerang = (url: string) => {
     const wa = getTelegramWebApp();
@@ -395,6 +428,18 @@ export function ConnectRequestSheet({
       {completedMsg && (
         <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 12 }}>
           <div className="aw-banner">{completedMsg}</div>
+          {!autoReturnCancelled && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+              <span>Returning automatically…</span>
+              <button
+                type="button"
+                className="aw-chip-btn"
+                onClick={() => setAutoReturnCancelled(true)}
+              >
+                Stay Here
+              </button>
+            </div>
+          )}
           {completedReturnUrl && (
             <button
               type="button"

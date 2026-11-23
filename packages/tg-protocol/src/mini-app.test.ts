@@ -130,7 +130,7 @@ describe("Telegram Mini App initData, sessions, and startapp routing", () => {
 
     expect(
       buildMiniAppWebAppUrl("https://app.example.org", { intentId: "it_1", sig }),
-    ).toBe(`https://app.example.org/intent/it_1?sig=${sig}`);
+    ).toBe(`https://app.example.org/intent/it_1?sig=${sig}&express=1`);
 
     expect(
       buildTelegramMiniAppLink({

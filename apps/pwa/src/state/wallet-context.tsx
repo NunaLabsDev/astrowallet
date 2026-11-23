@@ -98,8 +98,21 @@ import {
 } from "./ton-connect-store.js";
 import { readCachedEntry, writeCachedEntry } from "./market-cache.js";
 
-const SESSION_LEASE_TTL_MS = 4 * 60 * 60 * 1000;
+const EXPRESS_SESSION_TTL_KEY = "aw_express_session_ttl_min";
+const DEFAULT_EXPRESS_SESSION_MINUTES = 15;
 const TG_SESSION_LEASE_KEY = "aw_session_lease_v1";
+
+function readExpressSessionMinutes(): number {
+  if (typeof window === "undefined") return DEFAULT_EXPRESS_SESSION_MINUTES;
+  try {
+    const raw = window.localStorage.getItem(EXPRESS_SESSION_TTL_KEY);
+    if (raw === null) return DEFAULT_EXPRESS_SESSION_MINUTES;
+    const n = Number(raw);
+    return n === 0 || n === 15 || n === 30 || n === 60 ? n : DEFAULT_EXPRESS_SESSION_MINUTES;
+  } catch {
+    return DEFAULT_EXPRESS_SESSION_MINUTES;
+  }
+}
 
 export type VaultStatus = "loading" | "uninitialized" | "locked" | "unlocked";
 
@@ -233,6 +246,8 @@ export interface WalletContextValue {
   verifyBiometricReauth(reason?: string): Promise<void>;
   unlockWithPin(pinOrPassphrase: string): Promise<void>;
   unlockWithBiometric(): Promise<void>;
+  expressSessionMinutes: number;
+  setExpressSessionMinutes(minutes: 0 | 15 | 30 | 60): void;
   enableFingerprint(pinOrPassphrase: string): Promise<{ enrolled: boolean; message: string }>;
   disableFingerprint(): Promise<void>;
   addDerivedAccount(label: string, pinOrPassphrase: string): Promise<LinkedAccount>;
@@ -390,11 +405,47 @@ export function WalletProvider({
     ? `${TG_SESSION_LEASE_KEY}:${cleanScopeId}`
     : TG_SESSION_LEASE_KEY;
 
+  const [expressSessionMinutes, setExpressSessionMinutesState] = useState<number>(
+    readExpressSessionMinutes,
+  );
+
+  const setExpressSessionMinutes = useCallback((minutes: 0 | 15 | 30 | 60) => {
+    setExpressSessionMinutesState(minutes);
+    try {
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(EXPRESS_SESSION_TTL_KEY, String(minutes));
+      }
+    } catch {
+      // Ignore storage errors
+    }
+    if (minutes === 0) {
+      try {
+        if (typeof window !== "undefined") {
+          window.sessionStorage.removeItem(sessionLeaseKey);
+        }
+      } catch {
+        // Ignore
+      }
+      void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
+    }
+  }, [sessionLeaseKey]);
+
   const saveSessionLease = useCallback(
     async (pinOrPassphrase: string) => {
+      if (expressSessionMinutes <= 0) {
+        try {
+          if (typeof window !== "undefined") {
+            window.sessionStorage.removeItem(sessionLeaseKey);
+          }
+        } catch {
+          // Ignore
+        }
+        await tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
+        return;
+      }
       const payload = JSON.stringify({
         pin: pinOrPassphrase,
-        expiresAt: Date.now() + SESSION_LEASE_TTL_MS,
+        expiresAt: Date.now() + expressSessionMinutes * 60 * 1000,
       });
       try {
         if (typeof window !== "undefined") {
@@ -405,7 +456,7 @@ export function WalletProvider({
       }
       await tgSecureStorageSet(sessionLeaseKey, payload).catch(() => false);
     },
-    [sessionLeaseKey],
+    [sessionLeaseKey, expressSessionMinutes],
   );
 
   const loadValidSessionLease = useCallback(async (): Promise<{
@@ -2654,6 +2705,8 @@ export function WalletProvider({
     verifyBiometricReauth,
     unlockWithPin,
     unlockWithBiometric,
+    expressSessionMinutes,
+    setExpressSessionMinutes,
     enableFingerprint,
     disableFingerprint,
     addDerivedAccount,

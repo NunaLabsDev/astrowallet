@@ -496,6 +496,10 @@ function WalletShell({
     signConnectChallenge,
     enableFingerprint,
     disableFingerprint,
+    unlockWithPin,
+    unlockWithBiometric,
+    expressSessionMinutes,
+    setExpressSessionMinutes,
     reEncryptLocalVault,
     restoreAgVaultJson,
     syncFromNewerCloudBackup,
@@ -518,6 +522,10 @@ function WalletShell({
   const [activeDrawer, setActiveDrawer] = useState<ActiveDrawer>(initialDrawer ?? null);
   const [sendPrefill, setSendPrefill] = useState<SendPrefill>({});
   const [swapFromPrefill, setSwapFromPrefill] = useState<string | undefined>(undefined);
+  const [forceFullWalletView, setForceFullWalletView] = useState(false);
+  const [expressPin, setExpressPin] = useState("");
+  const [expressUnlockBusy, setExpressUnlockBusy] = useState(false);
+  const [expressUnlockError, setExpressUnlockError] = useState<string | null>(null);
   const [swapToPrefill, setSwapToPrefill] = useState<string | undefined>(undefined);
   const [selectedTokenTarget, setSelectedTokenTarget] = useState<SelectedTokenTarget | null>(null);
   const [inspectTarget, setInspectTarget] = useState<ChainInspectTarget | null>(null);
@@ -561,6 +569,8 @@ function WalletShell({
   }, []);
 
   const isWalletUnlocked = vaultStatus === "unlocked" && activeAccount !== null;
+  const isExpressSignView = Boolean(intentRoute || connectRoute);
+  const isExpressModeActive = isExpressSignView && !forceFullWalletView;
 
   useEffect(() => {
     if (vaultStatus !== "unlocked") {
@@ -1287,23 +1297,40 @@ function WalletShell({
                 type="button"
                 className="aw-sidebar-brand"
                 onClick={() => {
+                  if (isExpressModeActive) {
+                    setForceFullWalletView(true);
+                    return;
+                  }
                   if (isWalletUnlocked) selectTab("wallet");
                 }}
-                title="AstroWallet Home"
+                title={isExpressModeActive ? "Switch to Full Wallet" : "AstroWallet Home"}
               >
                 <AstroWalletLogo size={34} />
                 <div className="aw-brand-text">
                   <div style={{ fontSize: 16, fontWeight: 700, letterSpacing: "-0.02em" }}>
-                    AstroWallet
+                    {isExpressModeActive ? "AstroWallet · Express Sign" : "AstroWallet"}
                   </div>
                   <div className="aw-brand-subline">
-                    {tgUser?.username ? `@${tgUser.username} · Stellar & TON` : "Stellar & TON Mini App"}
+                    {isExpressModeActive
+                      ? "Minimalist Clear-Sign approval"
+                      : tgUser?.username
+                        ? `@${tgUser.username} · Stellar & TON`
+                        : "Stellar & TON Mini App"}
                   </div>
                 </div>
               </button>
 
               <div className="aw-header-actions">
-                {isWalletUnlocked && (
+                {isExpressModeActive && (
+                  <button
+                    type="button"
+                    className="aw-chip-btn"
+                    onClick={() => setForceFullWalletView(true)}
+                  >
+                    Full Wallet
+                  </button>
+                )}
+                {!isExpressModeActive && isWalletUnlocked && (
                   <button
                     type="button"
                     className="aw-chip-btn"
@@ -1355,6 +1382,77 @@ function WalletShell({
               </div>
             </header>
 
+            {isExpressModeActive && vaultStatus === "locked" && (
+              <form
+                className="glass-card glass-card--vault"
+                style={{ display: "grid", gap: 8, padding: 14 }}
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (expressUnlockBusy || expressPin.length < 4) return;
+                  setExpressUnlockBusy(true);
+                  setExpressUnlockError(null);
+                  void unlockWithPin(expressPin)
+                    .then(() => {
+                      setExpressPin("");
+                      triggerTelegramHaptic("success");
+                    })
+                    .catch((err) => {
+                      setExpressUnlockError(err instanceof Error ? err.message : "Invalid PIN");
+                    })
+                    .finally(() => setExpressUnlockBusy(false));
+                }}
+              >
+                <div style={{ fontSize: 13, fontWeight: 700 }}>
+                  ⚡ Quick Unlock to Approve
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  {fingerprintEnrolled && (
+                    <button
+                      type="button"
+                      className="aw-btn-gold"
+                      disabled={expressUnlockBusy}
+                      onClick={() => {
+                        setExpressUnlockBusy(true);
+                        setExpressUnlockError(null);
+                        void unlockWithBiometric()
+                          .then(() => triggerTelegramHaptic("success"))
+                          .catch((err) =>
+                            setExpressUnlockError(
+                              err instanceof Error ? err.message : "Biometric unlock failed",
+                            ),
+                          )
+                          .finally(() => setExpressUnlockBusy(false));
+                      }}
+                    >
+                      <IconFingerprint size={15} />
+                      <span>Biometric</span>
+                    </button>
+                  )}
+                  <input
+                    type="password"
+                    inputMode="numeric"
+                    className="aw-input"
+                    style={{ flex: "1 1 130px", minWidth: 0, fontSize: 16 }}
+                    placeholder="Vault PIN"
+                    value={expressPin}
+                    onChange={(e) => setExpressPin(e.target.value)}
+                  />
+                  <button
+                    type="submit"
+                    className="aw-btn-primary"
+                    disabled={expressUnlockBusy || expressPin.length < 4}
+                  >
+                    {expressUnlockBusy ? "…" : "Unlock"}
+                  </button>
+                </div>
+                {expressUnlockError && (
+                  <div className="aw-banner aw-banner--danger" style={{ fontSize: 12 }}>
+                    {expressUnlockError}
+                  </div>
+                )}
+              </form>
+            )}
+
             {intentRoute && (
               <IntentSheet route={intentRoute} onDismiss={onClearIntent} />
             )}
@@ -1363,7 +1461,7 @@ function WalletShell({
               <ConnectRequestSheet route={connectRoute} onDismiss={onClearConnect} />
             )}
 
-            {vaultStatus === "loading" && (
+            {vaultStatus === "loading" && !isExpressModeActive && (
               <section className="glass-card" style={{ textAlign: "center", padding: 32 }}>
                 Opening encrypted IndexedDB vault...
               </section>
@@ -1375,13 +1473,13 @@ function WalletShell({
               </div>
             )}
 
-            {vaultStatus === "locked" && (
+            {vaultStatus === "locked" && !isExpressModeActive && (
               <div className="aw-center-stage">
                 <UnlockSheet />
               </div>
             )}
 
-            {vaultStatus === "unlocked" && activeAccount && (
+            {vaultStatus === "unlocked" && activeAccount && !isExpressModeActive && (
               <>
                 {activeTab !== "accounts" && <AccountSwitcher />}
 
@@ -2856,6 +2954,32 @@ function WalletShell({
                         {fpStatusMsg && <div className="aw-banner">{fpStatusMsg}</div>}
                       </div>
 
+                      {/* Express Sign Session Lease */}
+                      <div className="aw-vault-divider" style={{ display: "grid", gap: 8 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13 }}>
+                          ⚡ Express Sign Session (Zero-Prompt Window)
+                        </div>
+                        <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                          Keep your encrypted session active for fast approvals across AstroDex &amp; Telegram. High-value transactions still enforce re-authentication.
+                        </div>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          {([0, 15, 30, 60] as const).map((mins) => (
+                            <button
+                              key={mins}
+                              type="button"
+                              className="aw-chip-btn"
+                              aria-pressed={expressSessionMinutes === mins}
+                              onClick={() => {
+                                triggerTelegramHaptic("selection");
+                                setExpressSessionMinutes(mins);
+                              }}
+                            >
+                              {mins === 0 ? "Always Ask" : `${mins} min`}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
                       {/* Reveal Recovery Seed & Export AGVAULT */}
                       <div className="aw-vault-divider">
                         <div style={{ fontWeight: 700, fontSize: 13 }}>
@@ -3337,7 +3461,7 @@ function WalletShell({
       </div>
 
       {/* Bottom Floating Apple Liquid Glass Dock (Unlocked Wallet Only) */}
-      {isWalletUnlocked && (
+      {isWalletUnlocked && !isExpressModeActive && (
         <nav className="glass-dock" aria-label="Primary Mini App navigation">
           {MOBILE_DOCK_ITEMS.map((item) => (
             <button

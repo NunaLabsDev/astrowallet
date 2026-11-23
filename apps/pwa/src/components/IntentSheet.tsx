@@ -146,6 +146,7 @@ export function IntentSheet({
   const [manualClaimSecret, setManualClaimSecret] = useState("");
   const [shareClaimUrl, setShareClaimUrl] = useState<string | null>(null);
   const [copiedClaimUrl, setCopiedClaimUrl] = useState(false);
+  const [autoReturnCancelled, setAutoReturnCancelled] = useState(false);
   const [destScanReport, setDestScanReport] = useState<ScanReport | null>(null);
   const [scanningIntent, setScanningIntent] = useState(false);
   const [reauthVerified, setReauthVerified] = useState(false);
@@ -764,21 +765,42 @@ export function IntentSheet({
         href: param ? `${base}?startapp=${encodeURIComponent(param)}` : base,
       };
     }
-    if (origin === "astrogate" && config.astrogateBotUsername) {
-      const base = `https://t.me/${config.astrogateBotUsername}`;
-      return {
-        label: "Return to AstroGate",
-        href: param ? `${base}?start=${encodeURIComponent(param)}` : base,
-      };
-    }
     return null;
   }, [
     intent?.payload.originApp,
     intent?.payload.returnStartAppParam,
     config.astrodexBotUsername,
     config.astrodexMiniAppShortName,
-    config.astrogateBotUsername,
   ]);
+
+  useEffect(() => {
+    if (!completedMsg || autoReturnCancelled || shareClaimUrl) return undefined;
+    if (typeof window !== "undefined" && window.opener && !window.opener.closed) {
+      try {
+        window.opener.postMessage(
+          {
+            type: "ASTRO_SIGN_COMPLETE",
+            status: "approved",
+            intentId: route.intentId,
+          },
+          "*",
+        );
+      } catch {
+        // Ignore postMessage error
+      }
+      const timer = window.setTimeout(() => {
+        window.close();
+      }, 900);
+      return () => window.clearTimeout(timer);
+    }
+    if (boomerangReturn) {
+      const timer = window.setTimeout(() => {
+        window.location.href = boomerangReturn.href;
+      }, 900);
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [completedMsg, autoReturnCancelled, shareClaimUrl, route.intentId, boomerangReturn]);
 
   const handleCopyClaimUrl = async () => {
     if (!shareClaimUrl) return;
@@ -873,19 +895,33 @@ export function IntentSheet({
             </div>
           )}
           {boomerangReturn && (
-            <a
-              href={boomerangReturn.href}
-              className="aw-btn-primary"
-              style={{
-                textAlign: "center",
-                textDecoration: "none",
-                display: "inline-flex",
-                alignItems: "center",
-                justifyContent: "center",
-              }}
-            >
-              {boomerangReturn.label}
-            </a>
+            <>
+              {!autoReturnCancelled && !shareClaimUrl && (
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                  <span>Returning automatically…</span>
+                  <button
+                    type="button"
+                    className="aw-chip-btn"
+                    onClick={() => setAutoReturnCancelled(true)}
+                  >
+                    Stay Here
+                  </button>
+                </div>
+              )}
+              <a
+                href={boomerangReturn.href}
+                className="aw-btn-primary"
+                style={{
+                  textAlign: "center",
+                  textDecoration: "none",
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
+              >
+                {boomerangReturn.label}
+              </a>
+            </>
           )}
           <a
             href={`https://t.me/${config.tgBotUsername}`}
@@ -1261,9 +1297,7 @@ export function IntentSheet({
                 <strong style={{ fontSize: 13 }}>
                   {intent.payload.originApp === "astrodex"
                     ? "AstroDex Terminal"
-                    : intent.payload.originApp === "astrogate"
-                      ? "AstroGate Launchpad"
-                      : "ASTRO Ecosystem"}
+                    : "ASTRO Ecosystem"}
                 </strong>
               </div>
               {intent.payload.subAction && (

@@ -323,6 +323,21 @@ export function createTelegramBot(
       return { ok: true, assetCode: "XLM" };
     }
 
+    if (config.network === "mainnet") {
+      const CANONICAL_MAINNET_ASSETS: Record<string, string> = {
+        USDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+        SUSDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+        USDT0: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q",
+        USDC: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        AQUA: "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA",
+        EURC: "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2",
+      };
+      const canonicalIssuer = CANONICAL_MAINNET_ASSETS[assetCode];
+      if (canonicalIssuer) {
+        return { ok: true, assetCode, assetIssuer: canonicalIssuer };
+      }
+    }
+
     if (lookupAddress?.startsWith("G")) {
       try {
         const live = await fetchLiveAccountBalances(config, lookupAddress, fetchFn);
@@ -367,12 +382,17 @@ export function createTelegramBot(
       },
     )
       .row()
-      .url("⚡ AstroDex", "https://t.me/AstroDexBot/dex")
-      .url("🚀 AstroGate", "https://t.me/AstroGateSorobanBot/app");
+      .url("⚡ Trade on AstroDex", "https://t.me/AstroDexBot/dex");
 
     const caption = [
       `<b>AstroWallet</b> · <code>${networkBadge}</code>`,
       "Non-custodial Stellar &amp; TON wallet inside Telegram.",
+      "",
+      "• <b>Ethena USDe / sUSDe</b> &amp; <b>LayerZero USDT0</b> ready",
+      "• <b>Buy, Sell &amp; Send</b> tokens or <b>Classic NFTs</b> right in chat",
+      "• <b>Zero-op_no_trust Auto-Escrow</b> when recipients lack a trustline",
+      "• <b>Clear-Sign 2.0 + Express Sign</b> — minimal one-tap approvals",
+      "",
       "Tap below to open your wallet, or run /help for quick commands.",
     ].join("\n");
 
@@ -394,11 +414,13 @@ export function createTelegramBot(
     await ctx.reply(
       [
         `<b>AstroWallet</b> · <code>${networkBadge}</code>`,
-        "Keys stay on your device — sign every transaction with PIN or biometrics.",
+        "Keys stay on your device — approve with Clear-Sign 2.0 &amp; Express Sign.",
         "",
-        "<b>Wallet:</b> /balance · /accounts · /connect · /unlink",
-        "<b>Pay &amp; Trade:</b> /pay · /request · /split · /swap",
-        "<b>Tools:</b> /scan · /reserve · /alerts · /stats",
+        "<b>Wallet &amp; NFTs:</b> /balance · /nft · /accounts · /connect · /unlink",
+        "<b>Buy, Sell &amp; Pay:</b> /buy · /sell · /swap · /pay · /request · /split",
+        "<b>Security &amp; Tools:</b> /scan · /reserve · /alerts · /stats",
+        "",
+        `<i>Examples:</i> <code>/buy 10 USDE</code> · <code>/sell 10 USDE</code> · <code>/nft send SQ0101 @friend</code>`,
         `<i>Inline:</i> <code>${botHandle} pay 10 XLM @friend</code>`,
       ].join("\n"),
       { parse_mode: "HTML" },
@@ -1107,26 +1129,25 @@ export function createTelegramBot(
     }
   });
 
-  bot.command("swap", async (ctx) => {
-    if (!isExplicitBotMentionInGroup(ctx)) return;
+  async function executeSwapQuoteCommand(
+    ctx: {
+      from?: { id: number } | undefined;
+      chat?: { id: number; type?: string } | undefined;
+      me?: { username?: string } | undefined;
+      reply: (
+        text: string,
+        other?: Parameters<typeof bot.api.sendMessage>[2],
+      ) => Promise<{ chat: { id: number }; message_id: number }>;
+    },
+    opts: {
+      amount: string;
+      rawFromAsset: string;
+      rawToAsset: string;
+      headline?: string;
+    },
+  ) {
     if (!ctx.from) return;
     const tgId = String(ctx.from.id);
-    const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
-    if (args.length < 3) {
-      await ctx.reply(
-        "Usage: <code>/swap &lt;amount&gt; &lt;fromAsset&gt; &lt;toAsset&gt;</code>",
-        { parse_mode: "HTML" },
-      );
-      return;
-    }
-
-    const amount = parsePositiveAmount(args[0] ?? "");
-    const rawFromAsset = (args[1] ?? "").trim();
-    const rawToAsset = (args[2] ?? "").trim();
-    if (!amount || !rawFromAsset || !rawToAsset) {
-      await ctx.reply("Invalid swap parameters.", { parse_mode: "HTML" });
-      return;
-    }
 
     try {
       const linked = await repo.listLinkedAddresses(tgId);
@@ -1135,8 +1156,8 @@ export function createTelegramBot(
         linked.find((a) => a.kind === "classic" && a.address.startsWith("G"));
 
       const [fromResolved, toResolved] = await Promise.all([
-        resolveCommandAsset(rawFromAsset, defaultClassic?.address),
-        resolveCommandAsset(rawToAsset, defaultClassic?.address),
+        resolveCommandAsset(opts.rawFromAsset, defaultClassic?.address),
+        resolveCommandAsset(opts.rawToAsset, defaultClassic?.address),
       ]);
       if (!fromResolved.ok) {
         await ctx.reply(fromResolved.message, { parse_mode: "HTML" });
@@ -1163,11 +1184,57 @@ export function createTelegramBot(
           }
         | undefined;
 
-      if (config.soroswapApiBase && config.soroswapApiKey) {
+      // 1. Primary: AstroDex 5-Way Aggregator (XOXNO + Aquarius + Soroswap + SDEX + Path)
+      const dexBase = (config.astrodexApiBaseUrl ?? "https://astrodex-testnet.pages.dev").replace(
+        /\/+$/,
+        "",
+      );
+      try {
+        const dexRes = await fetchFn(`${dexBase}/v1/quote?net=${config.network}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            fromAsset,
+            toAsset,
+            amount: opts.amount,
+            mode: "exact_in",
+            slippageBps: 100,
+          }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (dexRes.ok) {
+          const dexJson = (await dexRes.json()) as {
+            quote?: {
+              bestRoute?: {
+                venue?: string;
+                inputAmount?: string;
+                expectedOutputAmount?: string;
+                priceImpactPct?: string;
+                unsignedXdr?: string;
+              };
+            };
+          };
+          const best = dexJson.quote?.bestRoute;
+          if (best?.expectedOutputAmount) {
+            quote = {
+              inputAmount: best.inputAmount ?? opts.amount,
+              expectedOutputAmount: best.expectedOutputAmount,
+              provider: best.venue ?? "astrodex",
+              priceImpactPct: best.priceImpactPct ?? "0.00",
+              unsignedXdr: best.unsignedXdr,
+            };
+          }
+        }
+      } catch {
+        // Fall through to Soroswap / Horizon Path
+      }
+
+      // 2. Fallback: Soroswap API
+      if (!quote && config.soroswapApiBase && config.soroswapApiKey) {
         try {
           const cleanBase = config.soroswapApiBase.replace(/\/+$/, "");
           const quoteBody = buildSoroswapQuoteBody(
-            { fromAsset, toAsset, amount, slippageBps: 50 },
+            { fromAsset, toAsset, amount: opts.amount, slippageBps: 50 },
             config.networkPassphrase,
           );
           const authHeaders = {
@@ -1205,7 +1272,7 @@ export function createTelegramBot(
                 }
               }
               quote = {
-                inputAmount: amount,
+                inputAmount: opts.amount,
                 expectedOutputAmount: out,
                 provider: "soroswap",
                 priceImpactPct: data.priceImpactPct ?? "N/A",
@@ -1218,6 +1285,7 @@ export function createTelegramBot(
         }
       }
 
+      // 3. Fallback: Horizon Classic Path Payments
       if (!quote) {
         const swapAdapter = createHorizonPathSwapAdapter({
           horizonUrls: config.horizonUrls,
@@ -1226,7 +1294,7 @@ export function createTelegramBot(
         quote = await swapAdapter.getQuote({
           fromAsset,
           toAsset,
-          amount,
+          amount: opts.amount,
           slippageBps: 50,
         });
       }
@@ -1234,7 +1302,7 @@ export function createTelegramBot(
       const { intent } = await createAndSignIntent(config, repo, {
         creatorTelegramUserId: tgId,
         actionType: "swap",
-        chatId: String(ctx.chat.id),
+        chatId: String(ctx.chat?.id ?? tgId),
         payload: {
           fromAsset,
           toAsset,
@@ -1248,7 +1316,7 @@ export function createTelegramBot(
 
       const keyboard = appendMiniAppButton(
         new InlineKeyboard(),
-        "Review & Sign Swap",
+        "⚡ Express Sign Swap",
         {
           isPrivateChat: ctx.chat?.type === "private",
           config,
@@ -1258,8 +1326,9 @@ export function createTelegramBot(
         },
       );
 
+      const headerPrefix = opts.headline ? `${opts.headline}\n` : "";
       const sent = await ctx.reply(
-        formatSwapQuoteCard({
+        `${headerPrefix}${formatSwapQuoteCard({
           fromAsset,
           toAsset,
           inputAmount: quote.inputAmount,
@@ -1267,7 +1336,7 @@ export function createTelegramBot(
           provider: quote.provider,
           priceImpactPct: quote.priceImpactPct,
           network: config.network,
-        }),
+        })}`,
         { parse_mode: "HTML", reply_markup: keyboard },
       );
 
@@ -1280,6 +1349,261 @@ export function createTelegramBot(
         `Swap quote unavailable: ${err instanceof Error ? err.message : "No route found"}`,
       );
     }
+  }
+
+  bot.command("swap", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
+    if (!ctx.from) return;
+    const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+    if (args.length < 3) {
+      await ctx.reply(
+        "Usage: <code>/swap &lt;amount&gt; &lt;fromAsset&gt; &lt;toAsset&gt;</code>\n<i>Example:</i> <code>/swap 10 XLM USDE</code>",
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+
+    const amount = parsePositiveAmount(args[0] ?? "");
+    const rawFromAsset = (args[1] ?? "").trim();
+    const rawToAsset = (args[2] ?? "").trim();
+    if (!amount || !rawFromAsset || !rawToAsset) {
+      await ctx.reply("Invalid swap parameters.", { parse_mode: "HTML" });
+      return;
+    }
+
+    await executeSwapQuoteCommand(ctx, { amount, rawFromAsset, rawToAsset });
+  });
+
+  bot.command("buy", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
+    if (!ctx.from) return;
+    const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+    if (args.length < 2) {
+      await ctx.reply(
+        "Usage: <code>/buy &lt;spendAmount&gt; &lt;assetToBuy&gt; [spendAsset=XLM]</code>\n<i>Examples:</i> <code>/buy 10 USDE</code> (spends 10 XLM) · <code>/buy 25 USDE USDC</code>",
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+    const amount = parsePositiveAmount(args[0] ?? "");
+    const targetAsset = (args[1] ?? "").trim();
+    const spendAsset = (args[2] ?? "XLM").trim();
+    if (!amount || !targetAsset || !spendAsset) {
+      await ctx.reply("Invalid /buy parameters.", { parse_mode: "HTML" });
+      return;
+    }
+    await executeSwapQuoteCommand(ctx, {
+      amount,
+      rawFromAsset: spendAsset,
+      rawToAsset: targetAsset,
+      headline: `🛒 <b>Buy ${targetAsset.toUpperCase()}</b> (spending ${amount} ${spendAsset.toUpperCase()})`,
+    });
+  });
+
+  bot.command("sell", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
+    if (!ctx.from) return;
+    const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+    if (args.length < 2) {
+      await ctx.reply(
+        "Usage: <code>/sell &lt;amount&gt; &lt;assetToSell&gt; [receiveAsset=XLM]</code>\n<i>Examples:</i> <code>/sell 10 USDE</code> · <code>/sell 10 USDE USDC</code>",
+        { parse_mode: "HTML" },
+      );
+      return;
+    }
+    const amount = parsePositiveAmount(args[0] ?? "");
+    const sellAsset = (args[1] ?? "").trim();
+    const receiveAsset = (args[2] ?? "XLM").trim();
+    if (!amount || !sellAsset || !receiveAsset) {
+      await ctx.reply("Invalid /sell parameters.", { parse_mode: "HTML" });
+      return;
+    }
+    await executeSwapQuoteCommand(ctx, {
+      amount,
+      rawFromAsset: sellAsset,
+      rawToAsset: receiveAsset,
+      headline: `💸 <b>Sell ${amount} ${sellAsset.toUpperCase()}</b> for ${receiveAsset.toUpperCase()}`,
+    });
+  });
+
+  bot.command("nft", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
+    if (!ctx.from) return;
+    const tgId = String(ctx.from.id);
+    const args = (ctx.match ?? "").trim().split(/\s+/).filter(Boolean);
+    const accounts = await repo.listLinkedAddresses(tgId);
+    const classicAccounts = accounts.filter((a) => a.kind === "classic" && a.address.startsWith("G"));
+    if (classicAccounts.length === 0) {
+      await ctx.reply("No Classic G... Stellar wallet linked yet. Run /connect first.");
+      return;
+    }
+
+    // /nft send <CODE[:ISSUER]> <@friend|G...>
+    if ((args[0] ?? "").toLowerCase() === "send") {
+      if (args.length < 3) {
+        await ctx.reply(
+          "Usage: <code>/nft send &lt;CODE[:ISSUER]&gt; &lt;@friend|G...&gt;</code>\n<i>Example:</i> <code>/nft send SQ0101 @friend</code>",
+          { parse_mode: "HTML" },
+        );
+        return;
+      }
+      const rawNft = (args[1] ?? "").trim();
+      const rawRecipient = (args[2] ?? "").trim();
+      const [rawCode = "", explicitIssuer] = rawNft.split(":");
+      const targetCode = rawCode.trim();
+
+      let nftIssuer = explicitIssuer?.trim();
+      let nftCode = targetCode;
+      if (!nftIssuer) {
+        const balancesByAcc = await Promise.all(
+          classicAccounts.map((acc) => fetchLiveAccountBalances(config, acc.address, fetchFn).catch(() => null)),
+        );
+        for (const bal of balancesByAcc) {
+          const hit = bal?.balances.find(
+            (b) =>
+              b.balance === "0.0000001" &&
+              b.assetIssuer &&
+              b.assetCode.toLowerCase() === targetCode.toLowerCase(),
+          );
+          if (hit?.assetIssuer) {
+            nftCode = hit.assetCode;
+            nftIssuer = hit.assetIssuer;
+            break;
+          }
+        }
+      }
+
+      if (!nftIssuer) {
+        await ctx.reply(
+          `Could not find Classic NFT <code>${targetCode}</code> (0.0000001) on your linked wallets. Pass <code>CODE:G...ISSUER</code> or run <code>/nft</code> to list yours.`,
+          { parse_mode: "HTML" },
+        );
+        return;
+      }
+
+      const recipient = await resolveRecipient(repo, rawRecipient);
+      if (!recipient.ok) {
+        await ctx.reply(recipient.message);
+        return;
+      }
+
+      let lacksTrustline = false;
+      if (recipient.address.startsWith("G")) {
+        try {
+          const recBalances = await fetchLiveAccountBalances(config, recipient.address, fetchFn);
+          lacksTrustline = !recBalances.balances.some(
+            (b) => b.assetCode.toUpperCase() === nftCode.toUpperCase() && b.assetIssuer === nftIssuer,
+          );
+        } catch {
+          lacksTrustline = true;
+        }
+      }
+
+      if (lacksTrustline) {
+        const { intent } = await createAndSignIntent(config, repo, {
+          creatorTelegramUserId: tgId,
+          actionType: "claim",
+          chatId: String(ctx.chat.id),
+          payload: {
+            amount: "0.0000001",
+            assetCode: nftCode,
+            assetIssuer: nftIssuer,
+            destination: recipient.address,
+            recipientLabel: recipient.label,
+            autoEscrowReason: `Recipient lacks a ${nftCode} NFT trustline — routed to Claim Escrow (zero op_no_trust).`,
+          },
+        });
+        const keyboard = appendMiniAppButton(
+          new InlineKeyboard(),
+          "⚡ Express Sign NFT Escrow",
+          {
+            isPrivateChat: ctx.chat?.type === "private",
+            config,
+            botUsername: ctx.me?.username,
+            intentId: intent.intentId,
+            sig: intent.hmacSig,
+          },
+        );
+        await ctx.reply(
+          [
+            `🖼️ <b>NFT Claim Escrow</b> · <code>${networkBadge}</code>`,
+            `Sending NFT <b>${nftCode}</b> (<code>0.0000001</code>) to <b>${recipient.label}</b>`,
+            `<i>Recipient lacks a trustline — routed via Zero-op_no_trust Escrow.</i>`,
+          ].join("\n"),
+          { parse_mode: "HTML", reply_markup: keyboard },
+        );
+        return;
+      }
+
+      const { intent } = await createAndSignIntent(config, repo, {
+        creatorTelegramUserId: tgId,
+        actionType: "pay",
+        chatId: String(ctx.chat.id),
+        payload: {
+          amount: "0.0000001",
+          assetCode: nftCode,
+          assetIssuer: nftIssuer,
+          destination: recipient.address,
+          recipientLabel: recipient.label,
+        },
+      });
+      const keyboard = appendMiniAppButton(
+        new InlineKeyboard(),
+        "⚡ Express Sign NFT Send",
+        {
+          isPrivateChat: ctx.chat?.type === "private",
+          config,
+          botUsername: ctx.me?.username,
+          intentId: intent.intentId,
+          sig: intent.hmacSig,
+        },
+      );
+      await ctx.reply(
+        [
+          `🖼️ <b>Send Classic NFT</b> · <code>${networkBadge}</code>`,
+          `NFT: <b>${nftCode}</b> (<code>${nftIssuer.slice(0, 6)}…${nftIssuer.slice(-4)}</code>)`,
+          `To: <b>${recipient.label}</b>`,
+        ].join("\n"),
+        { parse_mode: "HTML", reply_markup: keyboard },
+      );
+      return;
+    }
+
+    // /nft (list)
+    const results = await Promise.all(
+      classicAccounts.map(async (acc) => {
+        const live = await fetchLiveAccountBalances(config, acc.address, fetchFn).catch(() => null);
+        const nfts = (live?.balances ?? []).filter((b) => b.balance === "0.0000001" && b.assetIssuer);
+        return { acc, nfts };
+      }),
+    );
+    const allNfts = results.flatMap((r) => r.nfts.map((n) => ({ label: r.acc.label, ...n })));
+    const lines = allNfts.slice(0, 12).map(
+      (n, idx) =>
+        `${idx + 1}. <b>${n.assetCode}</b> · <code>${(n.assetIssuer ?? "").slice(0, 6)}…${(n.assetIssuer ?? "").slice(-4)}</code> (${n.label})`,
+    );
+    const keyboard = appendMiniAppButton(
+      new InlineKeyboard(),
+      "🖼️ Open NFT Gallery",
+      {
+        isPrivateChat: ctx.chat?.type === "private",
+        config,
+        botUsername: ctx.me?.username,
+        tab: "collectibles",
+      },
+    );
+    await ctx.reply(
+      [
+        `🖼️ <b>Classic Stellar NFTs</b> · <code>${networkBadge}</code>`,
+        `Total found across linked wallets: <b>${allNfts.length}</b>`,
+        "",
+        ...(lines.length > 0 ? lines : ["<i>No 0.0000001 Classic NFTs found on linked accounts.</i>"]),
+        ...(allNfts.length > 12 ? [`<i>…and ${allNfts.length - 12} more in gallery.</i>`] : []),
+        "",
+        "<i>Send any NFT in chat:</i> <code>/nft send CODE @friend</code>",
+      ].join("\n"),
+      { parse_mode: "HTML", reply_markup: keyboard },
+    );
   });
 
   bot.on("inline_query", async (ctx) => {

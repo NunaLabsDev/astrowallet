@@ -482,12 +482,6 @@ export function DevLabSheet() {
                   <code>{config.claimEscrowContractId}</code>
                 </div>
               )}
-              {config.sorobitsContractId && (
-                <div className="aw-seal-row">
-                  <span>Sorobits SEP-50 C...</span>
-                  <code>{config.sorobitsContractId}</code>
-                </div>
-              )}
             </div>
           </section>
 
@@ -528,47 +522,6 @@ export function DevLabSheet() {
           </div>
 
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-            {config.sorobitsContractId && (
-              <button
-                type="button"
-                className="aw-chip-btn"
-                onClick={() => {
-                  setContractId(config.sorobitsContractId ?? "");
-                  setFnName("total_supply");
-                  setArgsJson("[]");
-                }}
-              >
-                Preset: Sorobits total_supply()
-              </button>
-            )}
-            {config.sorobitsContractId && (
-              <button
-                type="button"
-                className="aw-chip-btn"
-                onClick={() => {
-                  setContractId(config.sorobitsContractId ?? "");
-                  setFnName("get_sorobit");
-                  setArgsJson('[{"type":"u32","value":0}]');
-                }}
-              >
-                Preset: get_sorobit(0)
-              </button>
-            )}
-            {config.sorobitsContractId && (
-              <button
-                type="button"
-                className="aw-chip-btn"
-                onClick={() => {
-                  setContractId(config.sorobitsContractId ?? "");
-                  setFnName("tokens_of");
-                  setArgsJson(
-                    JSON.stringify([{ type: "address", value: activeAccount.address }]),
-                  );
-                }}
-              >
-                Preset: tokens_of(My Account)
-              </button>
-            )}
             {config.claimEscrowContractId && (
               <button
                 type="button"

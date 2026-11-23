@@ -458,6 +458,7 @@ export function buildMiniAppWebAppUrl(
   if (opts?.intentId && opts?.sig) {
     base.pathname = `/intent/${encodeURIComponent(opts.intentId)}`;
     base.searchParams.set("sig", opts.sig);
+    base.searchParams.set("express", "1");
     return base.toString();
   }
   base.pathname = "/app";

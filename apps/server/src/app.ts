@@ -13,6 +13,7 @@ import { createDiscoveryRoutes } from "./routes/discovery.js";
 import { createIdentityRoutes } from "./routes/identity.js";
 import { createIndexerRoutes } from "./routes/indexer.js";
 import { createIntentRoutes, type IntentRoutesDeps } from "./routes/intents.js";
+import { createMetricsRoutes } from "./routes/metrics.js";
 import { createProxyRoutes } from "./routes/proxy.js";
 import { createRelayRoutes } from "./routes/relay.js";
 import { createTgAuthRoutes } from "./routes/tg-auth.js";
@@ -81,7 +82,9 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
       path === "/openapi.json" ||
       path === "/llms.txt" ||
       path.startsWith("/v1/identity/") ||
-      path.startsWith("/v1/connect/");
+      path.startsWith("/v1/connect/") ||
+      path === "/v1/metrics/public" ||
+      path === "/v1/metrics/badge.svg";
 
     if (origin) {
       if (isOpenStandardRoute) {
@@ -147,6 +150,7 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
   app.use("/v1/identity/*", attachRepo);
   app.use("/v1/connect/*", attachRepo);
   app.use("/v1/intents/*", attachRepo);
+  app.use("/v1/metrics/*", attachRepo);
   app.use("/v1/relay/*", attachOptionalRepo);
   app.use("/v1/proxy/*", attachOptionalRepo);
   app.use("/webhooks/indexer", attachRepo);
@@ -213,6 +217,7 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
     }),
   );
 
+  app.route("/v1/metrics", createMetricsRoutes());
   app.route("/v1/proxy", createProxyRoutes({ fetchFn: deps.fetchFn }));
   app.route("/v1/relay", createRelayRoutes({ fetchFn: deps.fetchFn }));
   app.route(

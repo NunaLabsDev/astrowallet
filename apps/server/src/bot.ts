@@ -398,10 +398,35 @@ export function createTelegramBot(
         "",
         "<b>Wallet:</b> /balance · /accounts · /connect · /unlink",
         "<b>Pay &amp; Trade:</b> /pay · /request · /split · /swap",
-        "<b>Tools:</b> /scan · /reserve · /alerts",
+        "<b>Tools:</b> /scan · /reserve · /alerts · /stats",
         `<i>Inline:</i> <code>${botHandle} pay 10 XLM @friend</code>`,
       ].join("\n"),
       { parse_mode: "HTML" },
+    );
+  });
+
+  bot.command("stats", async (ctx) => {
+    const snap = await repo.getPublicMetricsSnapshot(config.network);
+    const isPrivate = ctx.chat?.type === "private";
+    const statsUrl = `${config.pwaOrigin.replace(/\/+$/, "")}/stats`;
+    const kb = new InlineKeyboard();
+    if (isPrivate) {
+      kb.webApp("📊 Open Live SCF Stats", statsUrl);
+    } else {
+      kb.url("📊 Open Live SCF Stats", statsUrl);
+    }
+    await ctx.reply(
+      [
+        `📊 <b>ASTRO Ecosystem · Live Traction</b> · <code>${networkBadge}</code>`,
+        "",
+        `• <b>Verified Telegram Users:</b> <code>${snap.totalRegisteredUsers}</code>`,
+        `• <b>Active (DAU / WAU / MAU):</b> <code>${snap.dau} / ${snap.wau} / ${snap.mau}</code>`,
+        `• <b>Linked Stellar Wallets:</b> <code>${snap.totalLinkedWallets}</code> (${snap.classicWallets} G… · ${snap.smartWallets} C…)`,
+        `• <b>Verified On-Chain TXs:</b> <code>${snap.verifiedTxCount}</code> · <b>Connect Approvals:</b> <code>${snap.approvedConnectRequests}</code>`,
+        "",
+        "<i>Zero cookies · Monthly-salted SHA-256 privacy · SCF Auditable</i>",
+      ].join("\n"),
+      { parse_mode: "HTML", reply_markup: kb },
     );
   });
 

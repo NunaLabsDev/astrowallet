@@ -574,6 +574,11 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
     if (!updated) {
       return c.json({ error: "Connect request already completed" }, 409);
     }
+    await repo.incrementProductEvent({
+      dayUtc: new Date().toISOString().slice(0, 10),
+      network: config.network,
+      eventType: "astro_connect_approved",
+    });
 
     return c.json({
       ok: true,

@@ -152,6 +152,12 @@ function createMemoryRepo(): ServerRepository {
   const tgUpdates = new Set<number>();
   const encryptedBackups = new Map<string, StoredEncryptedVaultBackup>();
   const connectRequests = new Map<string, ConnectRequestRecord>();
+  const dauSet = new Map<string, { day: string; userHash: string; platform: string }>();
+  const eventCounts = new Map<string, { day: string; eventType: string; count: number }>();
+  const verifiedTxs = new Map<
+    string,
+    { txHash: string; actionType: string; assetCode?: string; amountEst?: string; createdAt: number }
+  >();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -433,6 +439,60 @@ function createMemoryRepo(): ServerRepository {
       };
       connectRequests.set(requestId, next);
       return next;
+    },
+    async recordDailyUserActivity(input) {
+      dauSet.set(`${input.dayUtc}:${input.userHash}:${input.network}`, {
+        day: input.dayUtc,
+        userHash: input.userHash,
+        platform: input.platform ?? "unknown",
+      });
+    },
+    async incrementProductEvent(input) {
+      const k = `${input.dayUtc}:${input.network}:${input.eventType}`;
+      const prev = eventCounts.get(k);
+      eventCounts.set(k, {
+        day: input.dayUtc,
+        eventType: input.eventType,
+        count: (prev?.count ?? 0) + (input.delta ?? 1),
+      });
+    },
+    async recordVerifiedTx(input) {
+      verifiedTxs.set(input.txHash.toLowerCase(), {
+        txHash: input.txHash.toLowerCase(),
+        actionType: input.actionType,
+        ...(input.assetCode ? { assetCode: input.assetCode } : {}),
+        ...(input.amountEst ? { amountEst: input.amountEst } : {}),
+        createdAt: input.nowSec ?? Math.floor(Date.now() / 1000),
+      });
+    },
+    async getPublicMetricsSnapshot(network) {
+      const uniqueUsers = new Set(Array.from(dauSet.values()).map((d) => d.userHash));
+      const eventBreakdown: Record<string, number> = {};
+      const platforms: Record<string, number> = {};
+      for (const d of dauSet.values()) {
+        platforms[d.platform] = (platforms[d.platform] ?? 0) + 1;
+      }
+      for (const ev of eventCounts.values()) {
+        eventBreakdown[ev.eventType] = (eventBreakdown[ev.eventType] ?? 0) + ev.count;
+      }
+      return {
+        totalRegisteredUsers: users.size,
+        totalLinkedWallets: linked.size,
+        classicWallets: Array.from(linked.values()).filter((a) => a.kind === "classic").length,
+        smartWallets: Array.from(linked.values()).filter((a) => a.kind === "smart").length,
+        encryptedVaultBackups: Array.from(encryptedBackups.values()).filter((b) => b.network === network).length,
+        confirmedIntents: Array.from(intents.values()).filter((i) => i.status === "confirmed").length,
+        approvedConnectRequests: Array.from(connectRequests.values()).filter((c) => c.status === "approved").length,
+        relayTxCount: 0,
+        verifiedTxCount: verifiedTxs.size,
+        dau: uniqueUsers.size,
+        wau: uniqueUsers.size,
+        mau: uniqueUsers.size,
+        dailySeries: [],
+        platforms,
+        eventBreakdown,
+        recentVerifiedTxs: Array.from(verifiedTxs.values()).slice(0, 15),
+      };
     },
   };
 }
@@ -3103,5 +3163,51 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(tokenRes.status).toBe(200);
     const tokenBody = (await tokenRes.json()) as { details?: { assetCode?: string } };
     expect(tokenBody.details?.assetCode).toBe("XLM");
+  });
+
+  it("records privacy-first telemetry events and serves open-CORS /v1/metrics/public and badge.svg", async () => {
+    const repo = createMemoryRepo();
+    const app = createApp({ createRepo: () => repo });
+
+    const evRes = await app.request(
+      "/v1/metrics/event",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          eventType: "tx_sent",
+          platform: "ios",
+          txHash: "a".repeat(64),
+          assetCode: "XLM",
+          amountEst: "5",
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(evRes.status).toBe(200);
+
+    const pubRes = await app.request(
+      "/v1/metrics/public",
+      { method: "GET", headers: { Origin: "https://scf.stellar.org" } },
+      TEST_ENV,
+    );
+    expect(pubRes.status).toBe(200);
+    expect(pubRes.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    const pubJson = (await pubRes.json()) as {
+      ok: boolean;
+      service: string;
+      privacy: { cookies: boolean; piiExposed: boolean };
+      metrics: { verifiedTxCount: number; eventBreakdown: Record<string, number> };
+    };
+    expect(pubJson.ok).toBe(true);
+    expect(pubJson.service).toBe("astrowallet");
+    expect(pubJson.privacy.cookies).toBe(false);
+    expect(pubJson.privacy.piiExposed).toBe(false);
+    expect(pubJson.metrics.verifiedTxCount).toBe(1);
+    expect(pubJson.metrics.eventBreakdown.tx_sent).toBe(1);
+
+    const badgeRes = await app.request("/v1/metrics/badge.svg", { method: "GET" }, TEST_ENV);
+    expect(badgeRes.status).toBe(200);
+    expect(badgeRes.headers.get("Content-Type")).toContain("image/svg+xml");
   });
 });

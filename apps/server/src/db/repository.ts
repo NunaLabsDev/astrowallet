@@ -45,6 +45,39 @@ export interface StoredEncryptedVaultBackup {
   updatedAt: number;
 }
 
+export interface VerifiedTxLogEntry {
+  txHash: string;
+  actionType: string;
+  assetCode?: string | undefined;
+  amountEst?: string | undefined;
+  createdAt: number;
+}
+
+export interface DailyMetricPoint {
+  day: string;
+  dau: number;
+  events: number;
+}
+
+export interface PublicMetricsSnapshot {
+  totalRegisteredUsers: number;
+  totalLinkedWallets: number;
+  classicWallets: number;
+  smartWallets: number;
+  encryptedVaultBackups: number;
+  confirmedIntents: number;
+  approvedConnectRequests: number;
+  relayTxCount: number;
+  verifiedTxCount: number;
+  dau: number;
+  wau: number;
+  mau: number;
+  dailySeries: DailyMetricPoint[];
+  platforms: Record<string, number>;
+  eventBreakdown: Record<string, number>;
+  recentVerifiedTxs: VerifiedTxLogEntry[];
+}
+
 export interface ServerRepository {
   upsertTelegramUser(input: {
     telegramUserId: string;
@@ -146,6 +179,34 @@ export interface ServerRepository {
     responderTelegramUserId?: string | undefined;
     updatedAt: number;
   }): Promise<ConnectRequestRecord | null>;
+
+  recordDailyUserActivity(input: {
+    dayUtc: string;
+    userHash: string;
+    network: StellarNetwork;
+    platform?: string | undefined;
+    lang?: string | undefined;
+    nowSec?: number | undefined;
+  }): Promise<void>;
+  incrementProductEvent(input: {
+    dayUtc: string;
+    network: StellarNetwork;
+    eventType: string;
+    delta?: number | undefined;
+    nowSec?: number | undefined;
+  }): Promise<void>;
+  recordVerifiedTx(input: {
+    txHash: string;
+    network: StellarNetwork;
+    actionType: string;
+    assetCode?: string | undefined;
+    amountEst?: string | undefined;
+    nowSec?: number | undefined;
+  }): Promise<void>;
+  getPublicMetricsSnapshot(
+    network: StellarNetwork,
+    nowSec?: number,
+  ): Promise<PublicMetricsSnapshot>;
 }
 
 interface RawUserRow {
@@ -972,6 +1033,249 @@ export function createD1Repository(db: D1Database): ServerRepository {
         return null;
       }
       return this.getConnectRequest(requestId);
+    },
+
+    async recordDailyUserActivity(input) {
+      const now = input.nowSec ?? Math.floor(Date.now() / 1000);
+      const platform = (input.platform ?? "unknown").slice(0, 32) || "unknown";
+      const lang = (input.lang ?? "en").slice(0, 16) || "en";
+      try {
+        await db
+          .prepare(
+            `INSERT INTO daily_user_activity (day_utc, user_hash, network, platform, lang, first_seen_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(day_utc, user_hash, network) DO UPDATE SET
+               platform = CASE WHEN excluded.platform != 'unknown' THEN excluded.platform ELSE daily_user_activity.platform END,
+               lang = excluded.lang,
+               last_seen_at = excluded.last_seen_at`,
+          )
+          .bind(input.dayUtc, input.userHash, input.network, platform, lang, now, now)
+          .run();
+      } catch {
+        // Ignore gracefully if migration 0006 is not yet applied
+      }
+    },
+
+    async incrementProductEvent(input) {
+      const now = input.nowSec ?? Math.floor(Date.now() / 1000);
+      const delta = Math.max(1, Math.floor(input.delta ?? 1));
+      try {
+        await db
+          .prepare(
+            `INSERT INTO product_events_daily (day_utc, network, event_type, count, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(day_utc, network, event_type) DO UPDATE SET
+               count = product_events_daily.count + excluded.count,
+               updated_at = excluded.updated_at`,
+          )
+          .bind(input.dayUtc, input.network, input.eventType, delta, now)
+          .run();
+      } catch {
+        // Ignore gracefully if migration 0006 is not yet applied
+      }
+    },
+
+    async recordVerifiedTx(input) {
+      const now = input.nowSec ?? Math.floor(Date.now() / 1000);
+      try {
+        await db
+          .prepare(
+            `INSERT OR IGNORE INTO verified_tx_log (tx_hash, network, action_type, asset_code, amount_est, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            input.txHash.toLowerCase(),
+            input.network,
+            input.actionType,
+            input.assetCode ?? null,
+            input.amountEst ?? null,
+            now,
+          )
+          .run();
+      } catch {
+        // Ignore gracefully if migration 0006 is not yet applied
+      }
+    },
+
+    async getPublicMetricsSnapshot(network, nowSec) {
+      const nowMs = (nowSec ?? Math.floor(Date.now() / 1000)) * 1000;
+      const dayUtc = new Date(nowMs).toISOString().slice(0, 10);
+      const day7Utc = new Date(nowMs - 6 * 86_400_000).toISOString().slice(0, 10);
+      const day30Utc = new Date(nowMs - 29 * 86_400_000).toISOString().slice(0, 10);
+
+      const safeFirst = async <T>(sql: string, ...binds: unknown[]): Promise<T | null> => {
+        try {
+          return await db.prepare(sql).bind(...binds).first<T>();
+        } catch {
+          return null;
+        }
+      };
+      const safeAll = async <T>(sql: string, ...binds: unknown[]): Promise<T[]> => {
+        try {
+          const res = await db.prepare(sql).bind(...binds).all<T>();
+          return res.results ?? [];
+        } catch {
+          return [];
+        }
+      };
+
+      const [
+        usersRow,
+        walletsRow,
+        backupsRow,
+        intentsRow,
+        connectRow,
+        relayRow,
+        dauRow,
+        wauRow,
+        mauRow,
+        dauSeriesRows,
+        eventSeriesRows,
+        platformRows,
+        eventBreakdownRows,
+        verifiedCountRow,
+        verifiedTxRows,
+        intentTxRows,
+      ] = await Promise.all([
+        safeFirst<{ cnt: number }>("SELECT COUNT(*) AS cnt FROM tg_users"),
+        safeFirst<{ total: number; classic: number; smart: number }>(
+          "SELECT COUNT(*) AS total, SUM(CASE WHEN kind = 'classic' THEN 1 ELSE 0 END) AS classic, SUM(CASE WHEN kind = 'smart' THEN 1 ELSE 0 END) AS smart FROM linked_addresses",
+        ),
+        safeFirst<{ cnt: number }>(
+          "SELECT COUNT(*) AS cnt FROM encrypted_vault_backups WHERE network = ?",
+          network,
+        ),
+        safeFirst<{ cnt: number }>(
+          "SELECT COUNT(*) AS cnt FROM signed_intents WHERE network = ? AND status = 'confirmed'",
+          network,
+        ),
+        safeFirst<{ cnt: number }>(
+          "SELECT COUNT(*) AS cnt FROM connect_requests WHERE network = ? AND status = 'approved'",
+          network,
+        ),
+        safeFirst<{ cnt: number }>("SELECT COALESCE(SUM(tx_count), 0) AS cnt FROM relay_daily_usage"),
+        safeFirst<{ cnt: number }>(
+          "SELECT COUNT(DISTINCT user_hash) AS cnt FROM daily_user_activity WHERE network = ? AND day_utc = ?",
+          network,
+          dayUtc,
+        ),
+        safeFirst<{ cnt: number }>(
+          "SELECT COUNT(DISTINCT user_hash) AS cnt FROM daily_user_activity WHERE network = ? AND day_utc >= ?",
+          network,
+          day7Utc,
+        ),
+        safeFirst<{ cnt: number }>(
+          "SELECT COUNT(DISTINCT user_hash) AS cnt FROM daily_user_activity WHERE network = ? AND day_utc >= ?",
+          network,
+          day30Utc,
+        ),
+        safeAll<{ day: string; dau: number }>(
+          "SELECT day_utc AS day, COUNT(DISTINCT user_hash) AS dau FROM daily_user_activity WHERE network = ? AND day_utc >= ? GROUP BY day_utc ORDER BY day_utc ASC",
+          network,
+          day30Utc,
+        ),
+        safeAll<{ day: string; events: number }>(
+          "SELECT day_utc AS day, SUM(count) AS events FROM product_events_daily WHERE network = ? AND day_utc >= ? GROUP BY day_utc ORDER BY day_utc ASC",
+          network,
+          day30Utc,
+        ),
+        safeAll<{ platform: string; cnt: number }>(
+          "SELECT platform, COUNT(DISTINCT user_hash) AS cnt FROM daily_user_activity WHERE network = ? AND day_utc >= ? GROUP BY platform",
+          network,
+          day30Utc,
+        ),
+        safeAll<{ event_type: string; cnt: number }>(
+          "SELECT event_type, SUM(count) AS cnt FROM product_events_daily WHERE network = ? AND day_utc >= ? GROUP BY event_type ORDER BY cnt DESC",
+          network,
+          day30Utc,
+        ),
+        safeFirst<{ cnt: number }>(
+          "SELECT COUNT(*) AS cnt FROM verified_tx_log WHERE network = ?",
+          network,
+        ),
+        safeAll<{
+          tx_hash: string;
+          action_type: string;
+          asset_code: string | null;
+          amount_est: string | null;
+          created_at: number;
+        }>(
+          "SELECT tx_hash, action_type, asset_code, amount_est, created_at FROM verified_tx_log WHERE network = ? ORDER BY created_at DESC LIMIT 15",
+          network,
+        ),
+        safeAll<{ tx_hash: string; action_type: string; created_at: number }>(
+          "SELECT tx_hash, action_type, created_at FROM signed_intents WHERE network = ? AND status = 'confirmed' AND tx_hash IS NOT NULL ORDER BY created_at DESC LIMIT 15",
+          network,
+        ),
+      ]);
+
+      const seriesMap = new Map<string, DailyMetricPoint>();
+      for (const r of dauSeriesRows) {
+        seriesMap.set(r.day, { day: r.day, dau: Number(r.dau) || 0, events: 0 });
+      }
+      for (const r of eventSeriesRows) {
+        const prev = seriesMap.get(r.day) ?? { day: r.day, dau: 0, events: 0 };
+        prev.events = Number(r.events) || 0;
+        seriesMap.set(r.day, prev);
+      }
+
+      const platforms: Record<string, number> = {};
+      for (const r of platformRows) {
+        platforms[r.platform || "unknown"] = Number(r.cnt) || 0;
+      }
+      const eventBreakdown: Record<string, number> = {};
+      for (const r of eventBreakdownRows) {
+        eventBreakdown[r.event_type] = Number(r.cnt) || 0;
+      }
+
+      const txMap = new Map<string, VerifiedTxLogEntry>();
+      for (const r of verifiedTxRows) {
+        txMap.set(r.tx_hash, {
+          txHash: r.tx_hash,
+          actionType: r.action_type,
+          ...(r.asset_code ? { assetCode: r.asset_code } : {}),
+          ...(r.amount_est ? { amountEst: r.amount_est } : {}),
+          createdAt: Number(r.created_at) || 0,
+        });
+      }
+      for (const r of intentTxRows) {
+        if (!txMap.has(r.tx_hash)) {
+          txMap.set(r.tx_hash, {
+            txHash: r.tx_hash,
+            actionType: r.action_type,
+            createdAt: Number(r.created_at) || 0,
+          });
+        }
+      }
+
+      const recentVerifiedTxs = Array.from(txMap.values())
+        .sort((a, b) => b.createdAt - a.createdAt)
+        .slice(0, 15);
+      const confirmedIntents = Number(intentsRow?.cnt ?? 0);
+      const verifiedTxCount = Math.max(
+        Number(verifiedCountRow?.cnt ?? 0),
+        confirmedIntents,
+        recentVerifiedTxs.length,
+      );
+
+      return {
+        totalRegisteredUsers: Number(usersRow?.cnt ?? 0),
+        totalLinkedWallets: Number(walletsRow?.total ?? 0),
+        classicWallets: Number(walletsRow?.classic ?? 0),
+        smartWallets: Number(walletsRow?.smart ?? 0),
+        encryptedVaultBackups: Number(backupsRow?.cnt ?? 0),
+        confirmedIntents,
+        approvedConnectRequests: Number(connectRow?.cnt ?? 0),
+        relayTxCount: Number(relayRow?.cnt ?? 0),
+        verifiedTxCount,
+        dau: Number(dauRow?.cnt ?? 0),
+        wau: Number(wauRow?.cnt ?? 0),
+        mau: Number(mauRow?.cnt ?? 0),
+        dailySeries: Array.from(seriesMap.values()).sort((a, b) => a.day.localeCompare(b.day)),
+        platforms,
+        eventBreakdown,
+        recentVerifiedTxs,
+      };
     },
   };
 }

@@ -24,6 +24,7 @@ import {
   type VerifiedAssetEntry,
 } from "@astrowallet/security-shield";
 import { formatSmartAccountLinkMessage } from "@astrowallet/tg-protocol";
+import { reportTelemetryEvent } from "./telemetry.js";
 import {
   clearPinLockoutState,
   createSorobanDevClient,
@@ -2151,11 +2152,19 @@ export function WalletProvider({
           typedMemo: params.typedMemo,
         });
         await refreshChainState();
+        reportTelemetryEvent({
+          apiBaseUrl: config.apiBaseUrl,
+          network: config.network,
+          eventType: "tx_sent",
+          txHash: result.hash,
+          assetCode: params.assetCode,
+          amountEst: params.amount,
+        });
         showToast(`Sent ${params.amount} ${params.assetCode} cleanly`);
         return result;
       });
     },
-    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+    [withActiveKeypair, stellarClient, refreshChainState, config.apiBaseUrl, config.network, showToast],
   );
 
   const executePathSwap = useCallback(
@@ -2216,13 +2225,20 @@ export function WalletProvider({
           limit,
         });
         await refreshChainState();
+        reportTelemetryEvent({
+          apiBaseUrl: config.apiBaseUrl,
+          network: config.network,
+          eventType: "trustline_added",
+          txHash: result.hash,
+          assetCode,
+        });
         showToast(
           limit === "0" ? `Removed ${assetCode} trustline` : `Activated ${assetCode} trustline`,
         );
         return result;
       });
     },
-    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+    [withActiveKeypair, stellarClient, refreshChainState, config.apiBaseUrl, config.network, showToast],
   );
 
   const reclaimZeroBalanceReserves = useCallback(async (): Promise<{

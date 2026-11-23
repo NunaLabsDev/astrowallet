@@ -20,9 +20,12 @@ import {
   ConnectAccountSubmissionSchema,
   verifyConnectAccountSubmissions,
 } from "./connect-verifier.js";
+import { computeMonthlyUserHash, utcDayString } from "./metrics.js";
 
 const TgAuthBodySchema = z.object({
   initData: z.string().trim().min(1).max(8192),
+  platform: z.string().trim().max(32).optional(),
+  lang: z.string().trim().max(16).optional(),
 });
 
 const LinkConfirmBodySchema = z.object({
@@ -128,6 +131,27 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
       telegramUserId: tgUser.id,
       usernameLower: tgUser.usernameLower,
     });
+
+    const dayUtc = utcDayString();
+    const userHash = await computeMonthlyUserHash(
+      tgUser.id,
+      config.intentHmacSecret,
+      dayUtc,
+    );
+    await Promise.all([
+      repo.recordDailyUserActivity({
+        dayUtc,
+        userHash,
+        network: config.network,
+        platform: body.platform,
+        lang: body.lang,
+      }),
+      repo.incrementProductEvent({
+        dayUtc,
+        network: config.network,
+        eventType: "app_open",
+      }),
+    ]);
 
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = now + MINI_APP_SESSION_TTL_SECONDS;
@@ -474,6 +498,11 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
       accounts: verification.verifiedInputs,
     });
     await repo.markIntentConfirmed(intent.intentId);
+    await repo.incrementProductEvent({
+      dayUtc: utcDayString(),
+      network: config.network,
+      eventType: "wallet_linked",
+    });
 
     return c.json({
       ok: true,

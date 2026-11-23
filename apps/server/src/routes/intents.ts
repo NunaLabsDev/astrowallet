@@ -735,6 +735,34 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
 
       await repo.markClaimLinkStatus(claimId, "claimed");
       const updated = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+    await Promise.all([
+      repo.recordVerifiedTx({
+        txHash: parsedBody.txHash.toLowerCase(),
+        network: config.network,
+        actionType: intent.actionType,
+        assetCode: payload.assetCode,
+        amountEst: payload.amount,
+      }),
+      repo.incrementProductEvent({
+        dayUtc: new Date().toISOString().slice(0, 10),
+        network: config.network,
+        eventType: "intent_confirmed",
+      }),
+    ]);
+      await Promise.all([
+        repo.recordVerifiedTx({
+          txHash: parsedBody.txHash.toLowerCase(),
+          network: config.network,
+          actionType: "claim_claimed",
+          assetCode: payload.assetCode,
+          amountEst: payload.amount,
+        }),
+        repo.incrementProductEvent({
+          dayUtc: new Date().toISOString().slice(0, 10),
+          network: config.network,
+          eventType: "intent_confirmed",
+        }),
+      ]);
       const cardUpdated = await maybeEditCard(
         formatClaimLinkCard({
           status: "claimed",
@@ -897,6 +925,20 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
     }
 
     const updated = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+    await Promise.all([
+      repo.recordVerifiedTx({
+        txHash: parsedBody.txHash.toLowerCase(),
+        network: config.network,
+        actionType: intent.actionType,
+        assetCode: payload.assetCode,
+        amountEst: payload.amount,
+      }),
+      repo.incrementProductEvent({
+        dayUtc: new Date().toISOString().slice(0, 10),
+        network: config.network,
+        eventType: "intent_confirmed",
+      }),
+    ]);
 
     if (payload.originApp === "astrodex") {
       const callbackBody = JSON.stringify({

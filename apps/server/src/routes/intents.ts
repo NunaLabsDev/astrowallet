@@ -953,6 +953,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         memo: payload.memo,
         network: config.network,
         txHash: parsedBody.txHash,
+        botUsername: config.tgBotUsername,
       });
     } else if (intent.actionType === "swap") {
       cardText = formatSwapQuoteCard({
@@ -965,6 +966,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         priceImpactPct: payload.priceImpactPct ?? "N/A",
         network: config.network,
         txHash: parsedBody.txHash,
+        botUsername: config.tgBotUsername,
       });
     } else {
       cardText = formatPaymentIntentCard({
@@ -976,6 +978,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         memo: payload.memo,
         network: config.network,
         txHash: parsedBody.txHash,
+        botUsername: config.tgBotUsername,
       });
     }
 

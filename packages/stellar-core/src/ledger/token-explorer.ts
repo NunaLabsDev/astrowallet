@@ -582,62 +582,79 @@ export async function fetchHeldAssetsTomlMetadata(input: {
   }
 
   const out: Record<string, HeldTokenTomlMetadata> = {};
-  await Promise.all(
-    Array.from(deduped.entries()).map(async ([key, asset]) => {
-      let homeDomain = asset.knownDomain;
-      if (!homeDomain) {
-        const now = Date.now();
-        const cached = useCache ? issuerHomeDomainCache.get(asset.assetIssuer) : undefined;
-        if (cached && cached.expiresAt > now) {
-          homeDomain = cached.domain ?? undefined;
-        } else {
-          try {
-            const acc = await fetchJsonWithHorizonFailover<{ home_domain?: string }>(
-              input.horizonUrls,
-              `/accounts/${encodeURIComponent(asset.assetIssuer)}`,
-              fetchFn,
-            );
-            homeDomain = acc?.home_domain?.trim() || undefined;
-            if (useCache) {
-              issuerHomeDomainCache.set(asset.assetIssuer, {
-                expiresAt: now + STELLAR_TOML_CACHE_TTL_MS,
-                domain: homeDomain ?? null,
-              });
-            }
-          } catch {
-            homeDomain = undefined;
-          }
+  const entries = Array.from(deduped.entries());
+  const homeDomainInflight = new Map<string, Promise<string | undefined>>();
+  const resolveHomeDomain = (issuer: ClassicAddress, known?: string): Promise<string | undefined> => {
+    if (known) return Promise.resolve(known);
+    const now = Date.now();
+    const cached = useCache ? issuerHomeDomainCache.get(issuer) : undefined;
+    if (cached && cached.expiresAt > now) {
+      return Promise.resolve(cached.domain ?? undefined);
+    }
+    const existing = homeDomainInflight.get(issuer);
+    if (existing) return existing;
+    const p = fetchJsonWithHorizonFailover<{ home_domain?: string }>(
+      input.horizonUrls,
+      `/accounts/${encodeURIComponent(issuer)}`,
+      fetchFn,
+    )
+      .then((acc) => {
+        const domain = acc?.home_domain?.trim() || undefined;
+        if (useCache) {
+          issuerHomeDomainCache.set(issuer, {
+            expiresAt: Date.now() + STELLAR_TOML_CACHE_TTL_MS,
+            domain: domain ?? null,
+          });
         }
-      }
+        return domain;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        homeDomainInflight.delete(issuer);
+      });
+    homeDomainInflight.set(issuer, p);
+    return p;
+  };
 
-      if (!homeDomain) {
+  const WORKER_COUNT = Math.min(4, Math.max(1, entries.length));
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: WORKER_COUNT }, async () => {
+      while (cursor < entries.length) {
+        const idx = cursor++;
+        const pair = entries[idx];
+        if (!pair) break;
+        const [key, asset] = pair;
+        const homeDomain = await resolveHomeDomain(asset.assetIssuer, asset.knownDomain);
+        if (!homeDomain) {
+          out[key] = {
+            assetCode: asset.assetCode,
+            assetIssuer: asset.assetIssuer,
+            tomlMatched: false,
+          };
+          continue;
+        }
+
+        const meta = await fetchAssetStellarTomlMeta({
+          domain: homeDomain,
+          assetCode: asset.assetCode,
+          assetIssuer: asset.assetIssuer,
+          apiBaseUrl: input.apiBaseUrl,
+          fetchFn,
+        }).catch(() => null);
+
         out[key] = {
           assetCode: asset.assetCode,
           assetIssuer: asset.assetIssuer,
-          tomlMatched: false,
+          homeDomain,
+          ...(meta?.name ? { name: meta.name } : {}),
+          ...(meta?.desc ? { desc: meta.desc } : {}),
+          ...(meta?.image ? { image: meta.image } : {}),
+          ...(meta?.orgName ? { orgName: meta.orgName } : {}),
+          ...(meta?.orgUrl ? { orgUrl: meta.orgUrl } : {}),
+          tomlMatched: Boolean(meta),
         };
-        return;
       }
-
-      const meta = await fetchAssetStellarTomlMeta({
-        domain: homeDomain,
-        assetCode: asset.assetCode,
-        assetIssuer: asset.assetIssuer,
-        apiBaseUrl: input.apiBaseUrl,
-        fetchFn,
-      }).catch(() => null);
-
-      out[key] = {
-        assetCode: asset.assetCode,
-        assetIssuer: asset.assetIssuer,
-        homeDomain,
-        ...(meta?.name ? { name: meta.name } : {}),
-        ...(meta?.desc ? { desc: meta.desc } : {}),
-        ...(meta?.image ? { image: meta.image } : {}),
-        ...(meta?.orgName ? { orgName: meta.orgName } : {}),
-        ...(meta?.orgUrl ? { orgUrl: meta.orgUrl } : {}),
-        tomlMatched: Boolean(meta),
-      };
     }),
   );
 

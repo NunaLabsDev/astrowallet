@@ -43,7 +43,9 @@ export type VerifySessionResult =
 export type ParsedStartAppParam =
   | { kind: "intent"; intentId: string; sig: string }
   | { kind: "connect"; requestId: string; sig: string }
-  | { kind: "tab"; tab: string };
+  | { kind: "tab"; tab: string }
+  | { kind: "inspect_account"; network: StellarNetwork; address: string }
+  | { kind: "inspect_tx"; network: StellarNetwork; txHash: string };
 
 interface MinimalTextEncoder {
   encode(input: string): Uint8Array;
@@ -366,6 +368,36 @@ export function encodeStartAppTabParam(tab: string): string {
   return `t-${tab.toLowerCase()}`;
 }
 
+export function encodeStartAppAccountParam(address: string, network: StellarNetwork): string {
+  const netCode = network === "mainnet" ? "m" : "t";
+  return `a-${netCode}-${address.trim()}`;
+}
+
+export function encodeStartAppTxParam(txHash: string, network: StellarNetwork): string {
+  const netCode = network === "mainnet" ? "m" : "t";
+  return `x-${netCode}-${txHash.trim().toLowerCase()}`;
+}
+
+export function buildTelegramInspectAccountLink(
+  botUsername: string,
+  address: string,
+  network: StellarNetwork,
+): string {
+  const cleanBot = botUsername.replace(/^@/, "").trim();
+  const param = encodeStartAppAccountParam(address, network);
+  return `https://t.me/${cleanBot}?startapp=${encodeURIComponent(param)}`;
+}
+
+export function buildTelegramInspectTxLink(
+  botUsername: string,
+  txHash: string,
+  network: StellarNetwork,
+): string {
+  const cleanBot = botUsername.replace(/^@/, "").trim();
+  const param = encodeStartAppTxParam(txHash, network);
+  return `https://t.me/${cleanBot}?startapp=${encodeURIComponent(param)}`;
+}
+
 export function parseStartAppParam(raw: string): ParsedStartAppParam | null {
   const trimmed = raw.trim();
   const intentMatch = trimmed.match(/^i-([A-Za-z0-9_-]+)-([a-f0-9]{64})$/i);
@@ -384,6 +416,22 @@ export function parseStartAppParam(raw: string): ParsedStartAppParam | null {
       sig: connectMatch[2].toLowerCase(),
     };
   }
+  const accountMatch = trimmed.match(/^a-([mt])-([GCM][A-Z2-7]{55,68})$/);
+  if (accountMatch?.[1] && accountMatch[2]) {
+    return {
+      kind: "inspect_account",
+      network: accountMatch[1] === "m" ? "mainnet" : "testnet",
+      address: accountMatch[2],
+    };
+  }
+  const txMatch = trimmed.match(/^x-([mt])-([a-f0-9]{64})$/i);
+  if (txMatch?.[1] && txMatch[2]) {
+    return {
+      kind: "inspect_tx",
+      network: txMatch[1] === "m" ? "mainnet" : "testnet",
+      txHash: txMatch[2].toLowerCase(),
+    };
+  }
   const tabMatch = trimmed.match(/^t-([a-z0-9_-]{1,32})$/i);
   if (tabMatch?.[1]) {
     return {
@@ -396,7 +444,14 @@ export function parseStartAppParam(raw: string): ParsedStartAppParam | null {
 
 export function buildMiniAppWebAppUrl(
   pwaOrigin: string,
-  opts?: { intentId?: string | undefined; sig?: string | undefined; tab?: string | undefined },
+  opts?: {
+    intentId?: string | undefined;
+    sig?: string | undefined;
+    tab?: string | undefined;
+    inspectTx?: string | undefined;
+    inspectAddr?: string | undefined;
+    net?: StellarNetwork | undefined;
+  },
 ): string {
   const { URLCtor } = getCryptoGlobals();
   const base = new URLCtor(pwaOrigin);
@@ -408,6 +463,15 @@ export function buildMiniAppWebAppUrl(
   base.pathname = "/app";
   if (opts?.tab) {
     base.searchParams.set("tab", opts.tab);
+  }
+  if (opts?.inspectTx) {
+    base.searchParams.set("inspectTx", opts.inspectTx);
+  }
+  if (opts?.inspectAddr) {
+    base.searchParams.set("inspectAddr", opts.inspectAddr);
+  }
+  if (opts?.net) {
+    base.searchParams.set("net", opts.net);
   }
   return base.toString();
 }

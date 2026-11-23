@@ -6,6 +6,10 @@ import type {
   StellarNetwork,
   TelegramUserBinding,
 } from "@astrowallet/domain";
+import {
+  buildTelegramInspectAccountLink,
+  buildTelegramInspectTxLink,
+} from "./mini-app.js";
 
 export function escapeTelegramHtml(raw: string): string {
   return raw
@@ -18,6 +22,34 @@ export function escapeTelegramHtml(raw: string): string {
 export function shortenAddress(address: string): string {
   if (address.length <= 12) return address;
   return `${address.slice(0, 6)}...${address.slice(-6)}`;
+}
+
+export function formatAccountRef(
+  address: string,
+  network: StellarNetwork,
+  botUsername?: string,
+  fullDisplay = false,
+): string {
+  const label = fullDisplay ? address : shortenAddress(address);
+  const codeTag = `<code>${escapeTelegramHtml(label)}</code>`;
+  const cleanBot = botUsername?.replace(/^@/, "").trim();
+  if (!cleanBot) return codeTag;
+  const href = escapeTelegramHtml(buildTelegramInspectAccountLink(cleanBot, address, network));
+  return `<a href="${href}">${codeTag}</a>`;
+}
+
+export function formatTxRef(
+  txHash: string,
+  network: StellarNetwork,
+  botUsername?: string,
+  fullDisplay = false,
+): string {
+  const label = fullDisplay ? txHash : shortenAddress(txHash);
+  const codeTag = `<code>${escapeTelegramHtml(label)}</code>`;
+  const cleanBot = botUsername?.replace(/^@/, "").trim();
+  if (!cleanBot) return codeTag;
+  const href = escapeTelegramHtml(buildTelegramInspectTxLink(cleanBot, txHash, network));
+  return `<a href="${href}">${codeTag}</a>`;
 }
 
 export function formatConnectPrompt(
@@ -46,6 +78,7 @@ export interface PaymentIntentCardInput {
   memo?: string | undefined;
   network: StellarNetwork;
   txHash?: string | undefined;
+  botUsername?: string | undefined;
 }
 
 export function formatPaymentIntentCard(input: PaymentIntentCardInput): string {
@@ -76,7 +109,7 @@ export function formatPaymentIntentCard(input: PaymentIntentCardInput): string {
     lines.push(`<b>Memo:</b> <code>${escapeTelegramHtml(input.memo)}</code>`);
   }
   if (input.txHash) {
-    lines.push(`<b>Tx:</b> <code>${escapeTelegramHtml(shortenAddress(input.txHash))}</code>`);
+    lines.push(`<b>Tx:</b> ${formatTxRef(input.txHash, input.network, input.botUsername)}`);
   } else if (input.status === "pending") {
     lines.push("", "Approve in AstroWallet with PIN or biometrics.");
   }
@@ -93,6 +126,7 @@ export interface RequestCardInput {
   memo?: string | undefined;
   network: StellarNetwork;
   txHash?: string | undefined;
+  botUsername?: string | undefined;
 }
 
 export function formatRequestCard(input: RequestCardInput): string {
@@ -103,13 +137,13 @@ export function formatRequestCard(input: RequestCardInput): string {
     `${statusHeader} · <code>${net}</code>`,
     "",
     `<b>Requested:</b> ${escapeTelegramHtml(input.amount)} ${escapeTelegramHtml(input.assetCode)}`,
-    `<b>Payee:</b> ${escapeTelegramHtml(input.requesterLabel)} (<code>${escapeTelegramHtml(shortenAddress(input.recipientAddress))}</code>)`,
+    `<b>Payee:</b> ${escapeTelegramHtml(input.requesterLabel)} (${formatAccountRef(input.recipientAddress, input.network, input.botUsername)})`,
   ];
   if (input.memo) {
     lines.push(`<b>Note:</b> ${escapeTelegramHtml(input.memo)}`);
   }
   if (input.txHash) {
-    lines.push(`<b>Tx Hash:</b> <code>${escapeTelegramHtml(input.txHash)}</code>`);
+    lines.push(`<b>Tx Hash:</b> ${formatTxRef(input.txHash, input.network, input.botUsername, true)}`);
   }
   return lines.join("\n");
 }
@@ -125,6 +159,7 @@ export interface SplitCardInput {
   paidCount?: number | undefined;
   status?: IntentStatus | undefined;
   txHashes?: readonly string[] | undefined;
+  botUsername?: string | undefined;
 }
 
 export function formatSplitCard(input: SplitCardInput): string {
@@ -141,13 +176,13 @@ export function formatSplitCard(input: SplitCardInput): string {
     `<b>Total:</b> ${escapeTelegramHtml(input.totalAmount)} ${escapeTelegramHtml(input.assetCode)} (${input.participantCount} ways)`,
     `<b>Share per person:</b> ${escapeTelegramHtml(input.amountPerPerson)} ${escapeTelegramHtml(input.assetCode)}`,
     `<b>Paid:</b> ${paidCount}/${input.participantCount}`,
-    `<b>Pay to:</b> ${escapeTelegramHtml(input.requesterLabel)} (<code>${escapeTelegramHtml(shortenAddress(input.recipientAddress))}</code>)`,
+    `<b>Pay to:</b> ${escapeTelegramHtml(input.requesterLabel)} (${formatAccountRef(input.recipientAddress, input.network, input.botUsername)})`,
   ];
 
   if (input.txHashes && input.txHashes.length > 0) {
     const latest = input.txHashes[input.txHashes.length - 1];
     if (latest) {
-      lines.push(`<b>Latest Tx:</b> <code>${escapeTelegramHtml(shortenAddress(latest))}</code>`);
+      lines.push(`<b>Latest Tx:</b> ${formatTxRef(latest, input.network, input.botUsername)}`);
     }
   }
   return lines.join("\n");
@@ -156,6 +191,7 @@ export function formatSplitCard(input: SplitCardInput): string {
 export function formatAccountsSummary(
   accounts: readonly TelegramUserBinding[],
   network: StellarNetwork,
+  botUsername?: string,
 ): string {
   const net = escapeTelegramHtml(network.toUpperCase());
   if (accounts.length === 0) {
@@ -169,7 +205,7 @@ export function formatAccountsSummary(
   const rows = accounts.map((acc) => {
     const tag = acc.isDefault ? " ★ Default" : "";
     const kindLabel = acc.kind === "smart" ? "Smart C..." : "Classic G...";
-    return `• <b>${escapeTelegramHtml(acc.label)}</b> (${kindLabel}${tag})\n  <code>${escapeTelegramHtml(acc.address)}</code>`;
+    return `• <b>${escapeTelegramHtml(acc.label)}</b> (${kindLabel}${tag})\n  ${formatAccountRef(acc.address, network, botUsername, true)}`;
   });
 
   return [`<b>Linked Accounts [${net}]</b>`, "", ...rows].join("\n");
@@ -186,6 +222,7 @@ export interface AccountBalanceSummaryEntry {
 export function formatBalancesSummary(
   entries: readonly AccountBalanceSummaryEntry[],
   network: StellarNetwork,
+  botUsername?: string,
 ): string {
   const net = escapeTelegramHtml(network.toUpperCase());
   if (entries.length === 0) {
@@ -193,7 +230,7 @@ export function formatBalancesSummary(
   }
 
   const sections = entries.map((entry) => {
-    const header = `<b>${escapeTelegramHtml(entry.label)}</b> (<code>${escapeTelegramHtml(shortenAddress(entry.address))}</code>)`;
+    const header = `<b>${escapeTelegramHtml(entry.label)}</b> (${formatAccountRef(entry.address, network, botUsername)})`;
     if (!entry.funded) {
       return `${header}\n  Unfunded on ${net}`;
     }
@@ -219,6 +256,7 @@ export interface IncomingAlertCardInput {
   fromAddress: string;
   txHash: string;
   network: StellarNetwork;
+  botUsername?: string | undefined;
 }
 
 function formatCompactDecimal(raw: string): string {
@@ -235,16 +273,16 @@ export function formatIncomingAlertCard(input: IncomingAlertCardInput): string {
   const assetDisplay = input.assetIssuer
     ? input.isVerifiedAsset === true
       ? `${escapeTelegramHtml(input.assetCode)} (Verified)`
-      : `${escapeTelegramHtml(input.assetCode)} ⚠️ Unverified (<code>${escapeTelegramHtml(shortenAddress(input.assetIssuer))}</code>)`
+      : `${escapeTelegramHtml(input.assetCode)} ⚠️ Unverified (${formatAccountRef(input.assetIssuer, input.network, input.botUsername)})`
     : escapeTelegramHtml(input.assetCode);
 
   return [
     `📥 <b>Payment Received</b> · <code>${net}</code>`,
     "",
-    `<b>Account:</b> ${escapeTelegramHtml(input.addressLabel)} (<code>${escapeTelegramHtml(shortenAddress(input.address))}</code>)`,
+    `<b>Account:</b> ${escapeTelegramHtml(input.addressLabel)} (${formatAccountRef(input.address, input.network, input.botUsername)})`,
     `<b>Amount:</b> +${escapeTelegramHtml(formatCompactDecimal(input.amount))} ${assetDisplay}`,
-    `<b>From:</b> <code>${escapeTelegramHtml(shortenAddress(input.fromAddress))}</code>`,
-    `<b>Tx:</b> <code>${escapeTelegramHtml(shortenAddress(input.txHash))}</code>`,
+    `<b>From:</b> ${formatAccountRef(input.fromAddress, input.network, input.botUsername)}`,
+    `<b>Tx:</b> ${formatTxRef(input.txHash, input.network, input.botUsername)}`,
   ].join("\n");
 }
 
@@ -300,6 +338,7 @@ export interface SwapQuoteCardInput {
   network: StellarNetwork;
   status?: IntentStatus | undefined;
   txHash?: string | undefined;
+  botUsername?: string | undefined;
 }
 
 export function formatSwapQuoteCard(input: SwapQuoteCardInput): string {
@@ -319,7 +358,7 @@ export function formatSwapQuoteCard(input: SwapQuoteCardInput): string {
   ];
 
   if (input.txHash) {
-    lines.push(`<b>Tx Hash:</b> <code>${escapeTelegramHtml(input.txHash)}</code>`);
+    lines.push(`<b>Tx Hash:</b> ${formatTxRef(input.txHash, input.network, input.botUsername, true)}`);
   } else {
     lines.push(
       "",
@@ -338,6 +377,7 @@ export interface ClaimLinkCardInput {
   network: StellarNetwork;
   txHash?: string | undefined;
   claimUrlHint?: string | undefined;
+  botUsername?: string | undefined;
 }
 
 export function formatClaimLinkCard(input: ClaimLinkCardInput): string {
@@ -377,7 +417,7 @@ export function formatClaimLinkCard(input: ClaimLinkCardInput): string {
     }
   }
   if (input.txHash) {
-    lines.push(`<b>Tx:</b> <code>${escapeTelegramHtml(shortenAddress(input.txHash))}</code>`);
+    lines.push(`<b>Tx:</b> ${formatTxRef(input.txHash, input.network, input.botUsername)}`);
   }
 
   return lines.join("\n");
@@ -393,6 +433,7 @@ export interface AccountReserveEntry {
 export interface ReserveReportCardInput {
   entries: readonly AccountReserveEntry[];
   network: StellarNetwork;
+  botUsername?: string | undefined;
 }
 
 export function formatReserveReportCard(input: ReserveReportCardInput): string {
@@ -405,7 +446,7 @@ export function formatReserveReportCard(input: ReserveReportCardInput): string {
   let totalReclaimable = 0;
 
   for (const entry of input.entries) {
-    const header = `<b>${escapeTelegramHtml(entry.label)}</b> (<code>${escapeTelegramHtml(shortenAddress(entry.address))}</code>)`;
+    const header = `<b>${escapeTelegramHtml(entry.label)}</b> (${formatAccountRef(entry.address, input.network, input.botUsername)})`;
     if (!entry.funded || !entry.summary) {
       lines.push(`${header}\n  Unfunded on ${net} (requires &ge; 1 XLM activation)`);
       continue;

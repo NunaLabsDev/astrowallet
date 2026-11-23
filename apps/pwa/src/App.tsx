@@ -35,6 +35,7 @@ function formatAssetBalance(raw: string): string {
   return num.toFixed(7).replace(/\.?0+$/, "");
 }
 import { AccountSwitcher } from "./components/AccountSwitcher.js";
+import { partitionWalletBalances } from "./components/asset-classification.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
 import { AstroWalletLogo } from "./components/AstroWalletLogo.js";
 import { TelegramOnlyGate } from "./components/TelegramOnlyGate.js";
@@ -100,6 +101,10 @@ import {
 const ClassicToolsSheet = lazy(() =>
   import("./components/ClassicToolsSheet.js").then((m) => ({ default: m.ClassicToolsSheet })),
 );
+const ChainInspectorSheet = lazy(() =>
+  import("./components/ChainInspectorSheet.js").then((m) => ({ default: m.ChainInspectorSheet })),
+);
+import type { ChainInspectTarget } from "./components/ChainInspectorSheet.js";
 const CollectiblesSheet = lazy(() =>
   import("./components/CollectiblesSheet.js").then((m) => ({ default: m.CollectiblesSheet })),
 );
@@ -139,6 +144,7 @@ type ActiveDrawer =
   | "swap"
   | "scan"
   | "tokens"
+  | "inspect"
   | "tools"
   | "ramp"
   | "tonConnect"
@@ -175,22 +181,46 @@ function readLocationRoute(): {
   tab: AppDockTab | null;
   intent: ActiveIntentRoute | null;
   connect: ActiveConnectRoute | null;
+  inspect: { target: ChainInspectTarget; network?: StellarNetwork | undefined } | null;
 } {
   if (typeof window === "undefined") {
-    return { tab: null, intent: null, connect: null };
+    return { tab: null, intent: null, connect: null, inspect: null };
   }
   const intent = parseIntentRouteFromLocation();
   if (intent) {
-    return { tab: "wallet", intent, connect: null };
+    return { tab: "wallet", intent, connect: null, inspect: null };
   }
   const connect = parseConnectRouteFromLocation();
   if (connect) {
-    return { tab: "wallet", intent: null, connect };
+    return { tab: "wallet", intent: null, connect, inspect: null };
+  }
+  const params = new URLSearchParams(window.location.search);
+  const netRaw = params.get("net");
+  const netParam: StellarNetwork | undefined =
+    netRaw === "mainnet" || netRaw === "testnet" ? netRaw : undefined;
+  const txParam = params.get("inspectTx")?.trim();
+  if (txParam && /^[a-f0-9]{64}$/i.test(txParam)) {
+    return {
+      tab: "wallet",
+      intent: null,
+      connect: null,
+      inspect: { target: { kind: "tx", txHash: txParam.toLowerCase() }, network: netParam },
+    };
+  }
+  const addrParam = params.get("inspectAddr")?.trim();
+  if (addrParam && StellarAddressSchema.safeParse(addrParam).success) {
+    return {
+      tab: "wallet",
+      intent: null,
+      connect: null,
+      inspect: { target: { kind: "account", address: addrParam }, network: netParam },
+    };
   }
   return {
     tab: parseTabFromSearch(window.location.search),
     intent: null,
     connect: null,
+    inspect: null,
   };
 }
 
@@ -223,6 +253,11 @@ function drawerMetadata(
       return {
         title: "Stellar Token Explorer & Scanner",
         subtitle: `Official SEP-42 directory, chart, SAC C... & issuer flags · ${network.toUpperCase()}`,
+      };
+    case "inspect":
+      return {
+        title: "Stellar Chain Inspector",
+        subtitle: `Live in-ecosystem account & transaction verification · ${network.toUpperCase()}`,
       };
     case "tools":
       return {
@@ -382,6 +417,8 @@ function WalletShell({
   initialTab,
   initialDrawer,
   onClearInitialDrawer,
+  initialInspectTarget,
+  onClearInitialInspect,
   intentRoute,
   onClearIntent,
   connectRoute,
@@ -392,6 +429,8 @@ function WalletShell({
   initialTab: AppDockTab;
   initialDrawer?: ActiveDrawer;
   onClearInitialDrawer?: () => void;
+  initialInspectTarget?: ChainInspectTarget | null | undefined;
+  onClearInitialInspect?: () => void;
   intentRoute: ActiveIntentRoute | null;
   onClearIntent: () => void;
   connectRoute: ActiveConnectRoute | null;
@@ -406,6 +445,7 @@ function WalletShell({
     refreshLinkedAccounts,
     hasEncryptedBackup,
     backupUpdatedAt,
+    cloudBackupJson,
     uploadEncryptedBackup,
     deleteEncryptedBackup,
   } = useTelegram();
@@ -431,12 +471,17 @@ function WalletShell({
     tonAccount,
     tonConnectSessions,
     pendingTonConnectTx,
+    localVaultUpdatedAt,
     resolvePendingTonConnectTx,
     signConnectChallenge,
     enableFingerprint,
     disableFingerprint,
     reEncryptLocalVault,
+    restoreAgVaultJson,
+    syncFromNewerCloudBackup,
     exportAgVaultJson,
+    isImportedAccount,
+    setActiveIndex,
     renameDerivedAccount,
     saveContact,
     deleteContact,
@@ -455,6 +500,7 @@ function WalletShell({
   const [swapFromPrefill, setSwapFromPrefill] = useState<string | undefined>(undefined);
   const [swapToPrefill, setSwapToPrefill] = useState<string | undefined>(undefined);
   const [selectedTokenTarget, setSelectedTokenTarget] = useState<SelectedTokenTarget | null>(null);
+  const [inspectTarget, setInspectTarget] = useState<ChainInspectTarget | null>(null);
 
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
@@ -526,6 +572,30 @@ function WalletShell({
   const [activitySubTab, setActivitySubTab] = useState<
     "payments" | "trades" | "holdings" | "ledger"
   >("payments");
+  const [balanceSearch, setBalanceSearch] = useState("");
+  const [balanceLimit, setBalanceLimit] = useState(15);
+  const [showEmptyTrustlines, setShowEmptyTrustlines] = useState(false);
+  const [holdingsFilter, setHoldingsFilter] = useState<"fungible" | "nfts" | "all">("fungible");
+  const [holdingsLimit, setHoldingsLimit] = useState(15);
+
+  const [cloudPullPinNeeded, setCloudPullPinNeeded] = useState(false);
+  const [cloudPullPin, setCloudPullPin] = useState("");
+  const [cloudPullBusy, setCloudPullBusy] = useState(false);
+  const [cloudPullError, setCloudPullError] = useState<string | null>(null);
+  const lastCloudPullTsRef = useRef<number>(0);
+  const lastCloudPushTsRef = useRef<number>(0);
+
+  const partitionedBalances = useMemo(
+    () => partitionWalletBalances(accountState?.balances ?? []),
+    [accountState?.balances],
+  );
+
+  useEffect(() => {
+    setBalanceLimit(15);
+    setHoldingsLimit(15);
+    setBalanceSearch("");
+    setShowEmptyTrustlines(false);
+  }, [activeAccount?.address]);
 
   useEffect(() => {
     setActiveTab(initialTab);
@@ -537,6 +607,19 @@ function WalletShell({
       onClearInitialDrawer?.();
     }
   }, [initialDrawer, onClearInitialDrawer]);
+
+  useEffect(() => {
+    if (initialInspectTarget) {
+      setInspectTarget(initialInspectTarget);
+      setActiveDrawer("inspect");
+      onClearInitialInspect?.();
+    }
+  }, [initialInspectTarget, onClearInitialInspect]);
+
+  const openChainInspector = (target: ChainInspectTarget) => {
+    setInspectTarget(target);
+    setActiveDrawer("inspect");
+  };
 
   const selectTab = useCallback((tab: AppDockTab) => {
     triggerTelegramHaptic("selection");
@@ -933,6 +1016,68 @@ function WalletShell({
     handleSyncWalletWithTelegram,
   ]);
 
+  // Bidirectional encrypted vault sync across devices (Telegram Web <-> Telegram Mobile)
+  useEffect(() => {
+    if (vaultStatus !== "unlocked" || !localVaultUpdatedAt) return;
+    if (
+      cloudBackupJson &&
+      backupUpdatedAt &&
+      backupUpdatedAt > localVaultUpdatedAt + 1 &&
+      lastCloudPullTsRef.current !== backupUpdatedAt
+    ) {
+      lastCloudPullTsRef.current = backupUpdatedAt;
+      void syncFromNewerCloudBackup(cloudBackupJson).then((res) => {
+        if (res === "pin_required") {
+          setCloudPullPinNeeded(true);
+        } else {
+          setCloudPullPinNeeded(false);
+        }
+      });
+      return;
+    }
+
+    if (
+      hasEncryptedBackup &&
+      sessionToken &&
+      (!backupUpdatedAt || localVaultUpdatedAt > backupUpdatedAt + 2) &&
+      lastCloudPushTsRef.current !== localVaultUpdatedAt
+    ) {
+      lastCloudPushTsRef.current = localVaultUpdatedAt;
+      void exportAgVaultJson()
+        .then((json) => uploadEncryptedBackup(json))
+        .catch(() => undefined);
+    }
+  }, [
+    vaultStatus,
+    cloudBackupJson,
+    backupUpdatedAt,
+    localVaultUpdatedAt,
+    hasEncryptedBackup,
+    sessionToken,
+    syncFromNewerCloudBackup,
+    exportAgVaultJson,
+    uploadEncryptedBackup,
+  ]);
+
+  const handleCloudPullConfirmSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!cloudBackupJson || !cloudPullPin) return;
+    setCloudPullBusy(true);
+    setCloudPullError(null);
+    try {
+      await restoreAgVaultJson(cloudBackupJson, cloudPullPin);
+      setCloudPullPinNeeded(false);
+      setCloudPullPin("");
+      triggerTelegramHaptic("success");
+    } catch (err) {
+      setCloudPullError(
+        err instanceof Error ? err.message : "Incorrect Recovery Password for cloud backup",
+      );
+    } finally {
+      setCloudPullBusy(false);
+    }
+  };
+
   const handleReSyncCloudBackup = async () => {
     setCloudSyncBusy(true);
     setCloudSyncError(null);
@@ -1174,6 +1319,50 @@ function WalletShell({
               <>
                 {activeTab !== "accounts" && <AccountSwitcher />}
 
+                {cloudPullPinNeeded && cloudBackupJson && (
+                  <form
+                    onSubmit={(e) => void handleCloudPullConfirmSubmit(e)}
+                    className="aw-banner aw-banner--warn"
+                    style={{ display: "grid", gap: 8, marginBottom: 10 }}
+                  >
+                    <div style={{ fontWeight: 700, fontSize: 13 }}>
+                      Newer encrypted accounts found in Telegram Cloud
+                    </div>
+                    <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                      Enter your Recovery Password to sync accounts added on another device.
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <input
+                        type="password"
+                        className="aw-input"
+                        style={{ flex: "1 1 180px", minWidth: 0 }}
+                        placeholder="Telegram Cloud Recovery Password"
+                        value={cloudPullPin}
+                        onChange={(e) => setCloudPullPin(e.target.value)}
+                      />
+                      <button
+                        type="submit"
+                        className="aw-btn-primary"
+                        disabled={cloudPullBusy || cloudPullPin.length < 6}
+                      >
+                        {cloudPullBusy ? "Syncing..." : "Sync Accounts"}
+                      </button>
+                      <button
+                        type="button"
+                        className="aw-btn-secondary"
+                        onClick={() => setCloudPullPinNeeded(false)}
+                      >
+                        Later
+                      </button>
+                    </div>
+                    {cloudPullError && (
+                      <div style={{ fontSize: 12, color: "var(--aw-danger-crimson)" }}>
+                        {cloudPullError}
+                      </div>
+                    )}
+                  </form>
+                )}
+
                 {activeTab === "wallet" && (
                   <div className="aw-wallet-stack">
                     {/* Hero Balance, Spendable Reserve Bar & Quick Actions */}
@@ -1401,8 +1590,18 @@ function WalletShell({
                         </div>
 
                         {accountState?.balances && accountState.balances.length > 0 ? (
-                          <div style={{ display: "grid", gap: 8 }}>
-                            {accountState.balances.map((b) => {
+                          (() => {
+                            const { fungible, classicNfts, emptyTrustlines } = partitionedBalances;
+                            const q = balanceSearch.trim().toLowerCase();
+                            const filteredFungible = q
+                              ? fungible.filter(
+                                  (b) =>
+                                    b.assetCode.toLowerCase().includes(q) ||
+                                    (b.assetIssuer ?? "").toLowerCase().includes(q),
+                                )
+                              : fungible;
+                            const visibleFungible = filteredFungible.slice(0, balanceLimit);
+                            const renderBalanceRow = (b: (typeof fungible)[number]) => {
                               const isNativeAsset = b.assetCode === "XLM" && !b.assetIssuer;
                               const matchedVerified = verifiedAssets.find(
                                 (v) =>
@@ -1521,8 +1720,88 @@ function WalletShell({
                                   </div>
                                 </div>
                               );
-                            })}
-                          </div>
+                            };
+                            return (
+                              <div style={{ display: "grid", gap: 8 }}>
+                                {fungible.length > 6 && (
+                                  <input
+                                    type="search"
+                                    className="aw-input"
+                                    placeholder="Filter tokens by code or issuer..."
+                                    value={balanceSearch}
+                                    onChange={(e) => setBalanceSearch(e.target.value)}
+                                  />
+                                )}
+                                {visibleFungible.map(renderBalanceRow)}
+                                {filteredFungible.length > balanceLimit && (
+                                  <button
+                                    type="button"
+                                    className="aw-btn-secondary"
+                                    onClick={() => setBalanceLimit((n) => n + 15)}
+                                  >
+                                    Show More Tokens ({filteredFungible.length - balanceLimit} remaining)
+                                  </button>
+                                )}
+                                {classicNfts.length > 0 && (
+                                  <div className="aw-list-row" style={{ marginTop: 4 }}>
+                                    <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, flex: "1 1 180px" }}>
+                                      <span className="aw-asset-badge">
+                                        <IconNft size={16} />
+                                      </span>
+                                      <div style={{ minWidth: 0 }}>
+                                        <div style={{ fontWeight: 700, fontSize: 13 }}>
+                                          Classic Stellar NFTs ({classicNfts.length})
+                                        </div>
+                                        <div
+                                          style={{
+                                            fontSize: 11,
+                                            color: "var(--aw-ink-secondary)",
+                                            overflow: "hidden",
+                                            textOverflow: "ellipsis",
+                                            whiteSpace: "nowrap",
+                                          }}
+                                        >
+                                          {classicNfts
+                                            .slice(0, 3)
+                                            .map((n) => n.assetCode)
+                                            .join(", ")}
+                                          {classicNfts.length > 3 ? "…" : ""}
+                                        </div>
+                                      </div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="aw-chip-btn"
+                                      onClick={() => selectTab("nfts")}
+                                    >
+                                      <span>View Gallery</span>
+                                      <IconChevronRight size={13} />
+                                    </button>
+                                  </div>
+                                )}
+                                {emptyTrustlines.length > 0 && (
+                                  <div style={{ display: "grid", gap: 8, marginTop: 2 }}>
+                                    <button
+                                      type="button"
+                                      className="aw-chip-btn"
+                                      style={{ justifySelf: "start" }}
+                                      aria-pressed={showEmptyTrustlines}
+                                      onClick={() => setShowEmptyTrustlines((v) => !v)}
+                                    >
+                                      {showEmptyTrustlines
+                                        ? `Hide Empty Trustlines (${emptyTrustlines.length})`
+                                        : `Empty Trustlines (${emptyTrustlines.length}) · Reclaim XLM`}
+                                    </button>
+                                    {showEmptyTrustlines && (
+                                      <div style={{ display: "grid", gap: 8 }}>
+                                        {emptyTrustlines.slice(0, 15).map(renderBalanceRow)}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })()
                         ) : (
                           <div className="aw-empty-state">
                             <div style={{ fontWeight: 600, fontSize: 13 }}>No ledger balances yet</div>
@@ -1720,7 +1999,10 @@ function WalletShell({
                       </section>
                     }
                   >
-                    <CollectiblesSheet />
+                    <CollectiblesSheet
+                      onInspectAsset={(target) => openTokenExplorer(target)}
+                      onSendAsset={(prefill) => openSendWith(prefill)}
+                    />
                   </Suspense>
                 )}
 
@@ -1862,11 +2144,22 @@ function WalletShell({
                                     <div style={{ fontWeight: 700, fontSize: 13 }}>
                                       {inbound ? "Received" : "Sent"} {p.assetCode}
                                     </div>
-                                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                                      {inbound
-                                        ? `From ${p.from.slice(0, 6)}…${p.from.slice(-4)}`
-                                        : `To ${p.to.slice(0, 6)}…${p.to.slice(-4)}`}{" "}
-                                      · {new Date(p.createdAt).toLocaleString()}
+                                    <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)", display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+                                      <button
+                                        type="button"
+                                        className="aw-mini-chip"
+                                        onClick={() =>
+                                          openChainInspector({
+                                            kind: "account",
+                                            address: inbound ? p.from : p.to,
+                                          })
+                                        }
+                                      >
+                                        {inbound
+                                          ? `From ${p.from.slice(0, 6)}…${p.from.slice(-4)}`
+                                          : `To ${p.to.slice(0, 6)}…${p.to.slice(-4)}`}
+                                      </button>
+                                      <span>· {new Date(p.createdAt).toLocaleString()}</span>
                                     </div>
                                   </div>
                                 </div>
@@ -1885,6 +2178,16 @@ function WalletShell({
                                     {p.amount} {p.assetCode}
                                   </div>
                                   <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                                    <button
+                                      type="button"
+                                      className="aw-mini-chip"
+                                      onClick={() =>
+                                        openChainInspector({ kind: "tx", txHash: p.txHash })
+                                      }
+                                    >
+                                      <IconSearch size={11} />
+                                      <span>Inspect Tx</span>
+                                    </button>
                                     <button
                                       type="button"
                                       className="aw-mini-chip"
@@ -2002,70 +2305,124 @@ function WalletShell({
                           ))
                         )}
 
-                        <div style={{ fontWeight: 700, fontSize: 13, marginTop: 4 }}>
-                          All Holdings &amp; Trustline Details ({accountState?.balances.length ?? 0})
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: 4 }}>
+                          <div style={{ fontWeight: 700, fontSize: 13 }}>
+                            All Holdings &amp; Trustline Details ({accountState?.balances.length ?? 0})
+                          </div>
+                          {accountState && accountState.balances.length > 0 && (
+                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                              {(
+                                [
+                                  ["fungible", `Tokens (${partitionedBalances.fungible.length})`],
+                                  ["nfts", `NFTs (${partitionedBalances.classicNfts.length})`],
+                                  ["all", `All (${accountState.balances.length})`],
+                                ] as const
+                              ).map(([id, label]) => (
+                                <button
+                                  key={id}
+                                  type="button"
+                                  className="aw-mini-chip"
+                                  aria-pressed={holdingsFilter === id}
+                                  onClick={() => {
+                                    setHoldingsFilter(id);
+                                    setHoldingsLimit(15);
+                                  }}
+                                >
+                                  {label}
+                                </button>
+                              ))}
+                            </div>
+                          )}
                         </div>
                         {!accountState || accountState.balances.length === 0 ? (
                           <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
                             Account has no active balances yet.
                           </div>
                         ) : (
-                          accountState.balances.map((b) => {
-                            const key = `${b.assetCode}:${b.assetIssuer ?? "native"}`;
+                          (() => {
+                            const list =
+                              holdingsFilter === "fungible"
+                                ? partitionedBalances.fungible
+                                : holdingsFilter === "nfts"
+                                  ? partitionedBalances.classicNfts
+                                  : accountState.balances;
+                            if (list.length === 0) {
+                              return (
+                                <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                                  No holdings in this category.
+                                </div>
+                              );
+                            }
                             return (
-                              <div key={key} className="aw-contract-seals" style={{ fontSize: 12 }}>
-                                <div className="aw-seal-row">
-                                  <strong>
-                                    {b.assetCode} ({formatAssetBalance(b.balance)})
-                                  </strong>
+                              <>
+                                {list.slice(0, holdingsLimit).map((b) => {
+                                  const key = `${b.assetCode}:${b.assetIssuer ?? "native"}`;
+                                  return (
+                                    <div key={key} className="aw-contract-seals" style={{ fontSize: 12 }}>
+                                      <div className="aw-seal-row">
+                                        <strong>
+                                          {b.assetCode} ({formatAssetBalance(b.balance)})
+                                        </strong>
+                                        <button
+                                          type="button"
+                                          className="aw-mini-chip"
+                                          onClick={() =>
+                                            openTokenExplorer({
+                                              assetCode: b.assetCode,
+                                              assetIssuer: b.assetIssuer,
+                                            })
+                                          }
+                                        >
+                                          Inspect Token ↗
+                                        </button>
+                                      </div>
+                                      {b.assetIssuer && (
+                                        <div className="aw-seal-row">
+                                          <span>Issuer</span>
+                                          <code>
+                                            {b.assetIssuer.slice(0, 8)}…{b.assetIssuer.slice(-6)}
+                                          </code>
+                                        </div>
+                                      )}
+                                      <div className="aw-seal-row">
+                                        <span>Liabilities (Sell / Buy)</span>
+                                        <code className="tabular-nums">
+                                          {b.sellingLiabilities ?? "0"} / {b.buyingLiabilities ?? "0"}
+                                        </code>
+                                      </div>
+                                      {b.assetIssuer && (
+                                        <div className="aw-seal-row">
+                                          <span>Trustline Limit &amp; Flags</span>
+                                          <code className="tabular-nums">
+                                            Limit: {b.limit ? formatAssetBalance(b.limit) : "Max"} ·{" "}
+                                            {b.isAuthorized === false ? "Frozen" : "Authorized"}
+                                            {b.isClawbackEnabled ? " · Clawback" : ""}
+                                          </code>
+                                        </div>
+                                      )}
+                                      {b.sponsor && (
+                                        <div className="aw-seal-row">
+                                          <span>Reserve Sponsor</span>
+                                          <code>
+                                            {b.sponsor.slice(0, 6)}…{b.sponsor.slice(-4)}
+                                          </code>
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                                {list.length > holdingsLimit && (
                                   <button
                                     type="button"
-                                    className="aw-mini-chip"
-                                    onClick={() =>
-                                      openTokenExplorer({
-                                        assetCode: b.assetCode,
-                                        assetIssuer: b.assetIssuer,
-                                      })
-                                    }
+                                    className="aw-btn-secondary"
+                                    onClick={() => setHoldingsLimit((n) => n + 15)}
                                   >
-                                    Inspect Token ↗
+                                    Show More Holdings ({list.length - holdingsLimit} remaining)
                                   </button>
-                                </div>
-                                {b.assetIssuer && (
-                                  <div className="aw-seal-row">
-                                    <span>Issuer</span>
-                                    <code>
-                                      {b.assetIssuer.slice(0, 8)}…{b.assetIssuer.slice(-6)}
-                                    </code>
-                                  </div>
                                 )}
-                                <div className="aw-seal-row">
-                                  <span>Liabilities (Sell / Buy)</span>
-                                  <code className="tabular-nums">
-                                    {b.sellingLiabilities ?? "0"} / {b.buyingLiabilities ?? "0"}
-                                  </code>
-                                </div>
-                                {b.assetIssuer && (
-                                  <div className="aw-seal-row">
-                                    <span>Trustline Limit &amp; Flags</span>
-                                    <code className="tabular-nums">
-                                      Limit: {b.limit ? formatAssetBalance(b.limit) : "Max"} ·{" "}
-                                      {b.isAuthorized === false ? "Frozen" : "Authorized"}
-                                      {b.isClawbackEnabled ? " · Clawback" : ""}
-                                    </code>
-                                  </div>
-                                )}
-                                {b.sponsor && (
-                                  <div className="aw-seal-row">
-                                    <span>Reserve Sponsor</span>
-                                    <code>
-                                      {b.sponsor.slice(0, 6)}…{b.sponsor.slice(-4)}
-                                    </code>
-                                  </div>
-                                )}
-                              </div>
+                              </>
                             );
-                          })
+                          })()
                         )}
                       </div>
                     )}
@@ -2225,13 +2582,17 @@ function WalletShell({
                           </div>
                         </div>
                         <span className="glass-pill glass-pill--trust">
-                          {accounts.length} Derived
+                          {accounts.filter((a) => !isImportedAccount(a.address)).length} Derived
+                          {accounts.some((a) => isImportedAccount(a.address))
+                            ? ` · ${accounts.filter((a) => isImportedAccount(a.address)).length} Imported`
+                            : ""}
                         </span>
                       </div>
 
                       <div style={{ display: "grid", gap: 8 }}>
                         {accounts.map((acc) => {
                           const idx = acc.derivationIndex ?? 0;
+                          const imported = isImportedAccount(acc.address);
                           return (
                             <div key={acc.id} style={{ display: "grid", gap: 8 }}>
                               <div className="aw-list-row">
@@ -2252,7 +2613,11 @@ function WalletShell({
                                   </div>
                                 </div>
                                 <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                                  <span className="glass-pill">m/44&apos;/148&apos;/{idx}&apos;</span>
+                                  {imported ? (
+                                    <span className="glass-pill glass-pill--gold">Imported Key</span>
+                                  ) : (
+                                    <span className="glass-pill">m/44&apos;/148&apos;/{idx}&apos;</span>
+                                  )}
                                   <button
                                     type="button"
                                     className="aw-mini-chip"
@@ -2935,6 +3300,17 @@ function WalletShell({
               }
             />
           )}
+          {activeDrawer === "inspect" && inspectTarget && (
+            <ChainInspectorSheet
+              target={inspectTarget}
+              onSelectTarget={(next) => setInspectTarget(next)}
+              onSwitchOwnAccount={(idx) => {
+                setActiveIndex(idx);
+                setActiveDrawer(null);
+              }}
+              onSendToAddress={(dest) => openSendWith({ destination: dest })}
+            />
+          )}
           {activeDrawer === "tools" && <ClassicToolsSheet />}
           {activeDrawer === "ramp" && <RampSheet />}
           {activeDrawer === "tonConnect" && <TonConnectSheet />}
@@ -3032,12 +3408,16 @@ function RoutedExperience({
   canSwitchNetwork?: boolean | undefined;
 }) {
   const { startParamRoute } = useTelegram();
+  const { config } = useWallet();
   const [route, setRoute] = useState(() => readLocationRoute());
   const [requestedTab, setRequestedTab] = useState<AppDockTab>(
     () => readLocationRoute().tab ?? "wallet",
   );
   const [requestedDrawer, setRequestedDrawer] = useState<ActiveDrawer>(null);
+  const [requestedInspectTarget, setRequestedInspectTarget] =
+    useState<ChainInspectTarget | null>(() => readLocationRoute().inspect?.target ?? null);
   const [dismissedStartParamKey, setDismissedStartParamKey] = useState<string | null>(null);
+  const handledInspectKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
     const handlePopState = () => {
@@ -3046,12 +3426,63 @@ function RoutedExperience({
       if (next.tab) {
         setRequestedTab(next.tab);
       }
+      if (next.inspect) {
+        setRequestedInspectTarget(next.inspect.target);
+      }
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
   }, []);
 
   useEffect(() => {
+    const urlInspect = route.inspect;
+    if (urlInspect) {
+      const urlKey = `url:${JSON.stringify(urlInspect)}`;
+      if (handledInspectKeyRef.current !== urlKey) {
+        handledInspectKeyRef.current = urlKey;
+        if (
+          urlInspect.network &&
+          urlInspect.network !== config.network &&
+          canSwitchNetwork &&
+          onSwitchNetwork
+        ) {
+          onSwitchNetwork(urlInspect.network);
+        }
+        setRequestedInspectTarget(urlInspect.target);
+      }
+      return;
+    }
+
+    if (startParamRoute?.kind === "inspect_tx") {
+      const key = `tx:${startParamRoute.network}:${startParamRoute.txHash}`;
+      if (handledInspectKeyRef.current === key) return;
+      handledInspectKeyRef.current = key;
+      if (
+        startParamRoute.network !== config.network &&
+        canSwitchNetwork &&
+        onSwitchNetwork
+      ) {
+        onSwitchNetwork(startParamRoute.network);
+      }
+      setRequestedInspectTarget({ kind: "tx", txHash: startParamRoute.txHash });
+      return;
+    }
+
+    if (startParamRoute?.kind === "inspect_account") {
+      const key = `acct:${startParamRoute.network}:${startParamRoute.address}`;
+      if (handledInspectKeyRef.current === key) return;
+      handledInspectKeyRef.current = key;
+      if (
+        startParamRoute.network !== config.network &&
+        canSwitchNetwork &&
+        onSwitchNetwork
+      ) {
+        onSwitchNetwork(startParamRoute.network);
+      }
+      setRequestedInspectTarget({ kind: "account", address: startParamRoute.address });
+      return;
+    }
+
     if (startParamRoute?.kind !== "tab") return;
     const rawTab = startParamRoute.tab;
     if ((VALID_TABS as readonly string[]).includes(rawTab)) {
@@ -3063,7 +3494,7 @@ function RoutedExperience({
       setRequestedTab("ton");
       setRequestedDrawer("tonConnect");
     }
-  }, [startParamRoute]);
+  }, [startParamRoute, route.inspect, config.network, canSwitchNetwork, onSwitchNetwork]);
 
   const startParamIntentKey =
     startParamRoute?.kind === "intent"
@@ -3108,11 +3539,17 @@ function RoutedExperience({
     setRequestedDrawer(null);
   }, []);
 
+  const clearRequestedInspect = useCallback(() => {
+    setRequestedInspectTarget(null);
+  }, []);
+
   return (
     <WalletShell
       initialTab={requestedTab}
       initialDrawer={requestedDrawer}
       onClearInitialDrawer={clearRequestedDrawer}
+      initialInspectTarget={requestedInspectTarget}
+      onClearInitialInspect={clearRequestedInspect}
       intentRoute={effectiveIntent}
       onClearIntent={handleDismissIntent}
       connectRoute={effectiveConnect}

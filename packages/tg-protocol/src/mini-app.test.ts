@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 import {
   buildMiniAppWebAppUrl,
+  buildTelegramInspectAccountLink,
+  buildTelegramInspectTxLink,
   buildTelegramMiniAppLink,
   computeTelegramInitDataHash,
+  encodeStartAppAccountParam,
   encodeStartAppIntentParam,
   encodeStartAppTabParam,
+  encodeStartAppTxParam,
   parseStartAppParam,
   signMiniAppSessionToken,
   verifyMiniAppSessionToken,
@@ -137,5 +141,32 @@ describe("Telegram Mini App initData, sessions, and startapp routing", () => {
         sig,
       }),
     ).toBe(`https://t.me/AstroWalletTestBot/wallet?startapp=i-it_1-${sig}`);
+
+    const addr = "GCOKDLYTDOFSLBXOA4PGNSEG6RAYZN2THJJHZ5PFB2RT4GIZWR2N4RGD";
+    const txHash = "b".repeat(64);
+    expect(encodeStartAppAccountParam(addr, "mainnet")).toBe(`a-m-${addr}`);
+    expect(parseStartAppParam(encodeStartAppAccountParam(addr, "mainnet"))).toEqual({
+      kind: "inspect_account",
+      network: "mainnet",
+      address: addr,
+    });
+    expect(encodeStartAppTxParam(txHash, "testnet")).toBe(`x-t-${txHash}`);
+    expect(parseStartAppParam(encodeStartAppTxParam(txHash, "testnet"))).toEqual({
+      kind: "inspect_tx",
+      network: "testnet",
+      txHash,
+    });
+    expect(buildTelegramInspectAccountLink("@AstroWalletAppBot", addr, "mainnet")).toBe(
+      `https://t.me/AstroWalletAppBot?startapp=a-m-${addr}`,
+    );
+    expect(buildTelegramInspectTxLink("@AstroWalletAppBot", txHash, "mainnet")).toBe(
+      `https://t.me/AstroWalletAppBot?startapp=x-m-${txHash}`,
+    );
+    expect(
+      buildMiniAppWebAppUrl("https://app.example.org", {
+        inspectTx: txHash,
+        net: "mainnet",
+      }),
+    ).toBe(`https://app.example.org/app?inspectTx=${txHash}&net=mainnet`);
   });
 });

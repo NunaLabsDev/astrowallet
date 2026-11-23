@@ -2,16 +2,21 @@ import { decimalToStroops7 } from "@astrowallet/defi";
 import { parseServerConfig } from "@astrowallet/domain";
 import { fetchSep42VerifiedAssets } from "@astrowallet/security-shield";
 import type { DurableObjectState } from "@cloudflare/workers-types";
-import { formatIncomingAlertCard } from "@astrowallet/tg-protocol";
+import {
+  buildMiniAppWebAppUrl,
+  formatIncomingAlertCard,
+} from "@astrowallet/tg-protocol";
 import type { WorkerBindings } from "../app.js";
 import { createD1Repository } from "../db/repository.js";
-import { fetchIncomingPaymentsSince } from "../stellar-verifier.js";
+import { fetchIncomingPaymentsSince, fetchLatestPaymentCursor } from "../stellar-verifier.js";
 import { sendTelegramMessage } from "../telegram-api.js";
 
 const POLL_INTERVAL_MS = 5_000;
 const BATCH_SIZE = 15;
 const MIN_NATIVE_ALERT_STROOPS = 500_000n; // 0.05 XLM dust spam filter
 const MIN_ISSUED_ALERT_STROOPS = 10_000n; // 0.001 issued asset dust spam filter
+const MAX_ALERT_AGE_MS = 15 * 60 * 1000; // Ignore any payment older than 15 minutes
+const MAX_ALERTS_PER_ACCOUNT_PER_POLL = 3; // Cap burst spam per poll
 
 interface WatcherStatus {
   lastLedger: number;
@@ -110,9 +115,8 @@ export class ChainWatcherDO {
 
         try {
           if (!savedCursor) {
-            // Initialize baseline cursor without replaying historical transactions
-            const recent = await fetchIncomingPaymentsSince(config, entry.address, undefined, 20);
-            const latestToken = recent[recent.length - 1]?.pagingToken ?? "empty_init";
+            // Initialize baseline cursor at HEAD (order=desc&limit=1) without replaying historical transactions
+            const latestToken = await fetchLatestPaymentCursor(config, entry.address);
             await this.state.storage.put(cursorKey, latestToken);
             continue;
           }
@@ -127,8 +131,21 @@ export class ChainWatcherDO {
           );
 
           let newestCursor = savedCursor;
+          let sentCount = 0;
+          let sawStaleRecord = false;
+          const nowMs = Date.now();
+
           for (const ev of incoming) {
             newestCursor = ev.pagingToken;
+
+            if (ev.createdAt) {
+              const createdMs = Date.parse(ev.createdAt);
+              if (Number.isFinite(createdMs) && nowMs - createdMs > MAX_ALERT_AGE_MS) {
+                sawStaleRecord = true;
+                continue;
+              }
+            }
+
             const minThreshold =
               ev.assetCode === "XLM" && !ev.assetIssuer
                 ? MIN_NATIVE_ALERT_STROOPS
@@ -140,6 +157,11 @@ export class ChainWatcherDO {
             } catch {
               continue;
             }
+
+            if (sentCount >= MAX_ALERTS_PER_ACCOUNT_PER_POLL) {
+              continue;
+            }
+
             const isVerifiedAsset =
               ev.assetCode === "XLM" && !ev.assetIssuer
                 ? true
@@ -171,13 +193,42 @@ export class ChainWatcherDO {
                   fromAddress: ev.from,
                   txHash: ev.txHash,
                   network: config.network,
+                  botUsername: config.tgBotUsername,
                 }),
+                replyMarkup: {
+                  inline_keyboard: [
+                    [
+                      {
+                        text: "🔍 Inspect Tx",
+                        web_app: {
+                          url: buildMiniAppWebAppUrl(config.pwaOrigin, {
+                            inspectTx: ev.txHash,
+                            net: config.network,
+                          }),
+                        },
+                      },
+                      {
+                        text: "👤 Account",
+                        web_app: {
+                          url: buildMiniAppWebAppUrl(config.pwaOrigin, {
+                            inspectAddr: entry.address,
+                            net: config.network,
+                          }),
+                        },
+                      },
+                    ],
+                  ],
+                },
               },
               { apiOrigin: config.telegramApiOrigin },
             );
+            sentCount += 1;
           }
 
-          if (newestCursor !== savedCursor) {
+          if (sawStaleRecord) {
+            const headCursor = await fetchLatestPaymentCursor(config, entry.address);
+            await this.state.storage.put(cursorKey, headCursor);
+          } else if (newestCursor !== savedCursor) {
             await this.state.storage.put(cursorKey, newestCursor);
           }
         } catch {

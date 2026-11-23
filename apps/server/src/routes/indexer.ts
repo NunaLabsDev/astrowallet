@@ -1,7 +1,10 @@
 import { decimalToStroops7 } from "@astrowallet/defi";
 import type { ServerConfig } from "@astrowallet/domain";
 import { fetchSep42VerifiedAssets } from "@astrowallet/security-shield";
-import { formatIncomingAlertCard } from "@astrowallet/tg-protocol";
+import {
+  buildMiniAppWebAppUrl,
+  formatIncomingAlertCard,
+} from "@astrowallet/tg-protocol";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
@@ -226,7 +229,32 @@ export function createIndexerRoutes(deps: IndexerRoutesDeps = {}): Hono<IndexerR
               fromAddress: ev.from,
               txHash: ev.txHash,
               network: config.network,
+              botUsername: config.tgBotUsername,
             }),
+            replyMarkup: {
+              inline_keyboard: [
+                [
+                  {
+                    text: "🔍 Inspect Tx",
+                    web_app: {
+                      url: buildMiniAppWebAppUrl(config.pwaOrigin, {
+                        inspectTx: ev.txHash,
+                        net: config.network,
+                      }),
+                    },
+                  },
+                  {
+                    text: "👤 Account",
+                    web_app: {
+                      url: buildMiniAppWebAppUrl(config.pwaOrigin, {
+                        inspectAddr: recipient.address,
+                        net: config.network,
+                      }),
+                    },
+                  },
+                ],
+              ],
+            },
           },
           { apiOrigin: config.telegramApiOrigin, ...(deps.telegramApiDeps ?? {}) },
         );

@@ -32,6 +32,7 @@ export async function sendTelegramMessage(
       chat_id: input.chatId,
       text: input.text,
       parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
       ...(input.replyMarkup ? { reply_markup: input.replyMarkup } : {}),
     }),
   });
@@ -53,6 +54,7 @@ export async function editTelegramMessage(
   const payload: Record<string, unknown> = {
     text: input.text,
     parse_mode: "HTML",
+    link_preview_options: { is_disabled: true },
     ...(input.replyMarkup ? { reply_markup: input.replyMarkup } : {}),
   };
 

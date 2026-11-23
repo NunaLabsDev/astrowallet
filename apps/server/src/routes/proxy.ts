@@ -235,12 +235,19 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
 
   router.use("*", async (c, next) => {
     const config = c.get("config");
+    const path = c.req.path;
+    const isReadOnlyMeta =
+      path.endsWith("/stellar-toml") ||
+      path.endsWith("/nft-meta") ||
+      path.includes("/market/");
     const limit = await checkRateLimit({
       repository: c.get("repo"),
       cache: c.env.CACHE,
-      scope: "proxy",
+      scope: isReadOnlyMeta ? "proxy_meta" : "proxy",
       clientKey: clientKeyFromHeaders(c.req.raw.headers),
-      limitPerMin: config.proxyRateLimitPerMin,
+      limitPerMin: isReadOnlyMeta
+        ? Math.max(config.proxyRateLimitPerMin * 4, 240)
+        : config.proxyRateLimitPerMin,
     });
     if (!limit.allowed) {
       c.header("Retry-After", String(limit.retryAfterSeconds));
@@ -366,6 +373,189 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       return c.json({ error: tomlRes.error }, tomlRes.status);
     }
     return c.text(tomlRes.text, 200);
+  });
+
+  function normalizeIpfsUrl(raw: string): string | undefined {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    if (trimmed.startsWith("ipfs://")) {
+      const cidPath = trimmed.slice(7).replace(/^ipfs\//i, "").replace(/^\/+/, "");
+      return cidPath ? `https://ipfs.io/ipfs/${cidPath}` : undefined;
+    }
+    if (/^(Qm[1-9A-HJ-NP-Za-km-z]{44,}|bafy[a-z2-7]{20,})(?:\/.*)?$/i.test(trimmed)) {
+      return `https://ipfs.io/ipfs/${trimmed}`;
+    }
+    if (trimmed.startsWith("https://")) {
+      return trimmed;
+    }
+    return undefined;
+  }
+
+  function decodeBase64Utf8(b64: string): string {
+    try {
+      const bin = atob(b64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i += 1) {
+        bytes[i] = bin.charCodeAt(i);
+      }
+      return new TextDecoder().decode(bytes).trim();
+    } catch {
+      return "";
+    }
+  }
+
+  function extractCurrencyFromToml(
+    tomlText: string,
+    code: string,
+    issuer: string,
+  ): { name?: string; description?: string; image?: string } {
+    const blocks = tomlText.split(/\[\[CURRENCIES\]\]/i).slice(1);
+    const upperCode = code.toUpperCase();
+    const matchField = (block: string, field: string): string | undefined => {
+      const re = new RegExp(`^\\s*${field}\\s*=\\s*"([^"\\r\\n]*)"`, "mi");
+      const m = re.exec(block);
+      return m?.[1]?.trim() || undefined;
+    };
+    for (const block of blocks) {
+      const bCode = matchField(block, "code")?.toUpperCase();
+      const bIssuer = matchField(block, "issuer");
+      if (bCode === upperCode && (!bIssuer || bIssuer === issuer)) {
+        const fName = matchField(block, "name");
+        const fDesc = matchField(block, "desc");
+        const img = matchField(block, "image");
+        const normalizedImg = img ? (normalizeIpfsUrl(img) ?? img) : undefined;
+        return {
+          ...(fName ? { name: fName } : {}),
+          ...(fDesc ? { description: fDesc } : {}),
+          ...(normalizedImg ? { image: normalizedImg } : {}),
+        };
+      }
+    }
+    return {};
+  }
+
+  router.get("/nft-meta", async (c) => {
+    const config = c.get("config");
+    const rawIssuer = (c.req.query("issuer") ?? "").trim();
+    const code = (c.req.query("code") ?? "").trim();
+    const issuerParse = ClassicAddressSchema.safeParse(rawIssuer);
+    if (!issuerParse.success || !/^[A-Za-z0-9]{1,12}$/.test(code)) {
+      return c.json({ error: "Valid Classic issuer and asset code are required" }, 400);
+    }
+    const issuer = issuerParse.data;
+
+    return serveEdgeCachedJson(c, {
+      cacheKey: `nft:${config.network}:${issuer}:${code}`,
+      freshTtlSec: 86400,
+      staleTtlSec: 604800,
+      compute: async () => {
+        let homeDomain: string | undefined;
+        let ipfsHash: string | undefined;
+        let name: string | undefined;
+        let description: string | undefined;
+        let image: string | undefined;
+
+        for (const base of config.horizonUrls) {
+          const cleanBase = base.replace(/\/+$/, "");
+          try {
+            const accRes = await fetchFn(`${cleanBase}/accounts/${encodeURIComponent(issuer)}`, {
+              headers: { Accept: "application/json" },
+              signal: AbortSignal.timeout(5000),
+            });
+            if (accRes.status === 404) break;
+            if (!accRes.ok) continue;
+            const acc = (await accRes.json()) as {
+              home_domain?: string;
+              data?: Record<string, string>;
+            };
+            homeDomain = acc.home_domain?.trim().toLowerCase() || undefined;
+            const dataEntries = acc.data ?? {};
+            const rawIpfsB64 =
+              dataEntries.ipfshash ?? dataEntries.ipfs_hash ?? dataEntries.ipfs;
+            if (typeof rawIpfsB64 === "string" && rawIpfsB64.length > 0) {
+              const decoded = decodeBase64Utf8(rawIpfsB64);
+              if (decoded && !decoded.includes("..")) {
+                ipfsHash = decoded;
+              }
+            }
+            break;
+          } catch {
+            continue;
+          }
+        }
+
+        if (ipfsHash) {
+          const cidClean = ipfsHash.replace(/^ipfs:\/\//i, "").replace(/^ipfs\//i, "").replace(/^\/+/, "");
+          const gateways = [
+            `https://ipfs.io/ipfs/${cidClean}`,
+            `https://dweb.link/ipfs/${cidClean}`,
+          ];
+          for (const gwUrl of gateways) {
+            try {
+              const ipfsRes = await fetchFn(gwUrl, {
+                headers: { Accept: "application/json, image/*, */*" },
+                signal: AbortSignal.timeout(4000),
+              });
+              if (!ipfsRes.ok) continue;
+              const contentType = (ipfsRes.headers.get("Content-Type") ?? "").toLowerCase();
+              if (contentType.startsWith("image/")) {
+                image = gwUrl;
+                break;
+              }
+              const len = Number(ipfsRes.headers.get("Content-Length") ?? "0");
+              if (Number.isFinite(len) && len > 65536) continue;
+              const text = await ipfsRes.text();
+              if (text.length > 65536) continue;
+              const meta = JSON.parse(text) as {
+                name?: unknown;
+                description?: unknown;
+                image?: unknown;
+                url?: unknown;
+              };
+              if (typeof meta.name === "string" && meta.name.trim()) {
+                name = meta.name.trim().slice(0, 120);
+              }
+              if (typeof meta.description === "string" && meta.description.trim()) {
+                description = meta.description.trim().slice(0, 280);
+              }
+              const rawImg =
+                typeof meta.image === "string"
+                  ? meta.image
+                  : typeof meta.url === "string"
+                    ? meta.url
+                    : "";
+              if (rawImg) {
+                image = normalizeIpfsUrl(rawImg);
+              }
+              break;
+            } catch {
+              continue;
+            }
+          }
+        }
+
+        if ((!image || !name) && homeDomain && isSafePublicDomain(homeDomain)) {
+          const tomlRes = await fetchSafeStellarToml(homeDomain, c.env.CACHE);
+          if (tomlRes.ok) {
+            const parsed = extractCurrencyFromToml(tomlRes.text, code, issuer);
+            name ??= parsed.name;
+            description ??= parsed.description;
+            image ??= parsed.image;
+          }
+        }
+
+        return {
+          code,
+          issuer,
+          ...(homeDomain ? { homeDomain } : {}),
+          ...(ipfsHash ? { ipfsHash } : {}),
+          ...(name ? { name } : {}),
+          ...(description ? { description } : {}),
+          ...(image ? { image } : {}),
+          resolved: Boolean(image || name),
+        };
+      },
+    });
   });
 
   router.get("/federation", async (c) => {

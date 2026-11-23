@@ -9,7 +9,7 @@ import { IconCheck, IconCopy } from "./Icons.js";
 type AccountDrawerMode = "seed_explorer" | "import_secret" | "derive_next";
 
 export function AccountSwitcher() {
-  const { hasEncryptedBackup, uploadEncryptedBackup } = useTelegram();
+  const { inTelegram, sessionToken, hasEncryptedBackup, uploadEncryptedBackup } = useTelegram();
   const {
     accounts,
     activeAccount,
@@ -45,12 +45,20 @@ export function AccountSwitcher() {
   }, [adding, mode, derivePublicKeyPreview]);
 
   const syncBackupIfEnabled = () => {
-    if (!hasEncryptedBackup) return;
+    if (!hasEncryptedBackup) {
+      if (inTelegram && sessionToken) {
+        showToast(
+          "Saved locally — enable Telegram Encrypted Sync in Accounts tab to sync across devices",
+          "info",
+        );
+      }
+      return;
+    }
     void exportAgVaultJson()
       .then((json) => uploadEncryptedBackup(json))
       .catch(() => {
         showToast(
-          "Saved locally — tap Re-Sync in Vault tab to update Telegram backup",
+          "Saved locally — tap Re-Sync in Accounts tab to update Telegram backup",
           "info",
         );
       });
@@ -121,18 +129,7 @@ export function AccountSwitcher() {
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 10, minWidth: 0 }}>
-      <div
-        style={{
-          display: "flex",
-          gap: 8,
-          overflowX: "auto",
-          paddingBottom: 4,
-          alignItems: "center",
-          maxWidth: "100%",
-          minWidth: 0,
-          scrollbarWidth: "none",
-        }}
-      >
+      <div className="aw-account-strip" role="region" aria-label="Accounts switcher">
         {accounts.map((acc) => {
           const isSelected = acc.address === activeAccount?.address;
           const imported = isImportedAccount(acc.address);
@@ -140,30 +137,24 @@ export function AccountSwitcher() {
             <button
               key={acc.id}
               type="button"
-              className="aw-chip-btn"
+              className="aw-account-pill"
               aria-pressed={isSelected}
               onClick={() => setActiveIndex(acc.derivationIndex ?? 0)}
-              style={{
-                display: "inline-flex",
-                alignItems: "center",
-                gap: 8,
-                whiteSpace: "nowrap",
-              }}
             >
               <AstroNavigatorAvatar
                 seedKey={acc.address}
                 kind={acc.kind}
                 state="float"
-                size={22}
+                size={24}
               />
-              <span>{acc.label}</span>
-              {imported && (
-                <span className="glass-pill glass-pill--gold" style={{ fontSize: 9, padding: "1px 5px" }}>
-                  IMPORTED
+              <span className="aw-account-pill-meta">
+                <span className="aw-account-pill-name-row">
+                  <span className="aw-account-pill-name">{acc.label}</span>
+                  {imported && <span className="aw-account-pill-tag">EXT</span>}
                 </span>
-              )}
-              <span style={{ opacity: 0.7, fontSize: 11 }}>
-                ({acc.address.slice(0, 4)}…{acc.address.slice(-4)})
+                <span className="aw-account-pill-addr">
+                  {acc.address.slice(0, 4)}…{acc.address.slice(-4)}
+                </span>
               </span>
             </button>
           );
@@ -171,16 +162,15 @@ export function AccountSwitcher() {
 
         <button
           type="button"
-          className="aw-chip-btn"
+          className="aw-account-pill aw-account-pill--add"
           aria-pressed={adding}
           onClick={() => {
             setAdding((v) => !v);
             setError(null);
             setSelectedSeedIdx(null);
           }}
-          style={{ whiteSpace: "nowrap" }}
         >
-          + Explore / Add Key
+          + Add / Explore
         </button>
       </div>
 

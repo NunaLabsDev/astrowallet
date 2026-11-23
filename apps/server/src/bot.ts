@@ -491,8 +491,9 @@ export function createTelegramBot(
       }
     }
 
-    await ctx.reply(formatAccountsSummary(accounts, config.network), {
+    await ctx.reply(formatAccountsSummary(accounts, config.network, config.tgBotUsername), {
       parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
       ...(accounts.some((a) => !a.isDefault) ? { reply_markup: keyboard } : {}),
     });
   });
@@ -516,8 +517,9 @@ export function createTelegramBot(
       }
     }
 
-    await ctx.editMessageText(formatAccountsSummary(updated, config.network), {
+    await ctx.editMessageText(formatAccountsSummary(updated, config.network, config.tgBotUsername), {
       parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
       ...(updated.some((a) => !a.isDefault) ? { reply_markup: keyboard } : {}),
     });
     await ctx.answerCallbackQuery({ text: "Default receiving account updated" });
@@ -546,8 +548,9 @@ export function createTelegramBot(
       }),
     );
 
-    await ctx.reply(formatBalancesSummary(entries, config.network), {
+    await ctx.reply(formatBalancesSummary(entries, config.network, config.tgBotUsername), {
       parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
     });
   });
 
@@ -943,8 +946,12 @@ export function createTelegramBot(
     }
 
     await ctx.reply(
-      formatReserveReportCard({ entries, network: config.network }),
-      { parse_mode: "HTML", reply_markup: keyboard },
+      formatReserveReportCard({ entries, network: config.network, botUsername: config.tgBotUsername }),
+      {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        reply_markup: keyboard,
+      },
     );
   });
 

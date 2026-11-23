@@ -220,6 +220,7 @@ export interface WalletContextValue {
     newPinOrPassphrase: string,
   ): Promise<{ envelopeJson: string }>;
   restoreAgVaultJson(rawJson: string, pinOrPassphrase: string): Promise<void>;
+  syncFromNewerCloudBackup(rawJson: string): Promise<"synced" | "pin_required" | "not_newer">;
   exportAgVaultJson(): Promise<string>;
   revealMnemonicWithPin(pinOrPassphrase: string): Promise<string>;
   verifyPinOrPassphrase(pinOrPassphrase: string): Promise<void>;
@@ -745,7 +746,14 @@ export function WalletProvider({
       return undefined;
     }
     const assetsToResolve = balances
-      .filter((b) => Boolean(b.assetIssuer) && !(b.assetCode === "XLM" && !b.assetIssuer))
+      .filter(
+        (b) =>
+          Boolean(b.assetIssuer) &&
+          !(b.assetCode === "XLM" && !b.assetIssuer) &&
+          b.balance.trim() !== "0.0000001" &&
+          Number(b.balance) > 0,
+      )
+      .slice(0, 30)
       .map((b) => {
         const matched = verifiedAssets.find(
           (v) =>
@@ -1476,9 +1484,48 @@ export function WalletProvider({
       setAccountMetaList(decrypted.accounts);
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setVaultStatus("unlocked");
+      void saveSessionLease(pinOrPassphrase);
       showToast("Encrypted .agvault restored locally");
     },
-    [cleanScopeId, showToast],
+    [cleanScopeId, saveSessionLease, showToast],
+  );
+
+  const syncFromNewerCloudBackup = useCallback(
+    async (rawJson: string): Promise<"synced" | "pin_required" | "not_newer"> => {
+      let envelope;
+      try {
+        envelope = parseAgVaultBackup(rawJson);
+      } catch {
+        return "not_newer";
+      }
+      if (envelope.updatedAt <= (localVaultUpdatedAt ?? 0) + 1) {
+        return "not_newer";
+      }
+      const lease = await loadValidSessionLease();
+      if (!lease) {
+        return "pin_required";
+      }
+      try {
+        const decrypted = await decryptVaultPayload(envelope, lease.pin, {
+          deriveKeyFn: deriveKeyInWorker,
+        });
+        await saveEncryptedVault(envelope, cleanScopeId);
+        setLocalVaultUpdatedAt(envelope.updatedAt);
+        sessionVault.set(decrypted.mnemonic);
+        for (const acc of decrypted.accounts) {
+          if (acc.importedSecret) {
+            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+          }
+        }
+        setAccountMetaList(decrypted.accounts);
+        setVaultStatus("unlocked");
+        showToast(`Synced ${decrypted.accounts.length} accounts from Telegram Cloud`);
+        return "synced";
+      } catch {
+        return "pin_required";
+      }
+    },
+    [cleanScopeId, loadValidSessionLease, localVaultUpdatedAt, showToast],
   );
 
   const exportAgVaultJson = useCallback(async () => {
@@ -1628,15 +1675,16 @@ export function WalletProvider({
       const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
         deriveKeyFn: deriveKeyInWorker,
       });
-      const existing = decrypted.accounts.find((acc) => acc.index === index);
-      if (existing) {
-        setActiveIndex(existing.index);
-        const linkedExisting = toLinkedAccounts([existing])[0];
+      const derived = deriveStellarAccount(decrypted.mnemonic, index);
+      const existingByAddr = decrypted.accounts.find((acc) => acc.address === derived.publicKey);
+      if (existingByAddr) {
+        derived.zeroize();
+        setActiveIndex(existingByAddr.index);
+        const linkedExisting = toLinkedAccounts([existingByAddr])[0];
         if (!linkedExisting) throw new Error("Failed to resolve existing account");
         return linkedExisting;
       }
 
-      const derived = deriveStellarAccount(decrypted.mnemonic, index);
       const cleanLabel = label.trim() || `Account #${index + 1}`;
       const nextMeta: VaultAccountMetadata = {
         index,
@@ -1645,7 +1693,20 @@ export function WalletProvider({
       };
       derived.zeroize();
 
-      const updatedAccounts = [...decrypted.accounts, nextMeta].sort((a, b) => a.index - b.index);
+      // Migrate any legacy imported external key that previously occupied this seed index to >= 1000
+      let maxImportedIdx = Math.max(
+        999,
+        decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1),
+      );
+      const migratedAccounts = decrypted.accounts.map((acc) => {
+        if (acc.index === index && acc.importedSecret) {
+          maxImportedIdx += 1;
+          return { ...acc, index: maxImportedIdx };
+        }
+        return acc;
+      });
+
+      const updatedAccounts = [...migratedAccounts, nextMeta].sort((a, b) => a.index - b.index);
       const updatedEnvelope = await encryptVaultPayload(
         {
           mnemonic: decrypted.mnemonic,
@@ -1695,7 +1756,10 @@ export function WalletProvider({
         }
 
         const nextIndex =
-          decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1) + 1;
+          Math.max(
+            999,
+            decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1),
+          ) + 1;
         const cleanLabel = label.trim() || `External #${nextIndex + 1}`;
         const nextMeta: VaultAccountMetadata = {
           index: nextIndex,
@@ -2418,6 +2482,7 @@ export function WalletProvider({
     createOrImportVault,
     reEncryptLocalVault,
     restoreAgVaultJson,
+    syncFromNewerCloudBackup,
     exportAgVaultJson,
     revealMnemonicWithPin,
     verifyPinOrPassphrase,

@@ -35,6 +35,7 @@ export interface IncomingPaymentEvent {
   amount: string;
   assetCode: string;
   assetIssuer?: string | undefined;
+  createdAt?: string | undefined;
 }
 
 export type TxVerificationResult =
@@ -112,6 +113,7 @@ interface HorizonOpRecordJson {
 interface HorizonPaymentRecordJson {
   paging_token?: string;
   transaction_hash?: string;
+  created_at?: string;
   type?: string;
   from?: string;
   to?: string;
@@ -632,6 +634,7 @@ export async function fetchIncomingPaymentsSince(
         ...(rec.asset_type !== "native" && rec.asset_issuer
           ? { assetIssuer: rec.asset_issuer }
           : {}),
+        ...(rec.created_at ? { createdAt: rec.created_at } : {}),
       });
     } else if (
       rec.type === "create_account" &&
@@ -646,9 +649,38 @@ export async function fetchIncomingPaymentsSince(
         to: rec.account,
         amount: rec.starting_balance,
         assetCode: "XLM",
+        ...(rec.created_at ? { createdAt: rec.created_at } : {}),
       });
     }
   }
 
   return events;
+}
+
+/**
+ * Fetches the newest payment/operation paging_token (`order=desc&limit=1`) so
+ * newly linked or stale-cursor accounts seed at HEAD instead of replaying history.
+ */
+export async function fetchLatestPaymentCursor(
+  config: Pick<ServerConfig, "horizonUrls">,
+  address: string,
+  fetchFn: FetchLike = fetch,
+): Promise<string> {
+  const query = new URLSearchParams({
+    order: "desc",
+    limit: "1",
+  });
+  const response = await fetchFromHorizonFailover(
+    config.horizonUrls,
+    `/accounts/${encodeURIComponent(address)}/payments?${query.toString()}`,
+    fetchFn,
+  );
+  if (response.status === 404) {
+    return "empty_init";
+  }
+  const payload = (await response.json()) as {
+    _embedded?: { records?: HorizonPaymentRecordJson[] };
+  };
+  const latest = payload._embedded?.records?.[0]?.paging_token;
+  return latest && latest.length > 0 ? latest : "empty_init";
 }

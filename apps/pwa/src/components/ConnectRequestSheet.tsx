@@ -8,7 +8,10 @@ import type {
 } from "@astrowallet/domain";
 import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
-import { getTelegramWebApp, triggerTelegramHaptic } from "../telegram/webapp.js";
+import {
+  openTelegramMiniAppLink,
+  triggerTelegramHaptic,
+} from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
 import { requiresHighValueReauth } from "./flow-validators.js";
@@ -358,7 +361,7 @@ export function ConnectRequestSheet({
     if (!completedMsg || autoReturnCancelled) return undefined;
     const statusToSend = completedStatus ?? "approved";
     if (typeof window !== "undefined" && window.opener && !window.opener.closed) {
-      let targetOrigin = "*";
+      let targetOrigin: string | null = null;
       try {
         if (request?.app.origin) {
           targetOrigin = new URL(request.app.origin).origin;
@@ -366,20 +369,22 @@ export function ConnectRequestSheet({
           targetOrigin = new URL(document.referrer).origin;
         }
       } catch {
-        targetOrigin = "*";
+        targetOrigin = null;
       }
-      try {
-        window.opener.postMessage(
-          {
-            type: "ASTRO_SIGN_COMPLETE",
-            status: statusToSend,
-            requestId: route.requestId,
-            txHash: statusToSend === "approved" ? completedTxHash : null,
-          },
-          targetOrigin,
-        );
-      } catch {
-        // Ignore postMessage error
+      if (targetOrigin) {
+        try {
+          window.opener.postMessage(
+            {
+              type: "ASTRO_SIGN_COMPLETE",
+              status: statusToSend,
+              requestId: route.requestId,
+              txHash: statusToSend === "approved" ? completedTxHash : null,
+            },
+            targetOrigin,
+          );
+        } catch {
+          // Ignore postMessage error
+        }
       }
       const timer = window.setTimeout(() => {
         window.close();
@@ -404,12 +409,7 @@ export function ConnectRequestSheet({
   ]);
 
   const openBoomerang = (url: string) => {
-    const wa = getTelegramWebApp();
-    if (wa?.openTelegramLink) {
-      wa.openTelegramLink(url);
-      return;
-    }
-    window.open(url, "_blank", "noopener,noreferrer");
+    openTelegramMiniAppLink(url);
   };
 
   return (
@@ -662,6 +662,7 @@ export function ConnectRequestSheet({
                   className="aw-btn-primary"
                   disabled={
                     busy ||
+                    scanningXdr ||
                     vaultStatus !== "unlocked" ||
                     !activeAccount ||
                     (request.action === "sign_xdr" &&

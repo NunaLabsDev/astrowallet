@@ -24,6 +24,7 @@ import {
   verifyConnectSignature,
 } from "@astrowallet/tg-protocol";
 import type { KVNamespace } from "@cloudflare/workers-types";
+import { FeeBumpTransaction, Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
 import { Hono } from "hono";
 import { constantTimeEqual, sha256Hex } from "../lib/crypto-utils.js";
 import { z } from "zod";
@@ -504,6 +505,19 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
       if (!xdrPayload) {
         return c.json({ error: "Corrupted sign_xdr payload" }, 500);
       }
+      let expectedUnsignedHashHex: string | null = null;
+      try {
+        const parsedUnsigned = TransactionBuilder.fromXDR(
+          xdrPayload.unsignedXdr,
+          config.networkPassphrase,
+        );
+        expectedUnsignedHashHex = Buffer.from(parsedUnsigned.hash())
+          .toString("hex")
+          .toLowerCase();
+      } catch {
+        return c.json({ error: "Invalid stored unsignedXdr" }, 500);
+      }
+
       const shouldSubmit = xdrPayload.submit !== false;
       if (shouldSubmit) {
         if (!body.txHash) {
@@ -515,6 +529,7 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
         const txCheck = await verifyFn(config, body.txHash, {
           minCreatedAtUnix: record.createdAt,
           allowSorobanRpcFallback: true,
+          ...(expectedUnsignedHashHex ? { expectedTxHash: expectedUnsignedHashHex } : {}),
           ...(body.address ? { expectedSourceAccount: body.address } : {}),
         });
         if (!txCheck.confirmed) {
@@ -536,6 +551,33 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
       } else {
         if (!body.signedXdr) {
           return c.json({ error: "signedXdr is required when submit=false" }, 400);
+        }
+        try {
+          const parsedSigned = TransactionBuilder.fromXDR(
+            body.signedXdr,
+            config.networkPassphrase,
+          );
+          const signedInnerHash =
+            parsedSigned instanceof FeeBumpTransaction
+              ? Buffer.from(parsedSigned.innerTransaction.hash()).toString("hex").toLowerCase()
+              : Buffer.from(parsedSigned.hash()).toString("hex").toLowerCase();
+          if (signedInnerHash !== expectedUnsignedHashHex) {
+            return c.json({ error: "signedXdr does not match requested unsignedXdr" }, 400);
+          }
+          if (body.address) {
+            const kp = Keypair.fromPublicKey(body.address);
+            const sigMatch = parsedSigned.signatures.some((decSig) =>
+              kp.verify(
+                Buffer.from(parsedSigned.hash()),
+                decSig.signature as unknown as Buffer,
+              ),
+            );
+            if (!sigMatch) {
+              return c.json({ error: "signedXdr lacks valid signature from signer address" }, 400);
+            }
+          }
+        } catch {
+          return c.json({ error: "Invalid signedXdr envelope" }, 400);
         }
         resultPayload = ConnectResultSchema.parse({
           status: "approved",

@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   NEAR_STELLAR_USDC_ASSET_ID,
   NEAR_STELLAR_XLM_ASSET_ID,
@@ -12,18 +12,46 @@ import {
 } from "@astrowallet/defi";
 import { ContractAddressSchema } from "@astrowallet/domain";
 import { useWallet } from "../state/wallet-context.js";
-import { copyTextToClipboard } from "../telegram/webapp.js";
+import { copyTextToClipboard, openExternalUrl } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 
 type RampTab = "cash" | "any_chain" | "pro_bridge";
 
 const NEAR_ORIGIN_ASSETS = [
-  { id: "nep141:btc.omft.near", label: "Bitcoin (BTC)" },
-  { id: "nep141:eth.omft.near", label: "Ethereum (ETH)" },
-  { id: "nep141:sol.omft.near", label: "Solana (SOL)" },
-  { id: "nep141:ton.omft.near", label: "TON (TON)" },
-  { id: NEAR_STELLAR_USDC_ASSET_ID, label: "Stellar USDC (Origin -> Cross-Chain)" },
+  { id: "nep141:btc.omft.near", label: "Bitcoin (BTC)", decimals: 8 },
+  { id: "nep141:eth.omft.near", label: "Ethereum (ETH)", decimals: 18 },
+  { id: "nep141:sol.omft.near", label: "Solana (SOL)", decimals: 9 },
+  { id: "nep141:ton.omft.near", label: "TON (TON)", decimals: 9 },
+  { id: NEAR_STELLAR_USDC_ASSET_ID, label: "Stellar USDC (Origin -> Cross-Chain)", decimals: 7 },
 ] as const;
+
+function decimalToAtomicString(decimalInput: string, decimals: number): string {
+  const clean = decimalInput.trim();
+  if (!/^\d+(?:\.\d+)?$/.test(clean)) {
+    throw new Error("Enter a valid positive decimal amount");
+  }
+  const [wholePart = "0", fracPart = ""] = clean.split(".");
+  if (fracPart.length > decimals) {
+    throw new Error(`Maximum ${decimals} decimal places supported for this asset`);
+  }
+  const paddedFrac = fracPart.padEnd(decimals, "0");
+  const combined = `${wholePart}${paddedFrac}`.replace(/^0+/, "");
+  if (!combined) {
+    throw new Error("Amount must be greater than 0");
+  }
+  return combined;
+}
+
+async function readJsonSafe<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      res.ok ? "Anchor returned non-JSON response" : `Anchor HTTP ${res.status}`,
+    );
+  }
+}
 
 const NEAR_DEST_ASSETS = [
   { id: NEAR_STELLAR_USDC_ASSET_ID, label: "Stellar USDC" },
@@ -56,11 +84,21 @@ export function RampSheet() {
   // NEAR Intents 1-Click state
   const [originAsset, setOriginAsset] = useState<string>(NEAR_ORIGIN_ASSETS[0].id);
   const [destAsset, setDestAsset] = useState<string>(NEAR_DEST_ASSETS[0].id);
-  const [nearAmountAtomic, setNearAmountAtomic] = useState("1000000");
+  const [nearAmountDecimal, setNearAmountDecimal] = useState("0.01");
   const [nearBusy, setNearBusy] = useState(false);
   const [nearQuote, setNearQuote] = useState<NearIntentsQuoteResult | null>(null);
+  const [nearLockedQuote, setNearLockedQuote] = useState<NearIntentsQuoteResult | null>(null);
   const [nearError, setNearError] = useState<string | null>(null);
   const [copiedAddr, setCopiedAddr] = useState(false);
+
+  useEffect(() => {
+    setAnchorDomain(
+      config.moneygramAnchorDomain ??
+        (config.network === "mainnet" ? "stellar.moneygram.com" : "extstellar.moneygram.com"),
+    );
+    setCashSessionUrl(null);
+    setCashError(null);
+  }, [config.network, config.moneygramAnchorDomain]);
 
   // Pro Bridge (CCTP + OFT) state
   const [direction, setDirection] = useState<"onramp" | "offramp">("onramp");
@@ -122,13 +160,23 @@ export function RampSheet() {
     setCashError(null);
     setCashSessionUrl(null);
     try {
+      if (accountState?.funded) {
+        const hasUsdcTrustline = accountState.balances.some(
+          (b) => b.assetCode.toUpperCase() === "USDC" && Boolean(b.assetIssuer),
+        );
+        if (!hasUsdcTrustline) {
+          throw new Error(
+            "Activate a USDC trustline first before starting MoneyGram SEP-24 Cash-In/Out.",
+          );
+        }
+      }
       const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
       const cleanDomain = anchorDomain.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
       const chRes = await fetch(
         `${apiBase}/v1/proxy/sep10/challenge?domain=${encodeURIComponent(cleanDomain)}&account=${encodeURIComponent(activeAccount.address)}`,
         { headers: { "X-Astro-Network": config.network } },
       );
-      const chJson = (await chRes.json()) as { transaction?: string; error?: string };
+      const chJson = await readJsonSafe<{ transaction?: string; error?: string }>(chRes);
       if (!chRes.ok || !chJson.transaction) {
         throw new Error(chJson.error ?? "Failed to fetch MoneyGram SEP-10 challenge");
       }
@@ -142,7 +190,7 @@ export function RampSheet() {
         },
         body: JSON.stringify({ domain: cleanDomain, transaction: signedXdr }),
       });
-      const tokJson = (await tokRes.json()) as { token?: string; error?: string };
+      const tokJson = await readJsonSafe<{ token?: string; error?: string }>(tokRes);
       if (!tokRes.ok || !tokJson.token) {
         throw new Error(tokJson.error ?? "MoneyGram SEP-10 authentication failed");
       }
@@ -162,7 +210,7 @@ export function RampSheet() {
           account: activeAccount.address,
         }),
       });
-      const sep24Json = (await sep24Res.json()) as { url?: string; error?: string };
+      const sep24Json = await readJsonSafe<{ url?: string; error?: string }>(sep24Res);
       if (!sep24Res.ok || !sep24Json.url || !sep24Json.url.startsWith("https://")) {
         throw new Error(sep24Json.error ?? "MoneyGram SEP-24 interactive session failed");
       }
@@ -174,29 +222,44 @@ export function RampSheet() {
     }
   };
 
-  const handleNearDryQuote = async (e: FormEvent) => {
-    e.preventDefault();
+  const requestNearQuote = async (dry: boolean) => {
     setNearBusy(true);
     setNearError(null);
-    setNearQuote(null);
+    if (dry) {
+      setNearQuote(null);
+      setNearLockedQuote(null);
+    } else {
+      setNearLockedQuote(null);
+    }
     try {
+      const originMeta = NEAR_ORIGIN_ASSETS.find((a) => a.id === originAsset);
+      const amountAtomic = decimalToAtomicString(nearAmountDecimal, originMeta?.decimals ?? 8);
       const adapter = createNearIntentsQuoteAdapter({
         apiBaseUrl: config.nearIntentsApiBase,
       });
       const q = await adapter.requestQuote({
         originAsset,
         destinationAsset: destAsset,
-        amountAtomic: nearAmountAtomic.trim(),
+        amountAtomic,
         recipient: activeAccount.address,
         refundTo: activeAccount.address,
-        dry: true,
+        dry,
       });
-      setNearQuote(q);
+      if (dry) {
+        setNearQuote(q);
+      } else {
+        setNearLockedQuote(q);
+      }
     } catch (err) {
       setNearError(err instanceof Error ? err.message : "Failed to fetch NEAR Intents quote");
     } finally {
       setNearBusy(false);
     }
+  };
+
+  const handleNearDryQuote = async (e: FormEvent) => {
+    e.preventDefault();
+    await requestNearQuote(true);
   };
 
   const handleBuildPreview = async (e: FormEvent) => {
@@ -355,15 +418,13 @@ export function RampSheet() {
             <div className="aw-banner" style={{ display: "grid", gap: 6, fontSize: 12 }}>
               <strong>Validated SEP-24 Interactive Session:</strong>
               <code style={{ wordBreak: "break-all" }}>{cashSessionUrl}</code>
-              <a
-                href={cashSessionUrl}
-                target="_blank"
-                rel="noopener noreferrer"
+              <button
+                type="button"
                 className="aw-btn-secondary"
-                style={{ textAlign: "center", textDecoration: "none" }}
+                onClick={() => openExternalUrl(cashSessionUrl)}
               >
-                Open Anchor Checkout
-              </a>
+                Open Anchor Checkout ↗
+              </button>
             </div>
           )}
         </form>
@@ -414,15 +475,19 @@ export function RampSheet() {
 
           <div>
             <label className="aw-label" htmlFor="near-amt">
-              Input Amount (Atomic Units)
+              Input Amount (Decimal)
             </label>
             <input
               id="near-amt"
               type="text"
-              inputMode="numeric"
+              inputMode="decimal"
               className="aw-input tabular-nums"
-              value={nearAmountAtomic}
-              onChange={(e) => setNearAmountAtomic(e.target.value)}
+              value={nearAmountDecimal}
+              onChange={(e) => {
+                setNearAmountDecimal(e.target.value);
+                setNearQuote(null);
+                setNearLockedQuote(null);
+              }}
             />
           </div>
 
@@ -431,30 +496,52 @@ export function RampSheet() {
           </button>
 
           {nearError && <div className="aw-banner aw-banner--danger">{nearError}</div>}
-          {nearQuote && (
-            <div className="aw-banner" style={{ display: "grid", gap: 6, fontSize: 12 }}>
-              <strong>Dry Quote Ready ({nearQuote.amountOutFormatted ?? nearQuote.minAmountOut ?? "est."})</strong>
-              <div style={{ wordBreak: "break-all" }}>
-                <strong>Deposit Address:</strong> <code>{nearQuote.depositAddress}</code>
-              </div>
-              {nearQuote.depositMemo && (
-                <div className="aw-banner aw-banner--warn" style={{ margin: 0 }}>
-                  <strong>REQUIRED MEMO:</strong> <code>{nearQuote.depositMemo}</code> — Never send without this memo.
-                </div>
-              )}
+          {nearQuote && !nearLockedQuote && (
+            <div className="aw-banner" style={{ display: "grid", gap: 8, fontSize: 12 }}>
+              <strong>
+                Dry Quote Preview ({nearQuote.amountOutFormatted ?? nearQuote.minAmountOut ?? "est."})
+              </strong>
+              <span style={{ color: "var(--aw-ink-secondary)" }}>
+                Refund address: <code>{activeAccount.address.slice(0, 8)}…{activeAccount.address.slice(-6)}</code>
+              </span>
               <button
                 type="button"
-                className="aw-btn-secondary"
-                onClick={async () => {
-                  const ok = await copyTextToClipboard(nearQuote.depositAddress);
-                  if (ok) {
-                    setCopiedAddr(true);
-                    setTimeout(() => setCopiedAddr(false), 1800);
-                  }
-                }}
+                className="aw-btn-gold"
+                disabled={nearBusy}
+                onClick={() => void requestNearQuote(false)}
               >
-                {copiedAddr ? "Copied Deposit Address" : "Copy Deposit Address"}
+                {nearBusy ? "Locking Deposit Address..." : "Lock Deposit Address (Live)"}
               </button>
+            </div>
+          )}
+          {nearLockedQuote && (
+            <div className="aw-banner" style={{ display: "grid", gap: 6, fontSize: 12 }}>
+              <strong>
+                Live Deposit Ready ({nearLockedQuote.amountOutFormatted ?? nearLockedQuote.minAmountOut ?? "est."})
+              </strong>
+              <div style={{ wordBreak: "break-all" }}>
+                <strong>Deposit Address:</strong> <code>{nearLockedQuote.depositAddress}</code>
+              </div>
+              {nearLockedQuote.depositMemo && (
+                <div className="aw-banner aw-banner--warn" style={{ margin: 0 }}>
+                  <strong>REQUIRED MEMO:</strong> <code>{nearLockedQuote.depositMemo}</code> — Never send without this memo.
+                </div>
+              )}
+              {nearLockedQuote.depositAddress && (
+                <button
+                  type="button"
+                  className="aw-btn-secondary"
+                  onClick={async () => {
+                    const ok = await copyTextToClipboard(nearLockedQuote.depositAddress!);
+                    if (ok) {
+                      setCopiedAddr(true);
+                      setTimeout(() => setCopiedAddr(false), 1800);
+                    }
+                  }}
+                >
+                  {copiedAddr ? "Copied Deposit Address" : "Copy Deposit Address"}
+                </button>
+              )}
             </div>
           )}
         </form>

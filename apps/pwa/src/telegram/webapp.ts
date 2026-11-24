@@ -99,7 +99,10 @@ export interface TelegramWebAppInstance {
   enableClosingConfirmation?(): void;
   disableClosingConfirmation?(): void;
   disableVerticalSwipes?(): void;
+  openLink?(url: string): void;
   openTelegramLink?(url: string): void;
+  showScanQrPopup?(params: { text?: string }, callback?: (text: string) => boolean | void): void;
+  closeScanQrPopup?(): void;
   onEvent?(eventType: string, cb: () => void): void;
   BackButton?: TelegramBackButton;
   HapticFeedback?: TelegramHapticFeedback;
@@ -653,6 +656,69 @@ export function tgCloudStorageRemove(key: string): Promise<boolean> {
         globalThis.clearTimeout(timer);
         resolve(false);
       }
+    }
+  });
+}
+
+
+export function openExternalUrl(url: string): void {
+  const trimmed = url.trim();
+  if (!trimmed) return;
+  const wa = getTelegramWebApp();
+  if (wa?.openLink) {
+    try {
+      wa.openLink(trimmed);
+      return;
+    } catch {
+      // fall back to window.open
+    }
+  }
+  window.open(trimmed, "_blank", "noopener,noreferrer");
+}
+
+export function openTelegramMiniAppLink(url: string): void {
+  const trimmed = url.trim();
+  if (!trimmed) return;
+  const wa = getTelegramWebApp();
+  if (trimmed.startsWith("https://t.me/") && wa?.openTelegramLink) {
+    try {
+      wa.openTelegramLink(trimmed);
+      return;
+    } catch {
+      // fall back
+    }
+  }
+  openExternalUrl(trimmed);
+}
+
+export function openTelegramQrScanner(promptText: string): Promise<string | null> {
+  const wa = getTelegramWebApp();
+  const showScanQrPopup = wa?.showScanQrPopup;
+  if (!showScanQrPopup) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: string | null) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    try {
+      showScanQrPopup({ text: promptText }, (data) => {
+        const scanned = typeof data === "string" ? data.trim() : "";
+        if (!scanned) {
+          finish(null);
+          return true;
+        }
+        try {
+          wa.closeScanQrPopup?.();
+        } catch {
+          // ignore
+        }
+        finish(scanned);
+        return true;
+      });
+    } catch {
+      finish(null);
     }
   });
 }

@@ -46,6 +46,13 @@ export function TonWalletSheet({
   const [txHash, setTxHash] = useState<string | null>(null);
 
   useEffect(() => {
+    setReviewPending(null);
+    setErrorMsg(null);
+    setTxHash(null);
+    setShowQr(false);
+  }, [tonAccount?.friendlyAddress]);
+
+  useEffect(() => {
     let cancelled = false;
     if (!showQr || !tonAccount) {
       setQrDataUrl(null);

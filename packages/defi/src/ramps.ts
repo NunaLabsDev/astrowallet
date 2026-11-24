@@ -154,22 +154,22 @@ export function createNearIntentsQuoteAdapter(input: {
       };
 
       const q = json.quote;
-      if (!q?.depositAddress) {
+      if (!(req.dry ?? true) && !q?.depositAddress) {
         throw new Error("NEAR Intents response missing depositAddress");
       }
-      if (isStellarOrigin && !q.depositMemo) {
+      if (!(req.dry ?? true) && isStellarOrigin && !q?.depositMemo) {
         throw new Error(
           "NEAR Intents Stellar-origin quote missing required depositMemo — aborting to prevent uncredited deposit",
         );
       }
 
       return {
-        depositAddress: q.depositAddress,
-        depositMemo: q.depositMemo,
-        amountInFormatted: q.amountInFormatted,
-        amountOutFormatted: q.amountOutFormatted,
-        minAmountOut: q.minAmountOut,
-        timeEstimateSeconds: q.timeEstimate,
+        depositAddress: q?.depositAddress ?? "",
+        depositMemo: q?.depositMemo,
+        amountInFormatted: q?.amountInFormatted,
+        amountOutFormatted: q?.amountOutFormatted,
+        minAmountOut: q?.minAmountOut,
+        timeEstimateSeconds: q?.timeEstimate,
         dry: req.dry ?? true,
       };
     },

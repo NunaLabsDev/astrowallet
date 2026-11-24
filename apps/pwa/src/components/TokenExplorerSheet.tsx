@@ -20,7 +20,11 @@ import {
   type TokenLiquidityPoolEntry,
 } from "../state/market-cache.js";
 import { useWallet } from "../state/wallet-context.js";
-import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
+import {
+  copyTextToClipboard,
+  openTelegramMiniAppLink,
+  triggerTelegramHaptic,
+} from "../telegram/webapp.js";
 import {
   IconChart,
   IconCheck,
@@ -195,6 +199,11 @@ export function TokenExplorerSheet({
 
     let cancelled = false;
     setDetailError(null);
+    setDetails(null);
+    setOrderbook(null);
+    setRecentTrades([]);
+    setHolders([]);
+    setLiquidityPools([]);
 
     const isNativeXlm =
       selectedToken.assetCode.trim().toUpperCase() === "XLM" && !selectedToken.assetIssuer;
@@ -202,8 +211,9 @@ export function TokenExplorerSheet({
     const cacheKey = `token:${config.network}:${selectedToken.assetCode}:${selectedToken.assetIssuer ?? "native"}:${counterAsset?.code ?? "XLM"}`;
 
     let hasWarmCache = false;
+    let liveSettled = false;
     void readCachedEntry<TokenBundleResult>(cacheKey, 24 * 60 * 60 * 1000).then((hit) => {
-      if (cancelled) return;
+      if (cancelled || liveSettled) return;
       if (hit) {
         hasWarmCache = true;
         setDetails(hit.data.details);
@@ -228,6 +238,7 @@ export function TokenExplorerSheet({
     })
       .then((bundle) => {
         if (cancelled) return;
+        liveSettled = true;
         setDetails(bundle.details);
         setOrderbook(bundle.orderbook);
         setRecentTrades(bundle.recentTrades);
@@ -782,24 +793,29 @@ export function TokenExplorerSheet({
           )}
 
           {config.astrodexBotUsername && (
-            <a
-              href={`${
-                config.astrodexMiniAppShortName
+            <button
+              type="button"
+              className="aw-btn-primary"
+              style={{
+                gridColumn: "1 / -1",
+                background: "linear-gradient(135deg, #6366f1 0%, #8b5cf6 100%)",
+              }}
+              onClick={() => {
+                triggerTelegramHaptic("selection");
+                const base = config.astrodexMiniAppShortName
                   ? `https://t.me/${config.astrodexBotUsername}/${config.astrodexMiniAppShortName}`
-                  : `https://t.me/${config.astrodexBotUsername}`
-              }?startapp=${encodeURIComponent(
-                `${config.network}_token_${
+                  : `https://t.me/${config.astrodexBotUsername}`;
+                const param = `${config.network}_token_${
                   selectedToken.assetIssuer
                     ? `${selectedToken.assetCode}_${selectedToken.assetIssuer}`
                     : selectedToken.assetCode
-                }`,
-              )}`}
-              className="aw-btn-secondary"
-              style={{ textDecoration: "none" }}
+                }`;
+                openTelegramMiniAppLink(`${base}?startapp=${encodeURIComponent(param)}`);
+              }}
             >
               <IconChart size={15} />
-              <span>Pro Chart &amp; Scan on AstroDex</span>
-            </a>
+              <span>Open Pro Chart &amp; Orderbook in AstroDex ↗</span>
+            </button>
           )}
         </div>
       </div>

@@ -21,6 +21,8 @@ import { fetchCachedLiquidAssets, readCachedEntry } from "../state/market-cache.
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import { requiresHighValueReauth } from "./flow-validators.js";
+import { HighValueReauthGate } from "./HighValueReauthGate.js";
 import {
   IconChart,
   IconCheck,
@@ -237,11 +239,13 @@ export function SwapSheet({
   const [quote, setQuote] = useState<SwapQuote | null>(null);
   const [txHash, setTxHash] = useState<string | null>(null);
   const [copiedHash, setCopiedHash] = useState(false);
+  const [reauthVerified, setReauthVerified] = useState(false);
 
   const [fromDetails, setFromDetails] = useState<StellarTokenDetails | null>(null);
   const [toDetails, setToDetails] = useState<StellarTokenDetails | null>(null);
 
   const quoteSeqRef = useRef(0);
+  const submittingRef = useRef(false);
   const autoPickedToRef = useRef(Boolean(initialToAsset));
 
   const balances = accountState?.balances ?? [];
@@ -542,7 +546,19 @@ export function SwapSheet({
   };
 
   const handleExecuteSwap = async () => {
-    if (!quote || !activeAccount || hasScamSpoof) return;
+    if (!quote || !activeAccount || hasScamSpoof || submittingRef.current) return;
+    const reauthCheck = requiresHighValueReauth({
+      amount: quote.inputAmount,
+      assetCode: fromParsed?.code ?? "XLM",
+      spendableBalance: Number(fromHolding?.balance ?? 0),
+      thresholdXlm: config.highValueReauthXlm,
+      network: config.network,
+    });
+    if (reauthCheck.required && !reauthVerified) {
+      setError(reauthCheck.reason ?? "Complete high-value re-authentication first.");
+      return;
+    }
+    submittingRef.current = true;
     setExecuting(true);
     setSwapPhase(null);
     setError(null);
@@ -614,8 +630,12 @@ export function SwapSheet({
         );
       }
 
+      const freshMin = calculateMinReceivedStroops7(
+        freshQuote.expectedOutputAmount,
+        slippageBps,
+      );
       const liveDestMin = stroops7ToDecimal(
-        calculateMinReceivedStroops7(freshQuote.expectedOutputAmount, slippageBps),
+        freshMin > minBaselineStroops ? freshMin : minBaselineStroops,
       );
       const res = await executePathSwap({
         sendAssetCode: sendParsed.code,
@@ -632,6 +652,7 @@ export function SwapSheet({
       triggerTelegramHaptic("error");
       setError(err instanceof Error ? err.message : "Swap execution failed");
     } finally {
+      submittingRef.current = false;
       setExecuting(false);
       setSwapPhase(null);
     }
@@ -904,7 +925,11 @@ export function SwapSheet({
                 type="button"
                 className="aw-chip-btn"
                 aria-pressed={slippageBps === opt.bps}
-                onClick={() => setSlippageBps(opt.bps)}
+                onClick={() => {
+                  setSlippageBps(opt.bps);
+                  setQuote(null);
+                  setReauthVerified(false);
+                }}
               >
                 {opt.label}
               </button>
@@ -1001,10 +1026,39 @@ export function SwapSheet({
               </div>
             )}
 
+            {(() => {
+              const gate = requiresHighValueReauth({
+                amount: quote.inputAmount,
+                assetCode: fromParsed?.code ?? "XLM",
+                spendableBalance: Number(fromHolding?.balance ?? 0),
+                thresholdXlm: config.highValueReauthXlm,
+                network: config.network,
+              });
+              if (!gate.required) return null;
+              return (
+                <HighValueReauthGate
+                  reason={gate.reason ?? "High-value swap requires PIN or Biometric confirmation."}
+                  verified={reauthVerified}
+                  onVerified={() => setReauthVerified(true)}
+                />
+              );
+            })()}
+
             <button
               type="button"
               className="aw-btn-primary"
-              disabled={executing || hasScamSpoof}
+              disabled={
+                executing ||
+                hasScamSpoof ||
+                (requiresHighValueReauth({
+                  amount: quote.inputAmount,
+                  assetCode: fromParsed?.code ?? "XLM",
+                  spendableBalance: Number(fromHolding?.balance ?? 0),
+                  thresholdXlm: config.highValueReauthXlm,
+                  network: config.network,
+                }).required &&
+                  !reauthVerified)
+              }
               onClick={() => void handleExecuteSwap()}
             >
               <IconZap size={16} />

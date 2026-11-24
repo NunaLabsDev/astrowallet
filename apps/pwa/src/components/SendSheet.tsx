@@ -10,7 +10,12 @@ import {
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
 import { mapSep7MemoKind } from "../state/session-vault.js";
-import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
+import {
+  copyTextToClipboard,
+  getTelegramWebApp,
+  openTelegramQrScanner,
+  triggerTelegramHaptic,
+} from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import {
   requiresHighValueReauth,
@@ -119,6 +124,7 @@ export function SendSheet({
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [reviewPending, setReviewPending] = useState<PendingStellarReview | null>(null);
   const [reauthVerified, setReauthVerified] = useState(false);
@@ -177,11 +183,11 @@ export function SendSheet({
 
   // Live pre-send Scan & Shield check on valid destination strkeys
   useEffect(() => {
+    setDestShieldReport(null);
+    setScanningDest(false);
     const trimmed = destination.trim();
     const parsed = StellarAddressSchema.safeParse(trimmed);
     if (!parsed.success) {
-      setDestShieldReport(null);
-      setScanningDest(false);
       return;
     }
 
@@ -305,14 +311,20 @@ export function SendSheet({
         const parsed = parseSep7Uri(trimmed);
         if (parsed.destination) setDestination(parsed.destination);
         if (parsed.amount) setAmount(parsed.amount);
-        if (parsed.assetCode && parsed.assetIssuer) {
-          const match = availableAssets.find(
-            (b) =>
-              b.assetCode.toUpperCase() === parsed.assetCode?.toUpperCase() &&
-              b.assetIssuer === parsed.assetIssuer,
-          );
-          if (match) {
-            setSelectedAssetKey(assetKeyOf(match.assetCode, match.assetIssuer));
+        if (parsed.assetCode) {
+          const isNativeParsed =
+            parsed.assetCode.toUpperCase() === "XLM" && !parsed.assetIssuer;
+          if (isNativeParsed) {
+            setSelectedAssetKey(assetKeyOf("XLM", undefined));
+          } else if (parsed.assetIssuer) {
+            const match = availableAssets.find(
+              (b) =>
+                b.assetCode.toUpperCase() === parsed.assetCode?.toUpperCase() &&
+                b.assetIssuer === parsed.assetIssuer,
+            );
+            if (match) {
+              setSelectedAssetKey(assetKeyOf(match.assetCode, match.assetIssuer));
+            }
           }
         }
         if (parsed.memo) {
@@ -330,11 +342,29 @@ export function SendSheet({
 
   const handleResolveFederation = async () => {
     const clean = destination.trim();
-    if (!clean.includes("*")) return;
+    if (!clean.includes("*") && !clean.startsWith("@")) return;
     setResolvingFed(true);
     setError(null);
     try {
       const base = config.apiBaseUrl.replace(/\/+$/, "");
+      if (clean.startsWith("@")) {
+        const res = await fetch(
+          `${base}/v1/identity/resolve?q=${encodeURIComponent(clean)}`,
+          { headers: { "X-Astro-Network": config.network } },
+        );
+        const rec = (await res.json()) as {
+          found?: boolean;
+          defaultAddress?: string;
+          addresses?: Array<{ address: string }>;
+          error?: string;
+        };
+        const resolvedAddr = rec.defaultAddress ?? rec.addresses?.[0]?.address;
+        if (!res.ok || !resolvedAddr) {
+          throw new Error(rec.error ?? `No public AstroID address found for ${clean}`);
+        }
+        setDestination(resolvedAddr);
+        return;
+      }
       const res = await fetch(
         `${base}/v1/proxy/federation?q=${encodeURIComponent(clean)}`,
         { headers: { "X-Astro-Network": config.network } },
@@ -462,7 +492,8 @@ export function SendSheet({
   };
 
   const handleConfirmBroadcast = async () => {
-    if (!reviewPending) return;
+    if (!reviewPending || submittingRef.current) return;
+    submittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -491,6 +522,7 @@ export function SendSheet({
       triggerTelegramHaptic("error");
       setError(err instanceof Error ? err.message : "Transaction failed");
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };
@@ -772,6 +804,18 @@ export function SendSheet({
                 className="aw-chip-btn"
                 onClick={() => {
                   setQrMessage(null);
+                  const wa = getTelegramWebApp();
+                  if (wa?.showScanQrPopup) {
+                    void openTelegramQrScanner(
+                      "Scan a Stellar G... address or web+stellar:pay URI",
+                    ).then((scanned) => {
+                      if (scanned) {
+                        applyIncomingUriOrAddress(scanned);
+                        triggerTelegramHaptic("selection");
+                      }
+                    });
+                    return;
+                  }
                   setQrOpen((v) => !v);
                 }}
               >
@@ -784,7 +828,7 @@ export function SendSheet({
               id="send-dest-input"
               type="text"
               className="aw-input"
-              placeholder="G..., M..., name*domain.com, or web+stellar:pay?..."
+              placeholder="G..., M..., @username, name*domain.com, or web+stellar:pay?..."
               value={destination}
               onChange={(e) => applyIncomingUriOrAddress(e.target.value)}
             />
@@ -795,7 +839,7 @@ export function SendSheet({
               </div>
             )}
 
-            {destination.includes("*") && (
+            {(destination.includes("*") || destination.trim().startsWith("@")) && (
               <button
                 type="button"
                 className="aw-chip-btn"
@@ -803,7 +847,11 @@ export function SendSheet({
                 disabled={resolvingFed}
                 onClick={() => void handleResolveFederation()}
               >
-                {resolvingFed ? "Resolving Federation..." : "Resolve SEP-0002 Federation Address"}
+                {resolvingFed
+                  ? "Resolving..."
+                  : destination.trim().startsWith("@")
+                    ? "Resolve @username via AstroID"
+                    : "Resolve SEP-0002 Federation Address"}
               </button>
             )}
 

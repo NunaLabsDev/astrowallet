@@ -13,7 +13,11 @@ import type {
 } from "@astrowallet/domain";
 import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
-import { getTelegramWebApp, triggerTelegramHaptic } from "../telegram/webapp.js";
+import {
+  copyTextToClipboard,
+  openTelegramMiniAppLink,
+  triggerTelegramHaptic,
+} from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
 import { requiresHighValueReauth } from "./flow-validators.js";
@@ -50,6 +54,7 @@ interface RemoteIntentResponse {
     humanSummary?: string | undefined;
     xdrSha256?: string | undefined;
     returnStartAppParam?: string | undefined;
+    escrowExpiresAt?: number | undefined;
     message?: string | undefined;
     amount?: string | undefined;
     totalAmount?: string | undefined;
@@ -601,7 +606,7 @@ export function IntentSheet({
         amount: intent.payload.amount,
         assetCode: intent.payload.assetCode ?? "XLM",
         assetIssuer: intent.payload.assetIssuer,
-        expiresAtUnix: intent.expiresAt,
+        expiresAtUnix: intent.payload.escrowExpiresAt ?? intent.expiresAt,
         intentAuth: { intentId: route.intentId, sig: route.sig },
       });
 
@@ -777,36 +782,46 @@ export function IntentSheet({
         href: param ? `${base}?startapp=${encodeURIComponent(param)}` : base,
       };
     }
+    if (origin === "astrogate" && config.astrogateBotUsername) {
+      const base = `https://t.me/${config.astrogateBotUsername}`;
+      return {
+        label: "Return to AstroGate",
+        href: param ? `${base}?startapp=${encodeURIComponent(param)}` : base,
+      };
+    }
     return null;
   }, [
     intent?.payload.originApp,
     intent?.payload.returnStartAppParam,
     config.astrodexBotUsername,
     config.astrodexMiniAppShortName,
+    config.astrogateBotUsername,
   ]);
 
   useEffect(() => {
     if (!completedMsg || autoReturnCancelled || shareClaimUrl) return undefined;
     if (typeof window !== "undefined" && window.opener && !window.opener.closed) {
-      let targetOrigin = "*";
+      let targetOrigin: string | null = null;
       try {
         if (document.referrer) {
           targetOrigin = new URL(document.referrer).origin;
         }
       } catch {
-        targetOrigin = "*";
+        targetOrigin = null;
       }
-      try {
-        window.opener.postMessage(
-          {
-            type: "ASTRO_SIGN_COMPLETE",
-            status: "approved",
-            intentId: route.intentId,
-          },
-          targetOrigin,
-        );
-      } catch {
-        // Ignore postMessage error
+      if (targetOrigin) {
+        try {
+          window.opener.postMessage(
+            {
+              type: "ASTRO_SIGN_COMPLETE",
+              status: "approved",
+              intentId: route.intentId,
+            },
+            targetOrigin,
+          );
+        } catch {
+          // Ignore postMessage error
+        }
       }
       const timer = window.setTimeout(() => {
         window.close();
@@ -815,12 +830,7 @@ export function IntentSheet({
     }
     if (boomerangReturn) {
       const timer = window.setTimeout(() => {
-        const wa = getTelegramWebApp();
-        if (wa?.openTelegramLink && boomerangReturn.href.startsWith("https://t.me/")) {
-          wa.openTelegramLink(boomerangReturn.href);
-        } else {
-          window.location.href = boomerangReturn.href;
-        }
+        openTelegramMiniAppLink(boomerangReturn.href);
       }, 900);
       return () => window.clearTimeout(timer);
     }
@@ -829,12 +839,10 @@ export function IntentSheet({
 
   const handleCopyClaimUrl = async () => {
     if (!shareClaimUrl) return;
-    try {
-      await navigator.clipboard.writeText(shareClaimUrl);
+    const copied = await copyTextToClipboard(shareClaimUrl);
+    if (copied) {
       setCopiedClaimUrl(true);
       setTimeout(() => setCopiedClaimUrl(false), 2000);
-    } catch {
-      // Clipboard unavailable
     }
   };
 
@@ -1200,7 +1208,7 @@ export function IntentSheet({
                     >
                       {busy
                         ? "Processing Escrow Reclaim..."
-                        : Math.floor(Date.now() / 1000) >= intent.expiresAt
+                        : Math.floor(Date.now() / 1000) >= (intent.payload.escrowExpiresAt ?? intent.expiresAt)
                           ? "Reclaim Expired Escrow"
                           : "Cancel & Reclaim Escrow"}
                     </button>

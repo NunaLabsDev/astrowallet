@@ -48,6 +48,7 @@ describe("Ramps (MoneyGram SEP-24, NEAR Intents MEMO Guard, LayerZero OFT)", () 
         amountAtomic: "10000000",
         recipient: "bc1qexample",
         refundTo: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+        dry: false,
       }),
     ).rejects.toThrow(/depositMemo/i);
     expect(capturedBody?.depositMode).toBe("MEMO");

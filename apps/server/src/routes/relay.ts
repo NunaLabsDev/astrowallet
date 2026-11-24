@@ -119,12 +119,20 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
     let authorized = false;
     const nowSec = Math.floor(Date.now() / 1000);
 
+    let intentAuthRecord: {
+      intentId: string;
+      actionType: string;
+      status: string;
+      payloadJson: string;
+    } | null = null;
+
     if (body.intentAuth) {
       const intent = repo ? await repo.getSignedIntent(body.intentAuth.intentId) : null;
       const allowSignedClaim =
         intent?.actionType === "claim" && intent.status === "signed";
       if (
         intent &&
+        intent.actionType !== "connect" &&
         intent.network === config.network &&
         (intent.status === "pending" || allowSignedClaim)
       ) {
@@ -147,6 +155,9 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
             );
           } else {
             authorized = true;
+          }
+          if (authorized) {
+            intentAuthRecord = intent;
           }
         }
       }
@@ -216,6 +227,27 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
           ) {
             return c.json({ error: "Contract in feebump is not on the relay allowlist" }, 403);
           }
+        } else if (intentAuthRecord?.actionType === "claim") {
+          return c.json(
+            { error: "Claim intentAuth only permits Soroban ClaimEscrow operations" },
+            403,
+          );
+        }
+      }
+
+      if (intentAuthRecord && repo) {
+        if (intentAuthRecord.actionType === "claim" && config.claimEscrowContractId) {
+          const hasEscrowOp = decoded.operations.some(
+            (op) => op.soroban?.contractId === config.claimEscrowContractId,
+          );
+          if (!hasEscrowOp) {
+            return c.json({ error: "Relay payload does not invoke ClaimEscrow contract" }, 403);
+          }
+        }
+        const stageKey = `relay-intent:${intentAuthRecord.intentId}:${intentAuthRecord.status}`;
+        const claimed = await repo.claimAlertDedupKey(stageKey);
+        if (!claimed) {
+          return c.json({ error: "Intent relay authorization already consumed" }, 409);
         }
       }
 
@@ -507,77 +539,85 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       ]);
     };
 
-    const sponsorKeypair = Keypair.fromSecret(config.relaySponsorSecret);
-    const sponsorAddress = sponsorKeypair.publicKey();
+    let sponsorKeypair: Keypair;
+    let sponsorAddress: string;
+    let sponsorSignedXdr: string;
+    try {
+      sponsorKeypair = Keypair.fromSecret(config.relaySponsorSecret);
+      sponsorAddress = sponsorKeypair.publicKey();
 
-    let sponsorSequence: string | undefined;
-    for (const hBase of config.horizonUrls) {
-      try {
-        const sRes = await fetchFn(
-          `${hBase.replace(/\/+$/, "")}/accounts/${encodeURIComponent(sponsorAddress)}`,
-          {
-            headers: { Accept: "application/json" },
-            signal: AbortSignal.timeout(6_000),
-          },
-        );
-        if (!sRes.ok) continue;
-        const sJson = (await sRes.json()) as { sequence?: string };
-        if (sJson.sequence) {
-          sponsorSequence = sJson.sequence;
-          break;
+      let sponsorSequence: string | undefined;
+      for (const hBase of config.horizonUrls) {
+        try {
+          const sRes = await fetchFn(
+            `${hBase.replace(/\/+$/, "")}/accounts/${encodeURIComponent(sponsorAddress)}`,
+            {
+              headers: { Accept: "application/json" },
+              signal: AbortSignal.timeout(6_000),
+            },
+          );
+          if (!sRes.ok) continue;
+          const sJson = (await sRes.json()) as { sequence?: string };
+          if (sJson.sequence) {
+            sponsorSequence = sJson.sequence;
+            break;
+          }
+        } catch {
+          // Try next Horizon URL
         }
-      } catch {
-        // Try next Horizon URL
       }
-    }
-    if (!sponsorSequence) {
-      await rollbackDedup();
-      return c.json({ error: "Sponsor account sequence unavailable on Horizon" }, 502);
-    }
+      if (!sponsorSequence) {
+        await rollbackDedup();
+        return c.json({ error: "Sponsor account sequence unavailable on Horizon" }, 502);
+      }
 
-    const sponsorAccount = {
-      accountId: () => sponsorAddress,
-      sequenceNumber: () => sponsorSequence!,
-      incrementSequenceNumber: () => {
-        sponsorSequence = (BigInt(sponsorSequence!) + 1n).toString();
-      },
-    };
+      const sponsorAccount = {
+        accountId: () => sponsorAddress,
+        sequenceNumber: () => sponsorSequence!,
+        incrementSequenceNumber: () => {
+          sponsorSequence = (BigInt(sponsorSequence!) + 1n).toString();
+        },
+      };
 
-    const builder = new TransactionBuilder(sponsorAccount, {
-      fee: String(Number(BASE_FEE) * 4),
-      networkPassphrase: config.networkPassphrase,
-    });
+      const builder = new TransactionBuilder(sponsorAccount, {
+        fee: String(Number(BASE_FEE) * 4),
+        networkPassphrase: config.networkPassphrase,
+      });
 
-    if (body.mode === "sponsored_reserve") {
-      builder
-        .addOperation(
-          Operation.beginSponsoringFutureReserves({
-            sponsoredId: body.address,
-          }),
-        )
-        .addOperation(
+      if (body.mode === "sponsored_reserve") {
+        builder
+          .addOperation(
+            Operation.beginSponsoringFutureReserves({
+              sponsoredId: body.address,
+            }),
+          )
+          .addOperation(
+            Operation.createAccount({
+              destination: body.address,
+              startingBalance: "0",
+            }),
+          )
+          .addOperation(
+            Operation.endSponsoringFutureReserves({
+              source: body.address,
+            }),
+          );
+      } else {
+        builder.addOperation(
           Operation.createAccount({
             destination: body.address,
-            startingBalance: "0",
-          }),
-        )
-        .addOperation(
-          Operation.endSponsoringFutureReserves({
-            source: body.address,
+            startingBalance: config.relayBootstrapStartingBalanceXlm,
           }),
         );
-    } else {
-      builder.addOperation(
-        Operation.createAccount({
-          destination: body.address,
-          startingBalance: config.relayBootstrapStartingBalanceXlm,
-        }),
-      );
-    }
+      }
 
-    const tx = builder.setTimeout(180).build();
-    tx.sign(sponsorKeypair);
-    const sponsorSignedXdr = tx.toXDR();
+      const tx = builder.setTimeout(180).build();
+      tx.sign(sponsorKeypair);
+      sponsorSignedXdr = tx.toXDR();
+    } catch {
+      await rollbackDedup();
+      return c.json({ error: "Failed to construct sponsor bootstrap transaction" }, 500);
+    }
 
     if (body.mode === "sponsored_reserve") {
       return c.json({

@@ -3363,93 +3363,114 @@ function WalletShell({
                       )}
                     </section>
 
-                    {/* TON Connect v2 Launcher Card */}
-                    <section className="glass-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: 15, display: "flex", alignItems: "center", gap: 8 }}>
-                          <IconPlug size={17} />
-                          <span>TON Connect v2 ({tonConnectSessions.length} Active)</span>
-                        </div>
-                        <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
-                          {tonAccount
-                            ? `TON Wallet ${tonAccount.friendlyAddress.slice(0, 6)}…${tonAccount.friendlyAddress.slice(-6)} · Encrypted NaCl bridge (§7.3)`
-                            : "Connect Telegram Mini Apps & TON dApps cleanly via encrypted bridge"}
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        className="aw-btn-primary"
-                        onClick={() => setActiveDrawer("tonConnect")}
+                    <details className="glass-card" style={{ display: "grid", gap: 12 }}>
+                      <summary
+                        style={{
+                          cursor: "pointer",
+                          fontWeight: 700,
+                          fontSize: 14,
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          listStyle: "none",
+                        }}
                       >
-                        <span>Open TON Connect</span>
-                        <IconChevronRight size={16} />
-                      </button>
-                    </section>
+                        <span>Pro &amp; Developer Tools</span>
+                        <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                          TON Connect · Dev Lab · Reset
+                        </span>
+                      </summary>
 
-                    {/* Developer Workbench Launcher Card */}
-                    <section className="glass-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                      <div>
-                        <div style={{ fontWeight: 700, fontSize: 15, display: "flex", alignItems: "center", gap: 8 }}>
-                          <IconCode size={17} />
-                          <span>Developer Workbench (Dev Lab)</span>
-                        </div>
-                        <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
-                          Soroban RPC Telemetry, Contracts, Raw XDR Signer &amp; SEP-53 Tools
-                        </div>
-                      </div>
-                      <button
-                        type="button"
-                        className="aw-btn-secondary"
-                        onClick={() => setActiveDrawer("dev")}
-                      >
-                        <span>Open Dev Lab</span>
-                        <IconChevronRight size={16} />
-                      </button>
-                    </section>
-
-                    {/* Danger Zone: Local Vault Wipe */}
-                    <section className="glass-card aw-danger-card" style={{ display: "grid", gap: 10 }}>
-                      <div style={{ fontWeight: 700, fontSize: 14, color: "#FCA5A5" }}>
-                        Danger Zone · Local Device Reset
-                      </div>
-                      <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-                        Removes the local encrypted vault and biometric wrapping keys from this
-                        device&apos;s IndexedDB (leaves any Telegram Encrypted Backup intact). Make
-                        sure you backed up your 12/24-word recovery phrase or Recovery Password
-                        first.
-                      </div>
-                      {!wipeConfirmArmed ? (
-                        <button
-                          type="button"
-                          className="aw-chip-btn"
-                          style={{ width: "fit-content", borderColor: "rgba(239, 68, 68, 0.5)", color: "#FCA5A5" }}
-                          onClick={() => setWipeConfirmArmed(true)}
-                        >
-                          <IconTrash size={13} />
-                          <span>Wipe Local Vault from Device</span>
-                        </button>
-                      ) : (
-                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <div style={{ display: "grid", gap: 12, marginTop: 10 }}>
+                        {/* TON Connect v2 Launcher Card */}
+                        <section className="glass-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 15, display: "flex", alignItems: "center", gap: 8 }}>
+                              <IconPlug size={17} />
+                              <span>TON Connect v2 ({tonConnectSessions.length} Active)</span>
+                            </div>
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
+                              {tonAccount
+                                ? `TON Wallet ${tonAccount.friendlyAddress.slice(0, 6)}…${tonAccount.friendlyAddress.slice(-6)} · Encrypted NaCl bridge (§7.3)`
+                                : "Connect Telegram Mini Apps & TON dApps cleanly via encrypted bridge"}
+                            </div>
+                          </div>
                           <button
                             type="button"
-                            className="aw-btn-danger"
-                            onClick={() => {
-                              setWipeConfirmArmed(false);
-                              void wipeLocalVault();
-                            }}
+                            className="aw-btn-primary"
+                            onClick={() => setActiveDrawer("tonConnect")}
                           >
-                            Confirm Permanent Local Wipe
+                            <span>Open TON Connect</span>
+                            <IconChevronRight size={16} />
                           </button>
+                        </section>
+
+                        {/* Developer Workbench Launcher Card */}
+                        <section className="glass-card" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                          <div>
+                            <div style={{ fontWeight: 700, fontSize: 15, display: "flex", alignItems: "center", gap: 8 }}>
+                              <IconCode size={17} />
+                              <span>Developer Workbench (Dev Lab)</span>
+                            </div>
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
+                              Soroban RPC Telemetry, Contracts, Raw XDR Signer &amp; SEP-53 Tools
+                            </div>
+                          </div>
                           <button
                             type="button"
                             className="aw-btn-secondary"
-                            onClick={() => setWipeConfirmArmed(false)}
+                            onClick={() => setActiveDrawer("dev")}
                           >
-                            Cancel
+                            <span>Open Dev Lab</span>
+                            <IconChevronRight size={16} />
                           </button>
-                        </div>
-                      )}
-                    </section>
+                        </section>
+
+                        {/* Danger Zone: Local Vault Wipe */}
+                        <details className="glass-card aw-danger-card" style={{ display: "grid", gap: 10 }}>
+                          <summary style={{ cursor: "pointer", fontWeight: 700, fontSize: 14, color: "#FCA5A5" }}>
+                            Danger Zone · Local Device Reset
+                          </summary>
+                          <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 8 }}>
+                            Removes the local encrypted vault and biometric wrapping keys from this
+                            device&apos;s IndexedDB (leaves any Telegram Encrypted Backup intact). Make
+                            sure you backed up your 12/24-word recovery phrase or Recovery Password
+                            first.
+                          </div>
+                          {!wipeConfirmArmed ? (
+                            <button
+                              type="button"
+                              className="aw-chip-btn"
+                              style={{ width: "fit-content", borderColor: "rgba(239, 68, 68, 0.5)", color: "#FCA5A5", marginTop: 6 }}
+                              onClick={() => setWipeConfirmArmed(true)}
+                            >
+                              <IconTrash size={13} />
+                              <span>Wipe Local Vault from Device</span>
+                            </button>
+                          ) : (
+                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 6 }}>
+                              <button
+                                type="button"
+                                className="aw-btn-danger"
+                                onClick={() => {
+                                  setWipeConfirmArmed(false);
+                                  void wipeLocalVault();
+                                }}
+                              >
+                                Confirm Permanent Local Wipe
+                              </button>
+                              <button
+                                type="button"
+                                className="aw-btn-secondary"
+                                onClick={() => setWipeConfirmArmed(false)}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          )}
+                        </details>
+                      </div>
+                    </details>
                   </div>
                 )}
 

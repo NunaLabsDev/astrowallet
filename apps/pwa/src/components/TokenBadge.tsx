@@ -35,24 +35,25 @@ export function TokenBadge({
     setCandidateIdx(0);
   }, [icon, fallbackIcon]);
 
-  const ringColor =
+  const neutralBorder = "1px solid rgba(255, 255, 255, 0.14)";
+  const dotColor =
     trustStatus === "scam_spoof"
-      ? "rgba(239, 68, 68, 0.72)"
+      ? "#ef4444"
       : trustStatus === "official"
-        ? "rgba(16, 185, 129, 0.65)"
-        : "rgba(245, 201, 40, 0.45)";
+        ? "#10b981"
+        : null;
 
   const activeUrl = candidates[candidateIdx];
   if (activeUrl) {
     return (
       <span
         style={{
+          position: "relative",
           width: size,
           height: size,
           borderRadius: "999px",
-          border: `1.5px solid ${ringColor}`,
+          border: neutralBorder,
           background: "rgba(248, 250, 255, 0.08)",
-          overflow: "hidden",
           display: "inline-flex",
           alignItems: "center",
           justifyContent: "center",
@@ -72,8 +73,24 @@ export function TokenBadge({
             height: "100%",
             objectFit: "contain",
             display: "block",
+            borderRadius: "999px",
           }}
         />
+        {dotColor && (
+          <span
+            aria-hidden="true"
+            style={{
+              position: "absolute",
+              right: -1,
+              bottom: -1,
+              width: Math.max(8, Math.round(size * 0.26)),
+              height: Math.max(8, Math.round(size * 0.26)),
+              borderRadius: "999px",
+              background: dotColor,
+              border: "1.5px solid #060E24",
+            }}
+          />
+        )}
       </span>
     );
   }
@@ -86,10 +103,11 @@ export function TokenBadge({
       <span
         aria-label="Stellar Lumens XLM"
         style={{
+          position: "relative",
           width: size,
           height: size,
           borderRadius: "999px",
-          border: `1.5px solid ${ringColor}`,
+          border: neutralBorder,
           background: "radial-gradient(circle at 30% 25%, #172C69 0%, #060E24 100%)",
           display: "inline-flex",
           alignItems: "center",

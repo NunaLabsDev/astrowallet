@@ -322,6 +322,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
   const handleCloudRestoreSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     setError(null);
     if (!cloudBackupJson) {
       setError("No synced Telegram encrypted backup found yet.");
@@ -348,6 +349,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
   const handleCreateWalletSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     setError(null);
     if (!generatedMnemonic || !allQuizSolved) {
       setError("Verify your recovery phrase words first.");

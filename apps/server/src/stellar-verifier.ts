@@ -1,3 +1,4 @@
+import { FeeBumpTransaction, TransactionBuilder } from "@stellar/stellar-sdk";
 import { resolveSwapAssetSacId } from "@astrowallet/defi";
 import {
   calculateAccountReserveSummary,
@@ -52,6 +53,7 @@ export interface ExpectedTxMatch {
   minCreatedAtUnix?: number | undefined;
   allowSorobanRpcFallback?: boolean | undefined;
   expectedSourceAccount?: string | undefined;
+  expectedTxHash?: string | undefined;
   expectedActionType?: "swap" | "reclaim_reserve" | undefined;
   /** Requires a Soroban `invokeHostFunction` on `contractId.functionName` (optionally with first arg hex & escrow params). */
   sorobanInvoke?:
@@ -456,6 +458,27 @@ export async function verifyTransactionConfirmed(
         confirmed: false,
         reason: "Transaction does not invoke the expected escrow contract call for this intent",
       };
+    }
+  }
+
+  if (expected?.expectedTxHash) {
+    const targetHash = expected.expectedTxHash.trim().toLowerCase();
+    if (txHash.trim().toLowerCase() !== targetHash) {
+      if (!tx.envelopeXdr || !config.networkPassphrase) {
+        return { confirmed: false, reason: "Transaction hash does not match expected unsignedXdr" };
+      }
+      try {
+        const parsedEnv = TransactionBuilder.fromXDR(tx.envelopeXdr, config.networkPassphrase);
+        const innerHash =
+          parsedEnv instanceof FeeBumpTransaction
+            ? Buffer.from(parsedEnv.innerTransaction.hash()).toString("hex").toLowerCase()
+            : Buffer.from(parsedEnv.hash()).toString("hex").toLowerCase();
+        if (innerHash !== targetHash) {
+          return { confirmed: false, reason: "Confirmed transaction does not match expected XDR" };
+        }
+      } catch {
+        return { confirmed: false, reason: "Unable to verify confirmed transaction hash against XDR" };
+      }
     }
   }
 

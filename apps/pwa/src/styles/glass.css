@@ -118,8 +118,8 @@ select:focus-visible {
   border-radius: 26px;
   padding: 18px;
   background: rgba(10, 20, 54, 0.86);
-  backdrop-filter: blur(24px) saturate(175%);
-  -webkit-backdrop-filter: blur(24px) saturate(175%);
+  backdrop-filter: blur(16px) saturate(165%);
+  -webkit-backdrop-filter: blur(16px) saturate(165%);
   border: 1px solid rgba(165, 139, 224, 0.34);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.22),
@@ -136,8 +136,6 @@ select:focus-visible {
   font-weight: 600;
   letter-spacing: 0.02em;
   background: rgba(128, 80, 200, 0.22);
-  backdrop-filter: blur(10px) saturate(140%);
-  -webkit-backdrop-filter: blur(10px) saturate(140%);
   border: 1px solid rgba(165, 139, 224, 0.32);
   color: var(--aw-ink-primary);
 }
@@ -761,6 +759,7 @@ select:focus-visible {
   z-index: 95;
   background: rgba(4, 9, 24, 0.94);
   backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1146,14 +1145,14 @@ select:focus-visible {
 }
 
 .aw-balance-row-actions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   min-width: 0;
 }
 
 .aw-balance-row-actions .aw-mini-chip {
-  width: 100%;
+  flex: 1 1 auto;
 }
 
 .aw-empty-state {
@@ -1287,8 +1286,8 @@ select:focus-visible {
   padding: 7px;
   border-radius: 999px;
   background: rgba(10, 21, 56, 0.86);
-  backdrop-filter: blur(20px) saturate(175%);
-  -webkit-backdrop-filter: blur(20px) saturate(175%);
+  backdrop-filter: blur(16px) saturate(165%);
+  -webkit-backdrop-filter: blur(16px) saturate(165%);
   border: 1px solid rgba(165, 139, 224, 0.28);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.2),
@@ -1318,9 +1317,9 @@ select:focus-visible {
 }
 
 .dock-btn[aria-current="page"] {
-  background: linear-gradient(135deg, var(--aw-cosmic-purple), var(--aw-solar-blaze));
-  color: var(--aw-ink-on-orange);
-  box-shadow: 0 4px 14px rgba(241, 90, 36, 0.28);
+  background: linear-gradient(135deg, rgba(128, 80, 200, 0.92), rgba(99, 102, 241, 0.92));
+  color: #ffffff;
+  box-shadow: 0 4px 14px rgba(128, 80, 200, 0.36);
 }
 
 .aw-dock-icon {
@@ -1487,8 +1486,8 @@ select:focus-visible {
 }
 
 .aw-icon-circle-btn {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   border-radius: 999px;
   border: 1px solid rgba(165, 139, 224, 0.32);
   background: rgba(23, 44, 105, 0.64);
@@ -2851,7 +2850,9 @@ select:focus-visible {
   .glass-card,
   .glass-sheet,
   .glass-pill,
-  .glass-dock {
+  .glass-dock,
+  .aw-drawer,
+  .aw-chart-expanded {
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
     background: rgba(12, 24, 62, 0.96);

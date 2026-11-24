@@ -17,6 +17,7 @@ import {
   signIntentToken,
   verifyIntentToken,
 } from "@astrowallet/tg-protocol";
+import { TransactionBuilder } from "@stellar/stellar-sdk";
 import { Hono, type Context } from "hono";
 import { z } from "zod";
 import type { WorkerBindings } from "../app.js";
@@ -403,7 +404,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: `Intent already ${intent.status}` }, 409);
     }
 
-    const storedPayload = JSON.parse(intent.payloadJson) as {
+    const storedPayload = parsePayload(intent.payloadJson) as {
       message?: string;
       confirmCode?: string;
       challenge?: { usernameLower?: string };
@@ -883,6 +884,18 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: "Transaction hash already used for another intent" }, 409);
     }
 
+    let expectedSignXdrHash: string | undefined;
+    if (intent.actionType === "sign_xdr" && payload.unsignedXdr) {
+      try {
+        const parsedUnsigned = TransactionBuilder.fromXDR(
+          payload.unsignedXdr,
+          config.networkPassphrase,
+        );
+        expectedSignXdrHash = Buffer.from(parsedUnsigned.hash()).toString("hex").toLowerCase();
+      } catch {
+        // Ignore if unparseable
+      }
+    }
     const resolvedSourceAccount = parsedBody.payerAddress ?? payload.sourceAddress;
     const expected: ExpectedTxMatch = {
       minCreatedAtUnix: intent.createdAt,
@@ -899,7 +912,10 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         : intent.actionType === "swap"
           ? { allowSorobanRpcFallback: true, expectedActionType: "swap" }
           : intent.actionType === "sign_xdr"
-            ? { allowSorobanRpcFallback: true }
+            ? {
+                allowSorobanRpcFallback: true,
+                ...(expectedSignXdrHash ? { expectedTxHash: expectedSignXdrHash } : {}),
+              }
             : intent.actionType === "reclaim_reserve"
               ? { expectedActionType: "reclaim_reserve" }
               : {}),
@@ -926,7 +942,8 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       }),
     ]);
 
-    if (payload.originApp === "astrodex") {
+    if (payload.originApp === "astrodex" || payload.originApp === "astrogate") {
+      const isGate = payload.originApp === "astrogate";
       const callbackBody = JSON.stringify({
         sig: payload.originConfirmSig ?? parsedBody.sig,
         txHash: parsedBody.txHash,
@@ -938,7 +955,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         callbackHeaders["X-Ecosystem-Secret"] = config.ecosystemSharedIntentSecret;
       }
       const dispatchBoomerangConfirm = async () => {
-        if (c.env?.ASTRODEX) {
+        if (!isGate && c.env?.ASTRODEX) {
           await c.env.ASTRODEX.fetch(
             new Request(
               `https://astrodex.internal/v1/intents/${encodeURIComponent(intent.intentId)}/confirm`,
@@ -949,8 +966,21 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
               },
             ),
           );
-        } else if (config.astrodexApiBaseUrl) {
-          const base = config.astrodexApiBaseUrl.replace(/\/+$/, "");
+        } else if (isGate && c.env?.ASTROGATE) {
+          await c.env.ASTROGATE.fetch(
+            new Request(
+              `https://astrogate.internal/v1/intents/${encodeURIComponent(intent.intentId)}/confirm`,
+              {
+                method: "POST",
+                headers: callbackHeaders,
+                body: callbackBody,
+              },
+            ),
+          );
+        } else {
+          const rawBase = isGate ? config.astrogateApiBaseUrl : config.astrodexApiBaseUrl;
+          if (!rawBase) return;
+          const base = rawBase.replace(/\/+$/, "");
           const fetchImpl = deps.fetchFn ?? fetch;
           await fetchImpl(
             `${base}/v1/intents/${encodeURIComponent(intent.intentId)}/confirm`,

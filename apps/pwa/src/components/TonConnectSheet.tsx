@@ -1,8 +1,13 @@
 import { useState, type FormEvent } from "react";
 import { formatNanoTon } from "@astrowallet/ton-core";
 import { useWallet } from "../state/wallet-context.js";
+import {
+  getTelegramWebApp,
+  openTelegramQrScanner,
+  triggerTelegramHaptic,
+} from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
-import { IconCheck, IconPlug, IconTrash } from "./Icons.js";
+import { IconCheck, IconPlug, IconQr, IconTrash } from "./Icons.js";
 
 export function TonConnectSheet() {
   const {
@@ -103,9 +108,28 @@ export function TonConnectSheet() {
 
       <form onSubmit={handlePair} style={{ display: "grid", gap: 10 }}>
         <div>
-          <label className="aw-label" htmlFor="ton-connect-uri-input">
-            Paste TON Connect v2 URI (<code>tc://...</code>)
-          </label>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 6 }}>
+            <label className="aw-label" htmlFor="ton-connect-uri-input" style={{ marginBottom: 0 }}>
+              Paste TON Connect v2 URI (<code>tc://...</code>)
+            </label>
+            {getTelegramWebApp()?.showScanQrPopup && (
+              <button
+                type="button"
+                className="aw-chip-btn"
+                onClick={() => {
+                  void openTelegramQrScanner("Scan a TON Connect v2 tc:// QR code").then((scanned) => {
+                    if (scanned) {
+                      setUriInput(scanned);
+                      triggerTelegramHaptic("selection");
+                    }
+                  });
+                }}
+              >
+                <IconQr size={13} />
+                <span>Scan QR</span>
+              </button>
+            )}
+          </div>
           <input
             id="ton-connect-uri-input"
             type="text"

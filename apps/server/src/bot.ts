@@ -567,11 +567,15 @@ export function createTelegramBot(
       }
     }
 
-    await ctx.editMessageText(formatAccountsSummary(updated, config.network, config.tgBotUsername), {
-      parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
-      ...(updated.some((a) => !a.isDefault) ? { reply_markup: keyboard } : {}),
-    });
+    try {
+      await ctx.editMessageText(formatAccountsSummary(updated, config.network, config.tgBotUsername), {
+        parse_mode: "HTML",
+        link_preview_options: { is_disabled: true },
+        ...(updated.some((a) => !a.isDefault) ? { reply_markup: keyboard } : {}),
+      });
+    } catch {
+      // Ignore Telegram "message is not modified" on rapid double-tap
+    }
     await ctx.answerCallbackQuery({ text: "Default receiving account updated" });
   });
 
@@ -661,7 +665,7 @@ export function createTelegramBot(
           creatorTelegramUserId: tgId,
           actionType: "claim",
           chatId: String(ctx.chat.id),
-          ttlSeconds: 300,
+          ttlSeconds: 86_400 * 7,
           payload: {
             amount,
             assetCode,
@@ -742,7 +746,7 @@ export function createTelegramBot(
           creatorTelegramUserId: tgId,
           actionType: "claim",
           chatId: String(ctx.chat.id),
-          ttlSeconds: 300,
+          ttlSeconds: 86_400 * 7,
           payload: {
             amount,
             assetCode,
@@ -1193,11 +1197,9 @@ export function createTelegramBot(
           }
         | undefined;
 
-      // 1. Primary: AstroDex 5-Way Aggregator (XOXNO + Aquarius + Soroswap + SDEX + Path)
-      const dexBase = (config.astrodexApiBaseUrl ?? "https://astrodex-testnet.pages.dev").replace(
-        /\/+$/,
-        "",
-      );
+      // 1. Primary: AstroDex 5-Way Aggregator (only when explicitly configured for this network)
+      const dexBase = config.astrodexApiBaseUrl?.replace(/\/+$/, "");
+      if (dexBase) {
       try {
         const dexRes = await fetchFn(`${dexBase}/v1/quote?net=${config.network}`, {
           method: "POST",
@@ -1241,6 +1243,7 @@ export function createTelegramBot(
         }
       } catch {
         // Fall through to Soroswap / Horizon Path
+      }
       }
 
       // 2. Fallback: Soroswap API
@@ -1532,16 +1535,19 @@ export function createTelegramBot(
           );
           return;
         }
-        const claimId = crypto.randomUUID().replaceAll("-", "").slice(0, 24);
+        const intentId = generateId("it");
+        const claimId = await deriveClaimId(intentId);
         const escrowExpiresAt = Math.floor(Date.now() / 1000) + 7 * 86_400;
         const senderLabel = ctx.from.username ? `@${ctx.from.username}` : `tg:${tgId}`;
-        const recipientUsername = recipient.label.startsWith("@")
-          ? recipient.label.slice(1).toLowerCase()
-          : recipient.label;
+        const recipientUsername = rawRecipient.startsWith("@")
+          ? rawRecipient.slice(1).toLowerCase()
+          : recipient.label.toLowerCase();
         const { intent } = await createAndSignIntent(config, repo, {
+          intentId,
           creatorTelegramUserId: tgId,
           actionType: "claim",
           chatId: String(ctx.chat.id),
+          ttlSeconds: 7 * 86_400,
           payload: {
             claimId,
             escrowContractId: config.claimEscrowContractId,

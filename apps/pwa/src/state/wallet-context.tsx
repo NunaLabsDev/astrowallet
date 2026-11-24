@@ -390,6 +390,14 @@ function toLinkedAccounts(metaList: readonly VaultAccountMetadata[]): LinkedAcco
   }));
 }
 
+function resolveTonDerivationIndex(
+  activeAccount: { derivationIndex?: number | undefined } | null | undefined,
+  activeIndex: number,
+): number {
+  const idx = activeAccount?.derivationIndex ?? activeIndex;
+  return idx !== undefined && idx < 1000 ? idx : 0;
+}
+
 export function WalletProvider({
   config,
   storageScopeId,
@@ -606,7 +614,7 @@ export function WalletProvider({
   const [accountMetaList, setAccountMetaList] = useState<VaultAccountMetadata[]>([]);
   const [activeIndex, setActiveIndex] = useState<number>(0);
 
-  const [accountState, setAccountState] = useState<StellarAccountState | null>(null);
+  const [rawAccountState, setRawAccountState] = useState<StellarAccountState | null>(null);
   const [recentPayments, setRecentPayments] = useState<RecentPaymentRecord[]>([]);
   const [recentTrades, setRecentTrades] = useState<AccountTradeRecord[]>([]);
   const [claimableBalances, setClaimableBalances] = useState<ClaimableBalanceRecord[]>([]);
@@ -621,6 +629,24 @@ export function WalletProvider({
   const [fingerprintEnrolled, setFingerprintEnrolled] = useState<boolean>(false);
   const [telegramBioAvailable, setTelegramBioAvailable] = useState<boolean>(false);
   const [verifiedAssets, setVerifiedAssets] = useState<readonly VerifiedAssetEntry[]>([]);
+  const accountState = useMemo<StellarAccountState | null>(() => {
+    if (!rawAccountState) return null;
+    if (!rawAccountState.funded || verifiedAssets.length === 0) return rawAccountState;
+    const verifiedSet = new Set(
+      verifiedAssets.map((v) => `${v.code.toUpperCase()}:${v.issuer}`),
+    );
+    return {
+      ...rawAccountState,
+      balances: rawAccountState.balances.map((b) => ({
+        ...b,
+        isVerifiedAsset:
+          b.isVerifiedAsset ||
+          (b.assetCode === "XLM" && !b.assetIssuer) ||
+          (Boolean(b.assetIssuer) &&
+            verifiedSet.has(`${b.assetCode.toUpperCase()}:${b.assetIssuer}`)),
+      })),
+    };
+  }, [rawAccountState, verifiedAssets]);
   const [tokenMetaMap, setTokenMetaMap] = useState<Readonly<Record<string, HeldTokenTomlMetadata>>>(
     {},
   );
@@ -682,10 +708,7 @@ export function WalletProvider({
       .then(({ deriveTonAccount }) => {
         if (cancelled || !sessionVault.has()) return;
         const summary = sessionVault.withMnemonic((mnemonic) => {
-          const tonDerivationIndex =
-            activeAccount?.derivationIndex !== undefined && activeAccount.derivationIndex < 1000
-              ? activeAccount.derivationIndex
-              : 0;
+          const tonDerivationIndex = resolveTonDerivationIndex(activeAccount, activeIndex);
           const derived = deriveTonAccount(
             mnemonic,
             tonDerivationIndex,
@@ -866,7 +889,7 @@ export function WalletProvider({
       const state = await stellarClient.fetchAccountState(targetAddress);
       if (seq !== chainFetchSeqRef.current) return;
       if (!state.funded) {
-        setAccountState(state);
+        setRawAccountState(state);
         setRecentPayments([]);
         setRecentTrades([]);
         setClaimableBalances([]);
@@ -880,18 +903,7 @@ export function WalletProvider({
         stellarClient.fetchOpenOffers(targetAddress, 20),
       ]);
       if (seq !== chainFetchSeqRef.current) return;
-      const verifiedSet = new Set(
-        verifiedAssets.map((v) => `${v.code.toUpperCase()}:${v.issuer}`),
-      );
-      const enrichedBalances = state.balances.map((b) => ({
-        ...b,
-        isVerifiedAsset:
-          b.isVerifiedAsset ||
-          (b.assetCode === "XLM" && !b.assetIssuer) ||
-          (Boolean(b.assetIssuer) &&
-            verifiedSet.has(`${b.assetCode.toUpperCase()}:${b.assetIssuer}`)),
-      }));
-      setAccountState({ ...state, balances: enrichedBalances });
+      setRawAccountState(state);
       setRecentPayments(payments);
       setRecentTrades(trades);
       setClaimableBalances(claimables);
@@ -904,7 +916,7 @@ export function WalletProvider({
         setLoadingChain(false);
       }
     }
-  }, [activeAccount, stellarClient, verifiedAssets]);
+  }, [activeAccount, stellarClient]);
 
   useEffect(() => {
     if (vaultStatus === "unlocked" && activeAccount) {
@@ -912,7 +924,7 @@ export function WalletProvider({
     } else {
       chainFetchSeqRef.current += 1;
       setLoadingChain(false);
-      setAccountState(null);
+      setRawAccountState(null);
       setRecentPayments([]);
       setRecentTrades([]);
       setClaimableBalances([]);
@@ -1019,7 +1031,7 @@ export function WalletProvider({
       const res = await sessionVault.withMnemonic(async (mnemonic) => {
         const derived = deriveTonAccount(
           mnemonic,
-          activeAccount.derivationIndex ?? activeIndex ?? 0,
+          activeAccount.address ? resolveTonDerivationIndex(activeAccount, activeIndex) : 0,
           config.tonNetwork,
           "v4r2",
         );
@@ -1090,7 +1102,7 @@ export function WalletProvider({
         const signatureBase64 = sessionVault.withMnemonic((mnemonic) => {
           const derived = deriveTonAccount(
             mnemonic,
-            activeAccount?.derivationIndex ?? activeIndex ?? 0,
+            resolveTonDerivationIndex(activeAccount, activeIndex),
             config.tonNetwork,
             "v4r2",
           );
@@ -1229,7 +1241,7 @@ export function WalletProvider({
       const bocBase64 = await sessionVault.withMnemonic(async (mnemonic) => {
         const derived = deriveTonAccount(
           mnemonic,
-          activeAccount?.derivationIndex ?? activeIndex ?? 0,
+          resolveTonDerivationIndex(activeAccount, activeIndex),
           config.tonNetwork,
           "v4r2",
         );
@@ -1688,6 +1700,7 @@ export function WalletProvider({
           }
         }
         setAccountMetaList(mergedAccounts);
+        setVaultStatus("unlocked");
         return {
           status: "push_merged",
           envelopeJson: serializeAgVaultBackup(mergedEnvelope),
@@ -2065,10 +2078,12 @@ export function WalletProvider({
   );
 
   const lockVault = useCallback(() => {
+    chainFetchSeqRef.current += 1;
+    tonFetchSeqRef.current += 1;
     setPendingTonConnectTx(null);
     sessionVault.clear();
     clearSessionLease();
-    setAccountState(null);
+    setRawAccountState(null);
     setTonState(null);
     setRecentPayments([]);
     setRecentTrades([]);
@@ -2136,9 +2151,11 @@ export function WalletProvider({
       window.removeEventListener("touchstart", resetInactivityTimer);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [vaultStatus, lockVault, showToast]);
+  }, [vaultStatus, lockVault, showToast, loadValidSessionLease, saveSessionLease]);
 
   const wipeLocalVault = useCallback(async () => {
+    chainFetchSeqRef.current += 1;
+    tonFetchSeqRef.current += 1;
     setPendingTonConnectTx(null);
     clearSessionLease();
     await updateTelegramBiometricToken("").catch(() => false);
@@ -2149,10 +2166,11 @@ export function WalletProvider({
     sessionVault.clear();
     setLocalVaultUpdatedAt(null);
     setAccountMetaList([]);
-    setAccountState(null);
+    setRawAccountState(null);
     setTonState(null);
     setTonConnectSessions([]);
     setRecentPayments([]);
+    setRecentTrades([]);
     setClaimableBalances([]);
     setOpenOffers([]);
     setFingerprintEnrolled(false);
@@ -2190,60 +2208,90 @@ export function WalletProvider({
     [stellarClient, activeAccount, refreshChainState, showToast],
   );
 
+  const accountTxQueueRef = useRef<Map<string, Promise<unknown>>>(new Map());
+
+  const enqueueAccountTx = useCallback(
+    async <T,>(accountKey: string, task: () => Promise<T>): Promise<T> => {
+      const prev = accountTxQueueRef.current.get(accountKey) ?? Promise.resolve();
+      const next = prev.catch(() => undefined).then(task);
+      accountTxQueueRef.current.set(accountKey, next);
+      try {
+        return await next;
+      } finally {
+        if (accountTxQueueRef.current.get(accountKey) === next) {
+          accountTxQueueRef.current.delete(accountKey);
+        }
+      }
+    },
+    [],
+  );
+
   const sendPayment = useCallback(
     async (params: SendPaymentParams): Promise<{ hash: string; ledger: number }> => {
-      return withActiveKeypair(async (keypair) => {
-        const result = await stellarClient.buildAndSubmitPayment({
-          sourceKeypair: keypair,
-          destination: params.destination,
-          amount: params.amount,
-          assetCode: params.assetCode,
-          assetIssuer: params.assetIssuer,
-          memoText: params.memoText,
-          typedMemo: params.typedMemo,
-        });
-        await refreshChainState();
-        reportTelemetryEvent({
-          apiBaseUrl: config.apiBaseUrl,
-          network: config.network,
-          eventType: "tx_sent",
-          txHash: result.hash,
-          assetCode: params.assetCode,
-          amountEst: params.amount,
-        });
-        showToast(`Sent ${params.amount} ${params.assetCode} cleanly`);
-        return result;
-      });
+      return withActiveKeypair(async (keypair) =>
+        enqueueAccountTx(keypair.publicKey(), async () => {
+          const result = await stellarClient.buildAndSubmitPayment({
+            sourceKeypair: keypair,
+            destination: params.destination,
+            amount: params.amount,
+            assetCode: params.assetCode,
+            assetIssuer: params.assetIssuer,
+            memoText: params.memoText,
+            typedMemo: params.typedMemo,
+          });
+          await refreshChainState();
+          reportTelemetryEvent({
+            apiBaseUrl: config.apiBaseUrl,
+            network: config.network,
+            eventType: "tx_sent",
+            txHash: result.hash,
+            assetCode: params.assetCode,
+            amountEst: params.amount,
+          });
+          showToast(`Sent ${params.amount} ${params.assetCode} cleanly`);
+          return result;
+        }),
+      );
     },
-    [withActiveKeypair, stellarClient, refreshChainState, config.apiBaseUrl, config.network, showToast],
+    [
+      withActiveKeypair,
+      enqueueAccountTx,
+      stellarClient,
+      refreshChainState,
+      config.apiBaseUrl,
+      config.network,
+      showToast,
+    ],
   );
 
   const executePathSwap = useCallback(
     async (params: ExecutePathSwapParams): Promise<{ hash: string; ledger: number }> => {
-      return withActiveKeypair(async (keypair) => {
-        const result = await stellarClient.submitPathPaymentStrictSend({
-          sourceKeypair: keypair,
-          sendAsset: {
-            assetCode: params.sendAssetCode,
-            assetIssuer: params.sendAssetIssuer,
-          },
-          sendAmount: params.sendAmount,
-          destAsset: {
-            assetCode: params.destAssetCode,
-            assetIssuer: params.destAssetIssuer,
-          },
-          destMin: params.destMin,
-          path: params.path?.map((hop) => ({
-            assetCode: hop.assetCode,
-            assetIssuer: hop.assetIssuer as ClassicAddress | undefined,
-          })),
-        });
-        await refreshChainState();
-        showToast(`Swapped ${params.sendAmount} ${params.sendAssetCode} → ${params.destAssetCode}`);
-        return result;
-      });
+      return withActiveKeypair(async (keypair) =>
+        enqueueAccountTx(keypair.publicKey(), async () => {
+          const result = await stellarClient.submitPathPaymentStrictSend({
+            sourceKeypair: keypair,
+            sendAsset: {
+              assetCode: params.sendAssetCode,
+              assetIssuer: params.sendAssetIssuer,
+            },
+            sendAmount: params.sendAmount,
+            destAsset: {
+              assetCode: params.destAssetCode,
+              assetIssuer: params.destAssetIssuer,
+            },
+            destMin: params.destMin,
+            path: params.path?.map((hop) => ({
+              assetCode: hop.assetCode,
+              assetIssuer: hop.assetIssuer as ClassicAddress | undefined,
+            })),
+          });
+          await refreshChainState();
+          showToast(`Swapped ${params.sendAmount} ${params.sendAssetCode} → ${params.destAssetCode}`);
+          return result;
+        }),
+      );
     },
-    [withActiveKeypair, stellarClient, refreshChainState, showToast],
+    [withActiveKeypair, enqueueAccountTx, stellarClient, refreshChainState, showToast],
   );
 
   const submitAccountDataEntry = useCallback(
@@ -2268,28 +2316,38 @@ export function WalletProvider({
       assetIssuer: ClassicAddress,
       limit?: string,
     ): Promise<{ hash: string; ledger: number }> => {
-      return withActiveKeypair(async (keypair) => {
-        const result = await stellarClient.submitChangeTrust({
-          sourceKeypair: keypair,
-          assetCode,
-          assetIssuer,
-          limit,
-        });
-        await refreshChainState();
-        reportTelemetryEvent({
-          apiBaseUrl: config.apiBaseUrl,
-          network: config.network,
-          eventType: "trustline_added",
-          txHash: result.hash,
-          assetCode,
-        });
-        showToast(
-          limit === "0" ? `Removed ${assetCode} trustline` : `Activated ${assetCode} trustline`,
-        );
-        return result;
-      });
+      return withActiveKeypair(async (keypair) =>
+        enqueueAccountTx(keypair.publicKey(), async () => {
+          const result = await stellarClient.submitChangeTrust({
+            sourceKeypair: keypair,
+            assetCode,
+            assetIssuer,
+            limit,
+          });
+          await refreshChainState();
+          reportTelemetryEvent({
+            apiBaseUrl: config.apiBaseUrl,
+            network: config.network,
+            eventType: "trustline_added",
+            txHash: result.hash,
+            assetCode,
+          });
+          showToast(
+            limit === "0" ? `Removed ${assetCode} trustline` : `Activated ${assetCode} trustline`,
+          );
+          return result;
+        }),
+      );
     },
-    [withActiveKeypair, stellarClient, refreshChainState, config.apiBaseUrl, config.network, showToast],
+    [
+      withActiveKeypair,
+      enqueueAccountTx,
+      stellarClient,
+      refreshChainState,
+      config.apiBaseUrl,
+      config.network,
+      showToast,
+    ],
   );
 
   const reclaimZeroBalanceReserves = useCallback(async (): Promise<{
@@ -2344,24 +2402,6 @@ export function WalletProvider({
       });
     },
     [withActiveKeypair, stellarClient, refreshChainState, showToast],
-  );
-
-  const accountTxQueueRef = useRef<Map<string, Promise<unknown>>>(new Map());
-
-  const enqueueAccountTx = useCallback(
-    async <T,>(accountKey: string, task: () => Promise<T>): Promise<T> => {
-      const prev = accountTxQueueRef.current.get(accountKey) ?? Promise.resolve();
-      const next = prev.catch(() => undefined).then(task);
-      accountTxQueueRef.current.set(accountKey, next);
-      try {
-        return await next;
-      } finally {
-        if (accountTxQueueRef.current.get(accountKey) === next) {
-          accountTxQueueRef.current.delete(accountKey);
-        }
-      }
-    },
-    [],
   );
 
   const signRawXdrWithShield = useCallback(
@@ -2719,91 +2759,178 @@ export function WalletProvider({
     [withActiveKeypair, stellarClient, refreshChainState, showToast],
   );
 
-  const value: WalletContextValue = {
-    config,
-    vaultStatus,
-    accounts,
-    activeAccount,
-    activeIndex,
-    accountState,
-    recentPayments,
-    recentTrades,
-    claimableBalances,
-    openOffers,
-    contacts,
-    toast,
-    loadingChain,
-    chainError,
-    fingerprintSupported,
-    fingerprintEnrolled,
-    telegramBioAvailable,
-    verifiedAssets,
-    tokenMetaMap,
-    tonAccount,
-    tonState,
-    loadingTonChain,
-    tonChainError,
-    tonConnectSessions,
-    pendingTonConnectTx,
-    localVaultUpdatedAt,
-    storageScopeId: cleanScopeId,
-    setActiveIndex,
-    showToast,
-    dismissToast,
-    createOrImportVault,
-    reEncryptLocalVault,
-    restoreAgVaultJson,
-    syncFromNewerCloudBackup,
-    exportAgVaultJson,
-    revealMnemonicWithPin,
-    verifyPinOrPassphrase,
-    verifyBiometricReauth,
-    unlockWithPin,
-    unlockWithBiometric,
-    expressSessionMinutes,
-    setExpressSessionMinutes,
-    enableFingerprint,
-    disableFingerprint,
-    addDerivedAccount,
-    activateDerivedAccountAtIndex,
-    importExternalSecretAccount,
-    isImportedAccount,
-    renameDerivedAccount,
-    lockVault,
-    wipeLocalVault,
-    saveContact,
-    deleteContact,
-    refreshChainState,
-    refreshTonState,
-    fundActiveTestnetAccount,
-    fundAnyTestnetAddress,
-    sendPayment,
-    sendTonPayment,
-    pairTonConnectUri,
-    disconnectTonConnectSession,
-    resolvePendingTonConnectTx,
-    executePathSwap,
-    submitAccountDataEntry,
-    addOrRemoveTrustline,
-    reclaimZeroBalanceReserves,
-    claimBalanceById,
-    placeSdexOffer,
-    signRawXdrWithShield,
-    signAndSubmitRawXdrWithShield,
-    fetchDevTelemetry,
-    simulateSorobanCall,
-    invokeSorobanWrite,
-    simulateRawXdr,
-    buildDevTemplateXdr,
-    derivePublicKeyPreview,
-    signSep10ChallengeXdr,
-    signActiveSep53Message,
-    signConnectChallenge,
-    fundClaimEscrow,
-    claimFromEscrow,
-    cancelClaimEscrow,
-    refundExpiredClaimEscrow,
-  };
+  const value: WalletContextValue = useMemo(
+    () => ({
+      config,
+      vaultStatus,
+      accounts,
+      activeAccount,
+      activeIndex,
+      accountState,
+      recentPayments,
+      recentTrades,
+      claimableBalances,
+      openOffers,
+      contacts,
+      toast,
+      loadingChain,
+      chainError,
+      fingerprintSupported,
+      fingerprintEnrolled,
+      telegramBioAvailable,
+      verifiedAssets,
+      tokenMetaMap,
+      tonAccount,
+      tonState,
+      loadingTonChain,
+      tonChainError,
+      tonConnectSessions,
+      pendingTonConnectTx,
+      localVaultUpdatedAt,
+      storageScopeId: cleanScopeId,
+      setActiveIndex,
+      showToast,
+      dismissToast,
+      createOrImportVault,
+      reEncryptLocalVault,
+      restoreAgVaultJson,
+      syncFromNewerCloudBackup,
+      exportAgVaultJson,
+      revealMnemonicWithPin,
+      verifyPinOrPassphrase,
+      verifyBiometricReauth,
+      unlockWithPin,
+      unlockWithBiometric,
+      expressSessionMinutes,
+      setExpressSessionMinutes,
+      enableFingerprint,
+      disableFingerprint,
+      addDerivedAccount,
+      activateDerivedAccountAtIndex,
+      importExternalSecretAccount,
+      isImportedAccount,
+      renameDerivedAccount,
+      lockVault,
+      wipeLocalVault,
+      saveContact,
+      deleteContact,
+      refreshChainState,
+      refreshTonState,
+      fundActiveTestnetAccount,
+      fundAnyTestnetAddress,
+      sendPayment,
+      sendTonPayment,
+      pairTonConnectUri,
+      disconnectTonConnectSession,
+      resolvePendingTonConnectTx,
+      executePathSwap,
+      submitAccountDataEntry,
+      addOrRemoveTrustline,
+      reclaimZeroBalanceReserves,
+      claimBalanceById,
+      placeSdexOffer,
+      signRawXdrWithShield,
+      signAndSubmitRawXdrWithShield,
+      fetchDevTelemetry,
+      simulateSorobanCall,
+      invokeSorobanWrite,
+      simulateRawXdr,
+      buildDevTemplateXdr,
+      derivePublicKeyPreview,
+      signSep10ChallengeXdr,
+      signActiveSep53Message,
+      signConnectChallenge,
+      fundClaimEscrow,
+      claimFromEscrow,
+      cancelClaimEscrow,
+      refundExpiredClaimEscrow,
+    }),
+    [
+      config,
+      vaultStatus,
+      accounts,
+      activeAccount,
+      activeIndex,
+      accountState,
+      recentPayments,
+      recentTrades,
+      claimableBalances,
+      openOffers,
+      contacts,
+      toast,
+      loadingChain,
+      chainError,
+      fingerprintSupported,
+      fingerprintEnrolled,
+      telegramBioAvailable,
+      verifiedAssets,
+      tokenMetaMap,
+      tonAccount,
+      tonState,
+      loadingTonChain,
+      tonChainError,
+      tonConnectSessions,
+      pendingTonConnectTx,
+      localVaultUpdatedAt,
+      cleanScopeId,
+      setActiveIndex,
+      showToast,
+      dismissToast,
+      createOrImportVault,
+      reEncryptLocalVault,
+      restoreAgVaultJson,
+      syncFromNewerCloudBackup,
+      exportAgVaultJson,
+      revealMnemonicWithPin,
+      verifyPinOrPassphrase,
+      verifyBiometricReauth,
+      unlockWithPin,
+      unlockWithBiometric,
+      expressSessionMinutes,
+      setExpressSessionMinutes,
+      enableFingerprint,
+      disableFingerprint,
+      addDerivedAccount,
+      activateDerivedAccountAtIndex,
+      importExternalSecretAccount,
+      isImportedAccount,
+      renameDerivedAccount,
+      lockVault,
+      wipeLocalVault,
+      saveContact,
+      deleteContact,
+      refreshChainState,
+      refreshTonState,
+      fundActiveTestnetAccount,
+      fundAnyTestnetAddress,
+      sendPayment,
+      sendTonPayment,
+      pairTonConnectUri,
+      disconnectTonConnectSession,
+      resolvePendingTonConnectTx,
+      executePathSwap,
+      submitAccountDataEntry,
+      addOrRemoveTrustline,
+      reclaimZeroBalanceReserves,
+      claimBalanceById,
+      placeSdexOffer,
+      signRawXdrWithShield,
+      signAndSubmitRawXdrWithShield,
+      fetchDevTelemetry,
+      simulateSorobanCall,
+      invokeSorobanWrite,
+      simulateRawXdr,
+      buildDevTemplateXdr,
+      derivePublicKeyPreview,
+      signSep10ChallengeXdr,
+      signActiveSep53Message,
+      signConnectChallenge,
+      fundClaimEscrow,
+      claimFromEscrow,
+      cancelClaimEscrow,
+      refundExpiredClaimEscrow,
+    ],
+  );
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
 }

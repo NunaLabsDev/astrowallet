@@ -3,6 +3,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -510,29 +511,51 @@ export function TelegramProvider({
     authStatus,
   });
 
+  const value = useMemo<TelegramContextValue>(
+    () => ({
+      inTelegram,
+      allowed,
+      authStatus,
+      authError,
+      sessionToken,
+      tgUser,
+      linkedAccounts,
+      startParamRoute,
+      hasEncryptedBackup,
+      backupUpdatedAt,
+      cloudBackupJson,
+      cloudBackupError,
+      checkingCloudBackup,
+      refreshTelegramAuth: authenticate,
+      refreshLinkedAccounts,
+      refreshCloudBackup,
+      uploadEncryptedBackup,
+      deleteEncryptedBackup,
+    }),
+    [
+      inTelegram,
+      allowed,
+      authStatus,
+      authError,
+      sessionToken,
+      tgUser,
+      linkedAccounts,
+      startParamRoute,
+      hasEncryptedBackup,
+      backupUpdatedAt,
+      cloudBackupJson,
+      cloudBackupError,
+      checkingCloudBackup,
+      authenticate,
+      refreshLinkedAccounts,
+      refreshCloudBackup,
+      uploadEncryptedBackup,
+      deleteEncryptedBackup,
+    ],
+  );
+
   return (
-    <TelegramContext.Provider
-      value={{
-        inTelegram,
-        allowed,
-        authStatus,
-        authError,
-        sessionToken,
-        tgUser,
-        linkedAccounts,
-        startParamRoute,
-        hasEncryptedBackup,
-        backupUpdatedAt,
-        cloudBackupJson,
-        cloudBackupError,
-        checkingCloudBackup,
-        refreshTelegramAuth: authenticate,
-        refreshLinkedAccounts,
-        refreshCloudBackup,
-        uploadEncryptedBackup,
-        deleteEncryptedBackup,
-      }}
-    >
+    <TelegramContext.Provider value={value}>
       {children}
     </TelegramContext.Provider>
   );

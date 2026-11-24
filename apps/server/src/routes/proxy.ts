@@ -492,6 +492,9 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
 
         if (ipfsHash) {
           const cidClean = ipfsHash.replace(/^ipfs:\/\//i, "").replace(/^ipfs\//i, "").replace(/^\/+/, "");
+          if (!/^(Qm[1-9A-HJ-NP-Za-km-z]{44,}|bafy[a-z2-7]{20,})(\/[A-Za-z0-9._-]+)*$/i.test(cidClean)) {
+            ipfsHash = undefined;
+          } else {
           const gateways = [
             `https://ipfs.io/ipfs/${cidClean}`,
             `https://dweb.link/ipfs/${cidClean}`,
@@ -538,6 +541,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             } catch {
               continue;
             }
+          }
           }
         }
 
@@ -846,7 +850,15 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       }
     }
 
-    const fresh = await opts.compute();
+    let fresh: T;
+    try {
+      fresh = await opts.compute();
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : "Upstream data source unavailable" },
+        502,
+      );
+    }
     if (!scheduleBackground(persist(fresh))) {
       await persist(fresh);
     }
@@ -1047,8 +1059,10 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     const toml = (await res.text()).slice(0, STELLAR_TOML_MAX_BYTES);
     const webAuthMatch = toml.match(/^\s*WEB_AUTH_ENDPOINT\s*=\s*"([^"]+)"/m);
     const sep24Match = toml.match(/^\s*TRANSFER_SERVER_SEP0024\s*=\s*"([^"]+)"/m);
+    const signingKeyMatch = toml.match(/^\s*SIGNING_KEY\s*=\s*"([^"]+)"/m);
     const webAuthEndpoint = webAuthMatch?.[1]?.trim() ?? "";
     const transferServerSep24 = sep24Match?.[1]?.trim() ?? "";
+    const signingKey = signingKeyMatch?.[1]?.trim() || undefined;
     if (!webAuthEndpoint.startsWith("https://") || !transferServerSep24.startsWith("https://")) {
       throw new Error(`Anchor ${cleanDomain} missing HTTPS WEB_AUTH_ENDPOINT or TRANSFER_SERVER_SEP0024`);
     }
@@ -1061,6 +1075,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     const result = {
       webAuthEndpoint: webAuthEndpoint.replace(/\/+$/, ""),
       transferServerSep24: transferServerSep24.replace(/\/+$/, ""),
+      ...(signingKey ? { signingKey } : {}),
     };
     if (cache) {
       await cache.put(cacheKey, JSON.stringify(result), { expirationTtl: 600 });
@@ -1077,7 +1092,11 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       return c.json({ error: "Valid Classic G... account is required" }, 400);
     }
     try {
-      const endpoints = await resolveSep24AnchorEndpoints(domain, c.env.CACHE);
+      const endpoints = (await resolveSep24AnchorEndpoints(domain, c.env.CACHE)) as {
+        webAuthEndpoint: string;
+        transferServerSep24: string;
+        signingKey?: string;
+      };
       const challengeUrl = new URL(endpoints.webAuthEndpoint);
       challengeUrl.searchParams.set("account", parsedAcct.data);
       if (config.sep10ClientDomain) {
@@ -1125,8 +1144,26 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         if (!allManageData) {
           return c.json({ error: "Refusing to cosign non-manageData SEP-10 challenge" }, 502);
         }
+        const clientKp = Keypair.fromSecret(config.sep10ClientSigningSecret);
+        if (endpoints.signingKey && /^G[A-Z2-7]{55}$/.test(endpoints.signingKey)) {
+          const anchorKp = Keypair.fromPublicKey(endpoints.signingKey);
+          const anchorSigned = parsed.signatures.some((decSig) =>
+            anchorKp.verify(
+              Buffer.from(parsed.hash()),
+              decSig.signature as unknown as Buffer,
+            ),
+          );
+          if (!anchorSigned) {
+            return c.json({ error: "SEP-10 challenge is not signed by anchor SIGNING_KEY" }, 502);
+          }
+        }
+        const firstOp = parsed.operations[0];
+        if (!firstOp || firstOp.source !== parsedAcct.data) {
+          return c.json({ error: "SEP-10 challenge op 0 source does not match requested account" }, 502);
+        }
         const hasMatchingClientDomain = parsed.operations.some((op) => {
           if (op.type !== "manageData" || op.name !== "client_domain") return false;
+          if (op.source && op.source !== clientKp.publicKey()) return false;
           const valStr = op.value ? Buffer.from(op.value).toString("utf8") : "";
           return valStr === config.sep10ClientDomain;
         });
@@ -1136,7 +1173,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             502,
           );
         }
-        parsed.sign(Keypair.fromSecret(config.sep10ClientSigningSecret));
+        parsed.sign(clientKp);
         challengeXdr = parsed.toXDR();
         clientDomainSigned = true;
       }

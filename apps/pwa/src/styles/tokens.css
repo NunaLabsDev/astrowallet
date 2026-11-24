@@ -14,6 +14,10 @@
   --aw-ink-muted: #8E99C2;
   --aw-ink-on-gold: #0B1433;
   --aw-ink-on-orange: #FFFFFF;
+  --aw-ink-emerald-soft: #D1FAE5;
+  --aw-ink-danger-soft: #FECACA;
+  --aw-ink-orange-soft: #FFB396;
+  --aw-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
   /* Institutional Glass & Security Posture Tokens */
   --aw-glass-rim-lavender: rgba(165, 139, 224, 0.26);

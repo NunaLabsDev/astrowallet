@@ -6,6 +6,7 @@ import type {
   SignedIntent,
   TelegramUserBinding,
 } from "@astrowallet/domain";
+import { Account, Keypair, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
 import { computeTelegramInitDataHash } from "@astrowallet/tg-protocol";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
@@ -511,7 +512,17 @@ describe("AstroConnect v1 Open Standard API (/v1/connect/* & discovery)", () => 
           : { confirmed: false, reason: "tx not found" },
     });
 
-    const unsignedXdr = "AAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGQ=";
+    const testSigner = Keypair.random();
+    const txObj = new TransactionBuilder(new Account(testSigner.publicKey(), "1"), {
+      fee: "100",
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })
+      .addOperation(Operation.manageData({ name: "astro_test", value: "1" }))
+      .setTimeout(300)
+      .build();
+    const unsignedXdr = txObj.toXDR();
+    txObj.sign(testSigner);
+    const signedXdr = txObj.toXDR();
     const badCreate = await app.request(
       "/v1/connect/requests",
       {
@@ -565,7 +576,8 @@ describe("AstroConnect v1 Open Standard API (/v1/connect/* & discovery)", () => 
         body: JSON.stringify({
           sig: signOnly.sig,
           status: "approved",
-          signedXdr: `${unsignedXdr}SIGNED`,
+          address: testSigner.publicKey(),
+          signedXdr,
         }),
       },
       TEST_ENV,
@@ -579,7 +591,7 @@ describe("AstroConnect v1 Open Standard API (/v1/connect/* & discovery)", () => 
     );
     expect(
       ((await signOnlyPoll.json()) as { result: { signedXdr: string } }).result.signedXdr,
-    ).toBe(`${unsignedXdr}SIGNED`);
+    ).toBe(signedXdr);
 
     // submit=true verifies txHash on-chain
     const submitCreate = await app.request(

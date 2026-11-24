@@ -14,6 +14,17 @@ export interface TokenBadgeProps {
  * Stellar Lumens (XLM) vector emblem for native XLM, or a clear `?` no-image badge
  * when no real image exists. Never fabricates or substitutes fake token logos.
  */
+function normalizeBadgeUrl(raw: string | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (trimmed.startsWith("https://")) return trimmed;
+  if (trimmed.startsWith("ipfs://")) {
+    const cidPath = trimmed.slice("ipfs://".length).replace(/^ipfs\//, "");
+    return cidPath ? `https://ipfs.io/ipfs/${cidPath}` : null;
+  }
+  return null;
+}
+
 export function TokenBadge({
   code,
   icon,
@@ -23,10 +34,10 @@ export function TokenBadge({
   trustStatus,
 }: TokenBadgeProps) {
   const candidates = useMemo(() => {
-    const urls = [icon, fallbackIcon].filter(
-      (u): u is string => typeof u === "string" && u.trim().startsWith("https://"),
+    const urls = [normalizeBadgeUrl(icon), normalizeBadgeUrl(fallbackIcon)].filter(
+      (u): u is string => u !== null,
     );
-    return Array.from(new Set(urls.map((u) => u.trim())));
+    return Array.from(new Set(urls));
   }, [icon, fallbackIcon]);
 
   const [candidateIdx, setCandidateIdx] = useState(0);

@@ -60,7 +60,7 @@ export function UnlockSheet() {
 
   const handlePinSubmit = async (e: FormEvent) => {
     e.preventDefault();
-    if (!pin || remainingSec > 0) return;
+    if (busy || !pin || remainingSec > 0) return;
     setBusy(true);
     setError(null);
     try {
@@ -86,6 +86,7 @@ export function UnlockSheet() {
   };
 
   const handleFingerprint = async () => {
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {

@@ -17,6 +17,7 @@ import {
   type SorobanTelemetry,
 } from "@astrowallet/stellar-core";
 import { useWallet } from "../state/wallet-context.js";
+import { copyTextToClipboard } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { TonConnectSheet } from "./TonConnectSheet.js";
 import {
@@ -163,12 +164,10 @@ export function DevLabSheet() {
   if (!activeAccount) return null;
 
   const copyValue = async (key: string, text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
+    const ok = await copyTextToClipboard(text);
+    if (ok) {
       setCopiedKey(key);
       setTimeout(() => setCopiedKey(null), 1600);
-    } catch {
-      // Clipboard unavailable
     }
   };
 

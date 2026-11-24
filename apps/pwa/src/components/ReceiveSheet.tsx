@@ -24,6 +24,14 @@ export function ReceiveSheet({
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
+  const isSmartAccount = Boolean(activeAccount?.address.startsWith("C"));
+
+  useEffect(() => {
+    if (isSmartAccount && mode === "muxed") {
+      setMode("standard");
+    }
+  }, [isSmartAccount, mode]);
+
   const muxedResult = useMemo(() => {
     if (!activeAccount || mode !== "muxed") return { value: null, error: null };
     try {
@@ -155,6 +163,8 @@ export function ReceiveSheet({
             type="button"
             className="aw-chip-btn"
             aria-pressed={mode === "muxed"}
+            disabled={isSmartAccount}
+            title={isSmartAccount ? "CAP-27 Muxed M... addresses apply only to Classic G... accounts" : undefined}
             onClick={() => setMode("muxed")}
           >
             Muxed M... (CAP-27)

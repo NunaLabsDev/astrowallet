@@ -22,6 +22,7 @@ import {
 import { useWallet } from "../state/wallet-context.js";
 import {
   copyTextToClipboard,
+  openExternalUrl,
   openTelegramMiniAppLink,
   triggerTelegramHaptic,
 } from "../telegram/webapp.js";
@@ -712,7 +713,7 @@ export function TokenExplorerSheet({
               {priceHistory?.changePct !== null && priceHistory?.changePct !== undefined && (
                 <span
                   className={`glass-pill tabular-nums ${
-                    positiveChange ? "glass-pill--trust" : "glass-pill--gold"
+                    positiveChange ? "glass-pill--trust" : "aw-pill-danger"
                   }`}
                 >
                   {positiveChange ? "+" : ""}
@@ -1249,34 +1250,40 @@ export function TokenExplorerSheet({
 
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             {config.astrodexBotUsername && (
-              <a
-                href={`${
-                  config.astrodexMiniAppShortName
-                    ? `https://t.me/${config.astrodexBotUsername}/${config.astrodexMiniAppShortName}`
-                    : `https://t.me/${config.astrodexBotUsername}`
-                }?startapp=${encodeURIComponent(`${config.network}_tab_book`)}`}
+              <button
+                type="button"
                 className="aw-btn-secondary"
-                style={{ textDecoration: "none", flex: "1 1 180px" }}
+                style={{ flex: "1 1 180px" }}
+                onClick={() =>
+                  openTelegramMiniAppLink(
+                    `${
+                      config.astrodexMiniAppShortName
+                        ? `https://t.me/${config.astrodexBotUsername}/${config.astrodexMiniAppShortName}`
+                        : `https://t.me/${config.astrodexBotUsername}`
+                    }?startapp=${encodeURIComponent(`${config.network}_tab_book`)}`,
+                  )
+                }
               >
                 <IconChart size={14} />
                 <span>Explore Deep Pools on AstroDex</span>
-              </a>
+              </button>
             )}
             {config.explorerBaseUrl && (
-              <a
-                href={
-                  selectedToken.assetIssuer
-                    ? `${config.explorerBaseUrl.replace(/\/+$/, "")}/asset/${encodeURIComponent(`${selectedToken.assetCode}-${selectedToken.assetIssuer}`)}?filter=asset-holders`
-                    : `${config.explorerBaseUrl.replace(/\/+$/, "")}/asset/XLM?filter=asset-holders`
-                }
-                target="_blank"
-                rel="noreferrer"
+              <button
+                type="button"
                 className="aw-btn-secondary"
                 style={{ flex: "1 1 180px" }}
+                onClick={() =>
+                  openExternalUrl(
+                    selectedToken.assetIssuer
+                      ? `${config.explorerBaseUrl!.replace(/\/+$/, "")}/asset/${encodeURIComponent(`${selectedToken.assetCode}-${selectedToken.assetIssuer}`)}?filter=asset-holders`
+                      : `${config.explorerBaseUrl!.replace(/\/+$/, "")}/asset/XLM?filter=asset-holders`,
+                  )
+                }
               >
                 <span>Full Holders List</span>
                 <IconExternalLink size={14} />
-              </a>
+              </button>
             )}
           </div>
         </div>
@@ -1310,15 +1317,16 @@ export function TokenExplorerSheet({
                     <span>{copiedField === "issuer" ? "Copied" : "Copy"}</span>
                   </button>
                   {config.explorerBaseUrl && (
-                    <a
-                      href={`${config.explorerBaseUrl.replace(/\/+$/, "")}/account/${selectedToken.assetIssuer}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <button
+                      type="button"
                       className="aw-mini-chip"
+                      onClick={() =>
+                        openExternalUrl(`${config.explorerBaseUrl!.replace(/\/+$/, "")}/account/${selectedToken.assetIssuer}`)
+                      }
                     >
                       <span>Explorer</span>
                       <IconExternalLink size={11} />
-                    </a>
+                    </button>
                   )}
                 </div>
               </div>
@@ -1338,15 +1346,16 @@ export function TokenExplorerSheet({
                     <span>{copiedField === "sac" ? "Copied" : "Copy"}</span>
                   </button>
                   {config.explorerBaseUrl && (
-                    <a
-                      href={`${config.explorerBaseUrl.replace(/\/+$/, "")}/contract/${details.sacContractId}`}
-                      target="_blank"
-                      rel="noreferrer"
+                    <button
+                      type="button"
                       className="aw-mini-chip"
+                      onClick={() =>
+                        openExternalUrl(`${config.explorerBaseUrl!.replace(/\/+$/, "")}/contract/${details.sacContractId}`)
+                      }
                     >
                       <span>Contract</span>
                       <IconExternalLink size={11} />
-                    </a>
+                    </button>
                   )}
                 </div>
               </div>
@@ -1355,14 +1364,14 @@ export function TokenExplorerSheet({
             <div className="aw-seal-row">
               <span>Home Domain (stellar.toml)</span>
               {displayDomain ? (
-                <a
-                  href={`https://${displayDomain}/.well-known/stellar.toml`}
-                  target="_blank"
-                  rel="noreferrer"
+                <button
+                  type="button"
+                  className="aw-mini-chip"
                   style={{ color: "var(--aw-stellar-gold)", textDecoration: "underline" }}
+                  onClick={() => openExternalUrl(`https://${displayDomain}/.well-known/stellar.toml`)}
                 >
                   <code>{displayDomain} ↗</code>
-                </a>
+                </button>
               ) : (
                 <code>Not declared on issuer</code>
               )}
@@ -1453,19 +1462,20 @@ export function TokenExplorerSheet({
           )}
 
           {config.explorerBaseUrl && (
-            <a
-              href={
-                selectedToken.assetIssuer
-                  ? `${config.explorerBaseUrl.replace(/\/+$/, "")}/asset/${encodeURIComponent(`${selectedToken.assetCode}-${selectedToken.assetIssuer}`)}`
-                  : `${config.explorerBaseUrl.replace(/\/+$/, "")}/asset/XLM`
-              }
-              target="_blank"
-              rel="noreferrer"
+            <button
+              type="button"
               className="aw-btn-secondary"
+              onClick={() =>
+                openExternalUrl(
+                  selectedToken.assetIssuer
+                    ? `${config.explorerBaseUrl!.replace(/\/+$/, "")}/asset/${encodeURIComponent(`${selectedToken.assetCode}-${selectedToken.assetIssuer}`)}`
+                    : `${config.explorerBaseUrl!.replace(/\/+$/, "")}/asset/XLM`,
+                )
+              }
             >
               <span>Inspect on External Stellar Explorer</span>
               <IconExternalLink size={14} />
-            </a>
+            </button>
           )}
         </div>
       )}

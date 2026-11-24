@@ -2867,3 +2867,40 @@ select:focus-visible {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Mobile iOS WebView Anti-Zoom & Accessibility Hit-Targets */
+@media (max-width: 767px) {
+  input,
+  select,
+  textarea {
+    font-size: max(16px, 1rem);
+  }
+}
+
+.aw-btn-primary,
+.aw-cta-lg {
+  font-size: 16px;
+  font-weight: 700;
+  min-height: 44px;
+}
+
+.aw-chip-btn,
+.aw-icon-btn {
+  min-height: 44px;
+}
+
+.aw-sheet-skeleton {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
+  border-radius: 20px;
+  background: rgba(11, 22, 56, 0.72);
+  border: 1px solid rgba(165, 139, 224, 0.22);
+  min-height: 180px;
+}
+
+.aw-sheet-skeleton__bar {
+  height: 14px;
+  border-radius: 8px;
+  background: rgba(165, 139, 224, 0.16);
+}

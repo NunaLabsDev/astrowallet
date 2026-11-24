@@ -8,6 +8,7 @@ import { webhookCallback } from "grammy";
 import { Hono, type Context, type Next } from "hono";
 import { createTelegramBot } from "./bot.js";
 import { createD1Repository, type ServerRepository } from "./db/repository.js";
+import { constantTimeEqual } from "./lib/crypto-utils.js";
 import { createConnectRoutes } from "./routes/connect.js";
 import { createDiscoveryRoutes } from "./routes/discovery.js";
 import { createIdentityRoutes } from "./routes/identity.js";
@@ -45,15 +46,6 @@ type AppEnv = {
     repo: ServerRepository;
   };
 };
-
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
 
 export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
@@ -101,7 +93,7 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
         c.header("Access-Control-Allow-Origin", origin);
         c.header("Vary", "Origin");
         c.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-        c.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        c.header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Astro-Network");
       }
 
       if (c.req.method === "OPTIONS") {
@@ -167,9 +159,14 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
     if (c.env.CHAIN_WATCHER) {
       const id = c.env.CHAIN_WATCHER.idFromName(`watcher:${config.network}`);
       const stub = c.env.CHAIN_WATCHER.get(id);
-      c.executionCtx.waitUntil(
-        stub.fetch("https://chain-watcher.internal/ensure", { method: "POST" }).catch(() => {}),
-      );
+      const ensurePromise = stub
+        .fetch("https://chain-watcher.internal/ensure", { method: "POST" })
+        .catch(() => {});
+      try {
+        c.executionCtx.waitUntil(ensurePromise);
+      } catch {
+        // Ignore when executionCtx is absent in unit tests
+      }
     }
 
     // Deduplicate retried Telegram webhooks atomically using update_id before entering handlers
@@ -190,13 +187,27 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
     }
 
     const dexBase = config.astrodexApiBaseUrl?.replace(/\/+$/, "");
+    let dexOrigin: string | null = null;
+    if (dexBase) {
+      try {
+        dexOrigin = new URL(dexBase).origin;
+      } catch {
+        dexOrigin = null;
+      }
+    }
     const botFetchFn: FetchLike | undefined =
       deps.fetchFn ??
-      (c.env.ASTRODEX && dexBase
+      (c.env.ASTRODEX && dexOrigin
         ? (input, init) => {
             const rawUrl =
               typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
-            if (rawUrl.startsWith(dexBase)) {
+            let matchesDexOrigin = false;
+            try {
+              matchesDexOrigin = new URL(rawUrl).origin === dexOrigin;
+            } catch {
+              matchesDexOrigin = false;
+            }
+            if (matchesDexOrigin) {
               const targetReq = input instanceof Request ? input : new Request(rawUrl, init);
               return c.env.ASTRODEX!.fetch(targetReq);
             }

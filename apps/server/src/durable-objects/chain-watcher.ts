@@ -58,7 +58,12 @@ export class ChainWatcherDO {
     }
 
     if (url.pathname === "/cursor" && request.method === "POST") {
-      const body = (await request.json()) as { lastLedger?: unknown };
+      let body: { lastLedger?: unknown };
+      try {
+        body = (await request.json()) as { lastLedger?: unknown };
+      } catch {
+        return Response.json({ error: "Invalid JSON body" }, { status: 400 });
+      }
       if (
         typeof body.lastLedger !== "number" ||
         !Number.isInteger(body.lastLedger) ||
@@ -87,23 +92,50 @@ export class ChainWatcherDO {
       return;
     }
 
+    let shouldReschedule = false;
     try {
       const repo = createD1Repository(this.env.DB);
-      const watched = await repo.listWatchedAccounts();
-      if (watched.length === 0) {
+      const savedOffset = (await this.state.storage.get<number>("batch_offset")) ?? 0;
+      let batch = repo.listWatchedAccountsPage
+        ? await repo.listWatchedAccountsPage(BATCH_SIZE, savedOffset)
+        : (await repo.listWatchedAccounts()).slice(savedOffset, savedOffset + BATCH_SIZE);
+
+      if (batch.length === 0 && savedOffset > 0) {
+        await this.state.storage.put("batch_offset", 0);
+        batch = repo.listWatchedAccountsPage
+          ? await repo.listWatchedAccountsPage(BATCH_SIZE, 0)
+          : (await repo.listWatchedAccounts()).slice(0, BATCH_SIZE);
+      }
+
+      if (batch.length === 0) {
+        await this.state.storage.delete("batch_offset");
         return;
       }
 
-      const verifiedAssets =
-        config.sep42AssetListUrls.length > 0
-          ? await fetchSep42VerifiedAssets(config.sep42AssetListUrls).catch(() => [])
-          : [];
-
-      const savedOffset = (await this.state.storage.get<number>("batch_offset")) ?? 0;
-      const start = savedOffset >= watched.length ? 0 : savedOffset;
-      const batch = watched.slice(start, start + BATCH_SIZE);
-      const nextOffset = start + BATCH_SIZE >= watched.length ? 0 : start + BATCH_SIZE;
+      shouldReschedule = true;
+      const nextOffset = batch.length < BATCH_SIZE ? 0 : savedOffset + BATCH_SIZE;
       await this.state.storage.put("batch_offset", nextOffset);
+
+      let verifiedAssets: Awaited<ReturnType<typeof fetchSep42VerifiedAssets>> = [];
+      if (config.sep42AssetListUrls.length > 0) {
+        const kvKey = `sep42:${config.network}:v1`;
+        const cached = this.env.CACHE ? await this.env.CACHE.get(kvKey).catch(() => null) : null;
+        if (cached) {
+          try {
+            verifiedAssets = JSON.parse(cached) as typeof verifiedAssets;
+          } catch {
+            verifiedAssets = [];
+          }
+        }
+        if (verifiedAssets.length === 0) {
+          verifiedAssets = await fetchSep42VerifiedAssets(config.sep42AssetListUrls).catch(() => []);
+          if (verifiedAssets.length > 0 && this.env.CACHE) {
+            await this.env.CACHE
+              .put(kvKey, JSON.stringify(verifiedAssets), { expirationTtl: 600 })
+              .catch(() => undefined);
+          }
+        }
+      }
 
       for (const entry of batch) {
         if (entry.address.startsWith("C")) {
@@ -123,19 +155,19 @@ export class ChainWatcherDO {
 
           const effectiveCursor =
             savedCursor === "empty_init" || savedCursor === "now" ? undefined : savedCursor;
-          const incoming = await fetchIncomingPaymentsSince(
+          const pollResult = await fetchIncomingPaymentsSince(
             config,
             entry.address,
             effectiveCursor,
-            5,
+            10,
           );
 
-          let newestCursor = savedCursor;
+          let newestCursor = pollResult.newestCursor ?? savedCursor;
           let sentCount = 0;
           let sawStaleRecord = false;
           const nowMs = Date.now();
 
-          for (const ev of incoming) {
+          for (const ev of pollResult.incoming) {
             newestCursor = ev.pagingToken;
 
             if (ev.createdAt) {
@@ -236,7 +268,9 @@ export class ChainWatcherDO {
         }
       }
     } finally {
-      await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
+      if (shouldReschedule) {
+        await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
+      }
     }
   }
 }

@@ -13,6 +13,7 @@ import {
   TransactionBuilder,
 } from "@stellar/stellar-sdk";
 import { Hono } from "hono";
+import { constantTimeEqual, sha256Hex } from "../lib/crypto-utils.js";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
 import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
@@ -63,23 +64,6 @@ const RelaySubmitSchema = z.discriminatedUnion("mode", [
     walletAuth: WalletAuthSchema.optional(),
   }),
 ]);
-
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
-
-async function sha256Hex(input: string): Promise<string> {
-  const bytes = new TextEncoder().encode(input);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 /**
  * Policy-gated proxy to OpenZeppelin Stellar Channels (sponsors transaction gas fees,
@@ -137,7 +121,13 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
 
     if (body.intentAuth) {
       const intent = repo ? await repo.getSignedIntent(body.intentAuth.intentId) : null;
-      if (intent && intent.network === config.network && intent.status === "pending") {
+      const allowSignedClaim =
+        intent?.actionType === "claim" && intent.status === "signed";
+      if (
+        intent &&
+        intent.network === config.network &&
+        (intent.status === "pending" || allowSignedClaim)
+      ) {
         const check = await verifyIntentToken(
           {
             intentId: intent.intentId,
@@ -148,7 +138,17 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
           body.intentAuth.sig,
           config.intentHmacSecret,
         );
-        authorized = check.valid;
+        if (check.valid) {
+          if (intent.actionType === "claim") {
+            const escrowContract = config.claimEscrowContractId;
+            authorized = Boolean(
+              escrowContract &&
+                config.relayAllowedContracts.includes(escrowContract),
+            );
+          } else {
+            authorized = true;
+          }
+        }
       }
     }
 
@@ -317,6 +317,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         method: "POST",
         headers,
         body: JSON.stringify(upstreamPayload),
+        signal: AbortSignal.timeout(10_000),
       });
     };
 
@@ -448,26 +449,36 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       return c.json({ error: "Invalid SEP-53 ownership signature for bootstrap address" }, 403);
     }
 
-    // Check Horizon: reject if target account is already funded
+    // Check Horizon: reject if target account is already funded, fail closed if Horizon unreachable
+    let confirmedUnfunded = false;
     for (const hBase of config.horizonUrls) {
       try {
         const acctRes = await fetchFn(
           `${hBase.replace(/\/+$/, "")}/accounts/${encodeURIComponent(body.address)}`,
-          { headers: { Accept: "application/json" } },
+          {
+            headers: { Accept: "application/json" },
+            signal: AbortSignal.timeout(6_000),
+          },
         );
         if (acctRes.status === 200) {
           return c.json({ error: "Target Stellar account is already funded on-ledger" }, 409);
         }
         if (acctRes.status === 404) {
+          confirmedUnfunded = true;
           break;
         }
       } catch {
         // Try next Horizon URL
       }
     }
+    if (!confirmedUnfunded) {
+      return c.json({ error: "Unable to verify target account status on Horizon" }, 503);
+    }
 
+    const userDedupKey = `bootstrap:tg:${config.network}:${session.claims.telegramUserId}`;
+    const addrDedupKey = `bootstrap:addr:${config.network}:${body.address}`;
     if (repo) {
-      const dayUtc = new Date(nowSec * 1000).toISOString().slice(0, 10);
+      const dayUtc = `bootstrap:${new Date(nowSec * 1000).toISOString().slice(0, 10)}`;
       const budget = await repo.tryConsumeRelayBudget({
         dayUtc,
         feeStroops: "100000",
@@ -477,19 +488,24 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         return c.json({ error: "Daily sponsored bootstrap limit reached" }, 429);
       }
 
-      const claimedUser = await repo.claimAlertDedupKey(
-        `bootstrap:tg:${config.network}:${session.claims.telegramUserId}`,
-      );
+      const claimedUser = await repo.claimAlertDedupKey(userDedupKey);
       if (!claimedUser) {
         return c.json({ error: "This Telegram account has already used its sponsored activation" }, 409);
       }
-      const claimedAddr = await repo.claimAlertDedupKey(
-        `bootstrap:addr:${config.network}:${body.address}`,
-      );
+      const claimedAddr = await repo.claimAlertDedupKey(addrDedupKey);
       if (!claimedAddr) {
+        await repo.releaseAlertDedupKey?.(userDedupKey);
         return c.json({ error: "This Stellar address has already been bootstrapped" }, 409);
       }
     }
+
+    const rollbackDedup = async () => {
+      if (!repo?.releaseAlertDedupKey) return;
+      await Promise.all([
+        repo.releaseAlertDedupKey(userDedupKey).catch(() => undefined),
+        repo.releaseAlertDedupKey(addrDedupKey).catch(() => undefined),
+      ]);
+    };
 
     const sponsorKeypair = Keypair.fromSecret(config.relaySponsorSecret);
     const sponsorAddress = sponsorKeypair.publicKey();
@@ -499,7 +515,10 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       try {
         const sRes = await fetchFn(
           `${hBase.replace(/\/+$/, "")}/accounts/${encodeURIComponent(sponsorAddress)}`,
-          { headers: { Accept: "application/json" } },
+          {
+            headers: { Accept: "application/json" },
+            signal: AbortSignal.timeout(6_000),
+          },
         );
         if (!sRes.ok) continue;
         const sJson = (await sRes.json()) as { sequence?: string };
@@ -512,6 +531,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       }
     }
     if (!sponsorSequence) {
+      await rollbackDedup();
       return c.json({ error: "Sponsor account sequence unavailable on Horizon" }, 502);
     }
 
@@ -577,10 +597,14 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({ tx: sponsorSignedXdr }).toString(),
+            signal: AbortSignal.timeout(8_000),
           },
         );
         if (submitRes.ok) {
-          const submitted = (await submitRes.json()) as { hash?: string; ledger?: number };
+          const submitted = (await submitRes.json().catch(() => ({}))) as {
+            hash?: string;
+            ledger?: number;
+          };
           return c.json({
             ok: true,
             mode: "direct",
@@ -594,6 +618,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       }
     }
 
+    await rollbackDedup();
     return c.json({ error: "Horizon rejected direct bootstrap transaction" }, 502);
   });
 

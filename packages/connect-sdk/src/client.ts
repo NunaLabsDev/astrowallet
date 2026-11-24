@@ -126,8 +126,9 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
     });
-    const data = (await res.json()) as ConnectRequestHandle & { error?: string };
+    const data = (await res.json().catch(() => ({}))) as ConnectRequestHandle & { error?: string };
     if (!res.ok) {
       throw new AstroConnectError(
         "http_error",
@@ -188,9 +189,10 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
         {
           method: "GET",
           headers: { "X-Connect-Token": resultToken },
+          signal: AbortSignal.timeout(8_000),
         },
       );
-      const data = (await res.json()) as ConnectStatusResponse & { error?: string };
+      const data = (await res.json().catch(() => ({}))) as ConnectStatusResponse & { error?: string };
       if (!res.ok) {
         throw new AstroConnectError(
           "http_error",

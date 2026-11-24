@@ -72,7 +72,7 @@ export function ClearSignSummaryCard({
         <span
           className={
             isDanger
-              ? "glass-pill glass-pill--danger"
+              ? "glass-pill aw-pill-danger"
               : "glass-pill glass-pill--trust"
           }
           style={{ fontSize: 11, flexShrink: 0 }}

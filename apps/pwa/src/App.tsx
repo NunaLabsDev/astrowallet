@@ -1430,10 +1430,9 @@ function WalletShell({
                   )}
                   <input
                     type="password"
-                    inputMode="numeric"
                     className="aw-input"
                     style={{ flex: "1 1 130px", minWidth: 0, fontSize: 16 }}
-                    placeholder="Vault PIN"
+                    placeholder="Vault PIN / Password"
                     value={expressPin}
                     onChange={(e) => setExpressPin(e.target.value)}
                   />
@@ -2911,7 +2910,7 @@ function WalletShell({
                       <div className="aw-vault-divider">
                         <div style={{ fontWeight: 700, fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
                           <IconFingerprint size={16} />
-                          <span>Optional Fingerprint Quick-Unlock (Zero FaceID Required)</span>
+                          <span>Optional Fingerprint Quick-Unlock (Device Biometrics)</span>
                         </div>
                         {!fingerprintSupported ? (
                           <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
@@ -3871,6 +3870,17 @@ export function App() {
       : env.config;
   }, [env, selectedNetwork]);
 
+  const handleSwitchNetwork = useCallback((next: StellarNetwork) => {
+    setSelectedNetwork(next);
+    if (typeof window !== "undefined") {
+      try {
+        window.localStorage.setItem("aw_selected_network", next);
+      } catch {
+        // Ignore storage quota errors
+      }
+    }
+  }, []);
+
   if (!env.ok) {
     return (
       <main className="glass-canvas">
@@ -3902,17 +3912,6 @@ export function App() {
       </main>
     );
   }
-
-  const handleSwitchNetwork = useCallback((next: StellarNetwork) => {
-    setSelectedNetwork(next);
-    if (typeof window !== "undefined") {
-      try {
-        window.localStorage.setItem("aw_selected_network", next);
-      } catch {
-        // Ignore storage quota errors
-      }
-    }
-  }, []);
 
   const activeConfig = effectiveConfig ?? env.config;
 

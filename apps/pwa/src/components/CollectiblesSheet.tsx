@@ -89,6 +89,8 @@ export function CollectiblesSheet({
     return () => observer.disconnect();
   }, [hasMoreNfts, filteredClassicNfts.length]);
 
+  const fetchedMetaKeysRef = useRef<Set<string>>(new Set());
+
   // Lazy-resolve real IPFS/TOML metadata for visible Classic NFTs (concurrency 4)
   useEffect(() => {
     if (visibleClassicNfts.length === 0) return undefined;
@@ -96,9 +98,15 @@ export function CollectiblesSheet({
     const targets = visibleClassicNfts.filter((item) => {
       if (!item.assetIssuer) return false;
       const key = `${item.assetCode}:${item.assetIssuer}`;
-      return !nftMetaMap[key];
+      return !fetchedMetaKeysRef.current.has(key);
     });
     if (targets.length === 0) return undefined;
+
+    for (const t of targets) {
+      if (t.assetIssuer) {
+        fetchedMetaKeysRef.current.add(`${t.assetCode}:${t.assetIssuer}`);
+      }
+    }
 
     const base = config.apiBaseUrl.replace(/\/+$/, "");
     let cursor = 0;
@@ -144,7 +152,6 @@ export function CollectiblesSheet({
     };
   }, [
     visibleClassicNfts,
-    nftMetaMap,
     config.apiBaseUrl,
     config.network,
   ]);

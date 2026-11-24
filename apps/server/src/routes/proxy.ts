@@ -61,6 +61,7 @@ const SwapQuoteBodySchema = z.object({
 
 const ScanBodySchema = z.object({
   target: z.string().trim().min(10),
+  sourceAddress: StellarAddressSchema.optional(),
 });
 
 const SAFE_PUBLIC_DOMAIN_REGEX =
@@ -172,6 +173,7 @@ export async function runScanTarget(params: {
   config: ServerConfig;
   cache?: KVNamespace | undefined;
   target: string;
+  sourceAddress?: string | undefined;
   fetchFn?: FetchLike | undefined;
 }): Promise<
   | { ok: true; body: Record<string, unknown> }
@@ -210,7 +212,7 @@ export async function runScanTarget(params: {
       params.target,
       params.config.networkPassphrase,
     );
-    const report = await scanner.scanTransactionXdr(params.target);
+    const report = await scanner.scanTransactionXdr(params.target, params.sourceAddress);
     return {
       ok: true,
       body: {
@@ -425,11 +427,13 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         const fName = matchField(block, "name");
         const fDesc = matchField(block, "desc");
         const img = matchField(block, "image");
-        const normalizedImg = img ? (normalizeIpfsUrl(img) ?? img) : undefined;
+        const normalizedImg = img ? normalizeIpfsUrl(img) : undefined;
+        const safeImg =
+          normalizedImg && normalizedImg.startsWith("https://") ? normalizedImg : undefined;
         return {
           ...(fName ? { name: fName } : {}),
           ...(fDesc ? { description: fDesc } : {}),
-          ...(normalizedImg ? { image: normalizedImg } : {}),
+          ...(safeImg ? { image: safeImg } : {}),
         };
       }
     }
@@ -496,6 +500,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             try {
               const ipfsRes = await fetchFn(gwUrl, {
                 headers: { Accept: "application/json, image/*, */*" },
+                redirect: "manual",
                 signal: AbortSignal.timeout(4000),
               });
               if (!ipfsRes.ok) continue;
@@ -735,6 +740,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       config,
       cache: c.env.CACHE,
       target: body.target,
+      sourceAddress: body.sourceAddress,
       fetchFn,
     });
     if (!result.ok) {
@@ -826,8 +832,6 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             const isStale = ageSec > opts.freshTtlSec;
             if (isStale) {
               scheduleBackground(opts.compute().then(persist).catch(() => {}));
-            } else if (edgeCache && edgeReq) {
-              scheduleBackground(persist(parsed.data));
             }
             c.header("X-Astro-Cache", isStale ? "KV-STALE" : "KV-HIT");
             c.header(
@@ -864,6 +868,9 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
 
     if (!code || !/^[A-Z0-9]{1,12}$/.test(code)) {
       return c.json({ error: "Valid asset code is required" }, 400);
+    }
+    if (code !== "XLM" && !rawIssuer) {
+      return c.json({ error: "Asset issuer is required for non-native assets" }, 400);
     }
     const issuerParse = rawIssuer ? ClassicAddressSchema.safeParse(rawIssuer) : null;
     if (issuerParse && !issuerParse.success) {
@@ -914,6 +921,9 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
 
     if (!code || !/^[A-Z0-9]{1,12}$/.test(code)) {
       return c.json({ error: "Valid asset code is required" }, 400);
+    }
+    if (code !== "XLM" && !rawIssuer) {
+      return c.json({ error: "Asset issuer is required for non-native assets" }, 400);
     }
     const issuerParse = rawIssuer ? ClassicAddressSchema.safeParse(rawIssuer) : null;
     if (issuerParse && !issuerParse.success) {
@@ -1075,6 +1085,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       }
       const res = await fetchFn(challengeUrl.toString(), {
         headers: { Accept: "application/json" },
+        redirect: "manual",
         signal: AbortSignal.timeout(8000),
       });
       const body = (await res.json()) as {
@@ -1086,16 +1097,29 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         return c.json({ error: body.error ?? `SEP-10 challenge failed (${res.status})` }, 502);
       }
 
+      if (
+        body.network_passphrase &&
+        body.network_passphrase.trim() !== config.networkPassphrase
+      ) {
+        return c.json({ error: "SEP-10 challenge network_passphrase mismatch" }, 409);
+      }
+
       let challengeXdr = body.transaction;
       let clientDomainSigned = false;
       if (config.sep10ClientDomain && config.sep10ClientSigningSecret) {
-        const passphrase = body.network_passphrase || config.networkPassphrase;
-        const parsed = TransactionBuilder.fromXDR(body.transaction, passphrase);
+        const parsed = TransactionBuilder.fromXDR(body.transaction, config.networkPassphrase);
         if (parsed instanceof FeeBumpTransaction || !(parsed instanceof Transaction)) {
           return c.json({ error: "Invalid SEP-10 challenge envelope type" }, 502);
         }
         if (parsed.sequence !== "0" || parsed.operations.length === 0) {
           return c.json({ error: "SEP-10 challenge must have sequence 0 and operations" }, 502);
+        }
+        const minTime = Number(parsed.timeBounds?.minTime ?? "0");
+        const maxTime = Number(parsed.timeBounds?.maxTime ?? "0");
+        const nowSec = Math.floor(Date.now() / 1000);
+        const span = minTime > 0 ? maxTime - minTime : maxTime - nowSec;
+        if (!Number.isFinite(maxTime) || maxTime <= nowSec - 60 || span > 900) {
+          return c.json({ error: "SEP-10 challenge has unbounded or excessive timeBounds" }, 502);
         }
         const allManageData = parsed.operations.every((op) => op.type === "manageData");
         if (!allManageData) {
@@ -1126,19 +1150,21 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         ...(clientDomainSigned ? { clientDomainSigned: true } : {}),
       });
     } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : "SEP-10 challenge error" }, 400);
+      return c.json({ error: err instanceof Error ? err.message : "SEP-10 challenge error" }, 502);
     }
   });
 
+  const Sep10TokenBodySchema = z.object({
+    domain: z.string().trim().min(1).max(255),
+    transaction: z.string().trim().min(10).max(16_384),
+  });
+
   router.post("/sep10/token", async (c) => {
-    let body: { domain?: string; transaction?: string };
+    let body: z.infer<typeof Sep10TokenBodySchema>;
     try {
-      body = (await c.req.json()) as { domain?: string; transaction?: string };
+      body = Sep10TokenBodySchema.parse(await c.req.json());
     } catch {
-      return c.json({ error: "Invalid JSON body" }, 400);
-    }
-    if (!body.domain || !body.transaction) {
-      return c.json({ error: "domain and signed transaction XDR are required" }, 400);
+      return c.json({ error: "Valid domain and signed transaction XDR are required" }, 400);
     }
     try {
       const endpoints = await resolveSep24AnchorEndpoints(body.domain, c.env.CACHE);
@@ -1146,6 +1172,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         body: JSON.stringify({ transaction: body.transaction }),
+        redirect: "manual",
         signal: AbortSignal.timeout(8000),
       });
       const json = (await res.json()) as { token?: string; error?: string };
@@ -1154,28 +1181,30 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       }
       return c.json({ token: json.token });
     } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : "SEP-10 token error" }, 400);
+      return c.json({ error: err instanceof Error ? err.message : "SEP-10 token error" }, 502);
     }
   });
 
+  const Sep24InteractiveBodySchema = z.object({
+    domain: z.string().trim().min(1).max(255),
+    direction: z.enum(["deposit", "withdraw"]),
+    token: z.string().trim().min(10).max(8_192),
+    assetCode: z.string().trim().regex(/^[A-Za-z0-9]{1,12}$/),
+    amount: z.string().trim().regex(/^\d+(\.\d{1,7})?$/).optional(),
+    account: StellarAddressSchema.optional(),
+  });
+
   router.post("/sep24/interactive", async (c) => {
-    let body: {
-      domain?: string;
-      direction?: "deposit" | "withdraw";
-      token?: string;
-      assetCode?: string;
-      amount?: string;
-      account?: string;
-    };
+    let body: z.infer<typeof Sep24InteractiveBodySchema>;
     try {
-      body = (await c.req.json()) as typeof body;
+      body = Sep24InteractiveBodySchema.parse(await c.req.json());
     } catch {
-      return c.json({ error: "Invalid JSON body" }, 400);
+      return c.json(
+        { error: "Valid domain, direction (deposit|withdraw), token, and assetCode are required" },
+        400,
+      );
     }
-    if (!body.domain || !body.token || !body.assetCode || !body.direction) {
-      return c.json({ error: "domain, direction, token, and assetCode are required" }, 400);
-    }
-    const action = body.direction === "withdraw" ? "withdraw" : "deposit";
+    const action = body.direction;
     try {
       const endpoints = await resolveSep24AnchorEndpoints(body.domain, c.env.CACHE);
       const res = await fetchFn(
@@ -1188,10 +1217,11 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             Authorization: `Bearer ${body.token}`,
           },
           body: JSON.stringify({
-            asset_code: body.assetCode.trim().toUpperCase(),
-            ...(body.amount ? { amount: body.amount.trim() } : {}),
-            ...(body.account ? { account: body.account.trim() } : {}),
+            asset_code: body.assetCode.toUpperCase(),
+            ...(body.amount ? { amount: body.amount } : {}),
+            ...(body.account ? { account: body.account } : {}),
           }),
+          redirect: "manual",
           signal: AbortSignal.timeout(10000),
         },
       );
@@ -1204,7 +1234,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       }
       return c.json({ url: json.url, id: json.id, type: json.type });
     } catch (err) {
-      return c.json({ error: err instanceof Error ? err.message : "SEP-24 interactive error" }, 400);
+      return c.json({ error: err instanceof Error ? err.message : "SEP-24 interactive error" }, 502);
     }
   });
 

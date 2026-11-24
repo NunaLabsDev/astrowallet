@@ -6,22 +6,29 @@ import {
   formatIncomingAlertCard,
 } from "@astrowallet/tg-protocol";
 import { Hono } from "hono";
+import type { KVNamespace } from "@cloudflare/workers-types";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
 import { sendTelegramMessage, type TelegramApiDeps } from "../telegram-api.js";
+import { constantTimeEqual } from "../lib/crypto-utils.js";
 
 export interface IndexerRoutesDeps {
   telegramApiDeps?: TelegramApiDeps | undefined;
 }
 
 type IndexerRouteEnv = {
+  Bindings: {
+    CACHE?: KVNamespace;
+  };
   Variables: {
     config: ServerConfig;
     repo: ServerRepository;
   };
 };
 
-const MIN_NATIVE_ALERT_STROOPS = 500_000n; // 0.05 XLM dust spam filter
+const MIN_NATIVE_ALERT_STROOPS = 500_000n;
+const MIN_ISSUED_ALERT_STROOPS = 10_000n;
+const MAX_INDEXER_EVENTS_PER_BATCH = 100; // 0.05 XLM dust spam filter
 
 const RawIndexerEventSchema = z.object({
   txHash: z.string().min(8).optional(),
@@ -45,15 +52,6 @@ interface NormalizedIndexerEvent {
   amount: string;
   assetCode: string;
   assetIssuer?: string | undefined;
-}
-
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
 }
 
 async function verifyHmacSha256Hex(
@@ -169,32 +167,54 @@ export function createIndexerRoutes(deps: IndexerRoutesDeps = {}): Hono<IndexerR
       );
     }
 
-    const watched = await repo.listWatchedAccounts();
-    const watchedByAddress = new Map<string, typeof watched>();
+    const limitedEvents = events.slice(0, MAX_INDEXER_EVENTS_PER_BATCH);
+    const targetAddresses = Array.from(new Set(limitedEvents.map((ev) => ev.to)));
+    const watched = repo.listWatchedAccountsByAddresses
+      ? await repo.listWatchedAccountsByAddresses(targetAddresses)
+      : await repo.listWatchedAccounts();
+    const watchedByAddress = new Map<string, typeof watched[number][]>();
     for (const acc of watched) {
-      const list = watchedByAddress.get(acc.address);
-      if (list) {
-        watchedByAddress.set(acc.address, [...list, acc]);
-      } else {
-        watchedByAddress.set(acc.address, [acc]);
+      let list = watchedByAddress.get(acc.address);
+      if (!list) {
+        list = [];
+        watchedByAddress.set(acc.address, list);
+      }
+      list.push(acc);
+    }
+
+    let verifiedAssets: Awaited<ReturnType<typeof fetchSep42VerifiedAssets>> = [];
+    if (config.sep42AssetListUrls.length > 0) {
+      const kvKey = `sep42:${config.network}:v1`;
+      const cached = c.env?.CACHE ? await c.env.CACHE.get(kvKey).catch(() => null) : null;
+      if (cached) {
+        try {
+          verifiedAssets = JSON.parse(cached) as typeof verifiedAssets;
+        } catch {
+          verifiedAssets = [];
+        }
+      }
+      if (verifiedAssets.length === 0) {
+        verifiedAssets = await fetchSep42VerifiedAssets(config.sep42AssetListUrls).catch(() => []);
+        if (verifiedAssets.length > 0 && c.env?.CACHE) {
+          await c.env.CACHE
+            .put(kvKey, JSON.stringify(verifiedAssets), { expirationTtl: 600 })
+            .catch(() => undefined);
+        }
       }
     }
 
-    const verifiedAssets =
-      config.sep42AssetListUrls.length > 0
-        ? await fetchSep42VerifiedAssets(config.sep42AssetListUrls).catch(() => [])
-        : [];
-
     let alertsSent = 0;
-    for (const ev of events) {
-      if (ev.assetCode === "XLM" && !ev.assetIssuer) {
-        try {
-          if (decimalToStroops7(ev.amount) < MIN_NATIVE_ALERT_STROOPS) {
-            continue;
-          }
-        } catch {
+    for (const ev of limitedEvents) {
+      const minThreshold =
+        ev.assetCode === "XLM" && !ev.assetIssuer
+          ? MIN_NATIVE_ALERT_STROOPS
+          : MIN_ISSUED_ALERT_STROOPS;
+      try {
+        if (decimalToStroops7(ev.amount) < minThreshold) {
           continue;
         }
+      } catch {
+        continue;
       }
       const isVerifiedAsset =
         ev.assetCode === "XLM" && !ev.assetIssuer

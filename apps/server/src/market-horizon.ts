@@ -463,20 +463,22 @@ export async function fetchMarketPriceHistory(input: {
               ? krakenRaw.slice(-365)
               : rollupMonthlyCandles(krakenRaw);
         const candles = sanitizeOhlcvCandles(shaped, { timeframe: input.timeframe });
-        const first = candles[0]!;
-        const last = candles[candles.length - 1]!;
-        return {
-          timeframe: input.timeframe,
-          quoteCode,
-          ...(quoteIssuer ? { quoteIssuer } : {}),
-          candles,
-          latestPriceXlm: last.close,
-          changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
-          high: Math.max(...candles.map((c) => c.high)),
-          low: Math.min(...candles.map((c) => c.low)),
-          volumeBase: candles.reduce((s, c) => s + c.baseVolume, 0),
-          source: "kraken_ohlc" as const,
-        };
+        if (candles.length > 0) {
+          const first = candles[0]!;
+          const last = candles[candles.length - 1]!;
+          return {
+            timeframe: input.timeframe,
+            quoteCode,
+            ...(quoteIssuer ? { quoteIssuer } : {}),
+            candles,
+            latestPriceXlm: last.close,
+            changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
+            high: Math.max(...candles.map((c) => c.high)),
+            low: Math.min(...candles.map((c) => c.low)),
+            volumeBase: candles.reduce((s, c) => s + c.baseVolume, 0),
+            source: "kraken_ohlc" as const,
+          };
+        }
       }
     }
 
@@ -520,20 +522,22 @@ export async function fetchMarketPriceHistory(input: {
 
     if (rawCandles.length > 0) {
       const candles = sanitizeOhlcvCandles(rawCandles, { timeframe: input.timeframe });
-      const first = candles[0]!;
-      const last = candles[candles.length - 1]!;
-      return {
-        timeframe: input.timeframe,
-        quoteCode,
-        ...(quoteIssuer ? { quoteIssuer } : {}),
-        candles,
-        latestPriceXlm: last.close,
-        changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
-        high: Math.max(...candles.map((c) => c.high)),
-        low: Math.min(...candles.map((c) => c.low)),
-        volumeBase: candles.reduce((s, c) => s + c.baseVolume, 0),
-        source: "trade_aggregations" as const,
-      };
+      if (candles.length > 0) {
+        const first = candles[0]!;
+        const last = candles[candles.length - 1]!;
+        return {
+          timeframe: input.timeframe,
+          quoteCode,
+          ...(quoteIssuer ? { quoteIssuer } : {}),
+          candles,
+          latestPriceXlm: last.close,
+          changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
+          high: Math.max(...candles.map((c) => c.high)),
+          low: Math.min(...candles.map((c) => c.low)),
+          volumeBase: candles.reduce((s, c) => s + c.baseVolume, 0),
+          source: "trade_aggregations" as const,
+        };
+      }
     }
   } catch {
     // Fall through to trades / order_book
@@ -575,20 +579,22 @@ export async function fetchMarketPriceHistory(input: {
 
     if (rawPoints.length > 0) {
       const points = sanitizeOhlcvCandles(rawPoints, { maxWickFloorPct: wickFloor });
-      const first = points[0]!;
-      const last = points[points.length - 1]!;
-      return {
-        timeframe: input.timeframe,
-        quoteCode,
-        ...(quoteIssuer ? { quoteIssuer } : {}),
-        candles: points,
-        latestPriceXlm: last.close,
-        changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
-        high: Math.max(...points.map((c) => c.high)),
-        low: Math.min(...points.map((c) => c.low)),
-        volumeBase: points.reduce((s, c) => s + c.baseVolume, 0),
-        source: "trades" as const,
-      };
+      if (points.length > 0) {
+        const first = points[0]!;
+        const last = points[points.length - 1]!;
+        return {
+          timeframe: input.timeframe,
+          quoteCode,
+          ...(quoteIssuer ? { quoteIssuer } : {}),
+          candles: points,
+          latestPriceXlm: last.close,
+          changePct: first.open > 0 ? ((last.close - first.open) / first.open) * 100 : null,
+          high: Math.max(...points.map((c) => c.high)),
+          low: Math.min(...points.map((c) => c.low)),
+          volumeBase: points.reduce((s, c) => s + c.baseVolume, 0),
+          source: "trades" as const,
+        };
+      }
     }
   } catch {
     // Fall through to order_book

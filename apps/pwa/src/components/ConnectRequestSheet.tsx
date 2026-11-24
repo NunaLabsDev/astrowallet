@@ -99,6 +99,7 @@ export function ConnectRequestSheet({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [completedMsg, setCompletedMsg] = useState<string | null>(null);
+  const [completedStatus, setCompletedStatus] = useState<"approved" | "rejected" | null>(null);
   const [completedReturnUrl, setCompletedReturnUrl] = useState<string | null>(null);
   const [completedTxHash, setCompletedTxHash] = useState<string | null>(null);
   const [autoReturnCancelled, setAutoReturnCancelled] = useState(false);
@@ -130,6 +131,9 @@ export function ConnectRequestSheet({
         const base = config.apiBaseUrl.replace(/\/+$/, "");
         const res = await fetch(
           `${base}/v1/connect/requests/${encodeURIComponent(route.requestId)}?sig=${encodeURIComponent(route.sig)}`,
+          {
+            headers: { "X-Astro-Network": config.network },
+          },
         );
         const body = (await res.json()) as RemoteConnectRequest & { error?: string };
         if (!res.ok) {
@@ -173,9 +177,17 @@ export function ConnectRequestSheet({
             "Content-Type": "application/json",
             "X-Astro-Network": config.network,
           },
-          body: JSON.stringify({ target: targetXdr }),
+          body: JSON.stringify({
+            target: targetXdr,
+            ...(activeAccount?.address ? { sourceAddress: activeAccount.address } : {}),
+          }),
         });
-        if (!res.ok) return;
+        if (!res.ok) {
+          if (!cancelled && config.network === "mainnet") {
+            setError("Mainnet pre-sign Scan & Shield check unavailable. Verify transaction carefully.");
+          }
+          return;
+        }
         const data = (await res.json()) as { report?: ScanReport };
         if (!cancelled && data.report) {
           setScanReport(data.report);
@@ -199,7 +211,10 @@ export function ConnectRequestSheet({
 
   const submitCompletion = async (payload: Record<string, unknown>): Promise<string | null> => {
     const base = config.apiBaseUrl.replace(/\/+$/, "");
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Astro-Network": config.network,
+    };
     if (sessionToken) {
       headers.Authorization = `Bearer ${sessionToken}`;
     }
@@ -309,6 +324,7 @@ export function ConnectRequestSheet({
           setCompletedMsg(`Signed XDR returned securely to ${request.app.name}.`);
         }
       }
+      setCompletedStatus("approved");
       setCompletedReturnUrl(returnUrl);
     } catch (err) {
       triggerTelegramHaptic("error");
@@ -329,6 +345,7 @@ export function ConnectRequestSheet({
       });
       triggerTelegramHaptic("warning");
       setCompletedMsg(`Rejected request from ${request.app.name}.`);
+      setCompletedStatus("rejected");
       setCompletedReturnUrl(returnUrl);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to reject request");
@@ -339,16 +356,27 @@ export function ConnectRequestSheet({
 
   useEffect(() => {
     if (!completedMsg || autoReturnCancelled) return undefined;
+    const statusToSend = completedStatus ?? "approved";
     if (typeof window !== "undefined" && window.opener && !window.opener.closed) {
+      let targetOrigin = "*";
+      try {
+        if (request?.app.origin) {
+          targetOrigin = new URL(request.app.origin).origin;
+        } else if (document.referrer) {
+          targetOrigin = new URL(document.referrer).origin;
+        }
+      } catch {
+        targetOrigin = "*";
+      }
       try {
         window.opener.postMessage(
           {
             type: "ASTRO_SIGN_COMPLETE",
-            status: "approved",
+            status: statusToSend,
             requestId: route.requestId,
-            txHash: completedTxHash,
+            txHash: statusToSend === "approved" ? completedTxHash : null,
           },
-          "*",
+          targetOrigin,
         );
       } catch {
         // Ignore postMessage error
@@ -365,7 +393,15 @@ export function ConnectRequestSheet({
       return () => window.clearTimeout(timer);
     }
     return undefined;
-  }, [completedMsg, autoReturnCancelled, route.requestId, completedTxHash, completedReturnUrl]);
+  }, [
+    completedMsg,
+    completedStatus,
+    autoReturnCancelled,
+    route.requestId,
+    completedTxHash,
+    completedReturnUrl,
+    request?.app.origin,
+  ]);
 
   const openBoomerang = (url: string) => {
     const wa = getTelegramWebApp();

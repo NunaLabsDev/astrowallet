@@ -181,10 +181,12 @@ export function SendSheet({
     const parsed = StellarAddressSchema.safeParse(trimmed);
     if (!parsed.success) {
       setDestShieldReport(null);
+      setScanningDest(false);
       return;
     }
 
     let cancelled = false;
+    const controller = new AbortController();
     const timer = setTimeout(async () => {
       setScanningDest(true);
       try {
@@ -195,6 +197,7 @@ export function SendSheet({
             "Content-Type": "application/json",
             "X-Astro-Network": config.network,
           },
+          signal: controller.signal,
           body: JSON.stringify({ target: parsed.data }),
         });
         if (!res.ok) return;
@@ -211,7 +214,9 @@ export function SendSheet({
 
     return () => {
       cancelled = true;
+      controller.abort();
       clearTimeout(timer);
+      setScanningDest(false);
     };
   }, [destination, config.apiBaseUrl, config.network]);
 

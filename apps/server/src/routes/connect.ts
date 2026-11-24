@@ -25,6 +25,7 @@ import {
 } from "@astrowallet/tg-protocol";
 import type { KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
+import { constantTimeEqual, sha256Hex } from "../lib/crypto-utils.js";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
 import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
@@ -91,23 +92,6 @@ const CompleteConnectRequestBodySchema = z.object({
   txHash: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   ledger: z.number().int().positive().optional(),
 });
-
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i += 1) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  }
-  return diff === 0;
-}
-
-async function sha256Hex(raw: string): Promise<string> {
-  const bytes = new TextEncoder().encode(raw);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
 
 function randomHex(byteCount: number): string {
   const bytes = new Uint8Array(byteCount);

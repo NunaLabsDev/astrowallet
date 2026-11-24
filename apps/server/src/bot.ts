@@ -20,6 +20,7 @@ import {
   buildMiniAppWebAppUrl,
   buildTelegramMiniAppLink,
   deriveClaimId,
+  escapeTelegramHtml,
   formatAccountsSummary,
   formatBalancesSummary,
   formatClaimLinkCard,
@@ -116,6 +117,7 @@ function appendMiniAppButton(
         intentId: opts.intentId,
         sig: opts.sig,
         tab: opts.tab,
+        net: opts.config.network,
       }),
     );
   }
@@ -585,7 +587,10 @@ export function createTelegramBot(
 
     const entries: AccountBalanceSummaryEntry[] = await Promise.all(
       accounts.map(async (acc) => {
-        const live = await fetchLiveAccountBalances(config, acc.address, fetchFn);
+        const live = await fetchLiveAccountBalances(config, acc.address, fetchFn).catch(() => ({
+          funded: false,
+          balances: [],
+        }));
         return {
           label: acc.label,
           address: acc.address,
@@ -1022,7 +1027,10 @@ export function createTelegramBot(
 
     const entries: AccountReserveEntry[] = await Promise.all(
       classicAccounts.map(async (acc) => {
-        const info = await fetchLiveAccountReserveInfo(config, acc.address, fetchFn);
+        const info = await fetchLiveAccountReserveInfo(config, acc.address, fetchFn).catch(() => ({
+          funded: false,
+          summary: undefined,
+        }));
         return {
           label: acc.label,
           address: acc.address,
@@ -1402,7 +1410,7 @@ export function createTelegramBot(
       amount,
       rawFromAsset: spendAsset,
       rawToAsset: targetAsset,
-      headline: `🛒 <b>Buy ${targetAsset.toUpperCase()}</b> (spending ${amount} ${spendAsset.toUpperCase()})`,
+      headline: `🛒 <b>Buy ${escapeTelegramHtml(targetAsset.toUpperCase())}</b> (spending ${escapeTelegramHtml(amount)} ${escapeTelegramHtml(spendAsset.toUpperCase())})`,
     });
   });
 
@@ -1428,7 +1436,7 @@ export function createTelegramBot(
       amount,
       rawFromAsset: sellAsset,
       rawToAsset: receiveAsset,
-      headline: `💸 <b>Sell ${amount} ${sellAsset.toUpperCase()}</b> for ${receiveAsset.toUpperCase()}`,
+      headline: `💸 <b>Sell ${escapeTelegramHtml(amount)} ${escapeTelegramHtml(sellAsset.toUpperCase())}</b> for ${escapeTelegramHtml(receiveAsset.toUpperCase())}`,
     });
   });
 
@@ -1458,7 +1466,18 @@ export function createTelegramBot(
       const [rawCode = "", explicitIssuer] = rawNft.split(":");
       const targetCode = rawCode.trim();
 
-      let nftIssuer = explicitIssuer?.trim();
+      let nftIssuer: string | undefined;
+      if (explicitIssuer !== undefined) {
+        const parsedIssuer = ClassicAddressSchema.safeParse(explicitIssuer.trim());
+        if (!parsedIssuer.success) {
+          await ctx.reply(
+            "Invalid NFT issuer address. Format: <code>CODE:G...ISSUER</code>",
+            { parse_mode: "HTML" },
+          );
+          return;
+        }
+        nftIssuer = parsedIssuer.data;
+      }
       let nftCode = targetCode;
       if (!nftIssuer) {
         const balancesByAcc = await Promise.all(
@@ -1481,7 +1500,7 @@ export function createTelegramBot(
 
       if (!nftIssuer) {
         await ctx.reply(
-          `Could not find Classic NFT <code>${targetCode}</code> (0.0000001) on your linked wallets. Pass <code>CODE:G...ISSUER</code> or run <code>/nft</code> to list yours.`,
+          `Could not find Classic NFT <code>${escapeTelegramHtml(targetCode)}</code> (0.0000001) on your linked wallets. Pass <code>CODE:G...ISSUER</code> or run <code>/nft</code> to list yours.`,
           { parse_mode: "HTML" },
         );
         return;
@@ -1506,16 +1525,34 @@ export function createTelegramBot(
       }
 
       if (lacksTrustline) {
+        if (!config.claimEscrowContractId) {
+          await ctx.reply(
+            `Recipient lacks a <b>${escapeTelegramHtml(nftCode)}</b> trustline and Claim Escrow is not configured on <code>${networkBadge}</code>.`,
+            { parse_mode: "HTML" },
+          );
+          return;
+        }
+        const claimId = crypto.randomUUID().replaceAll("-", "").slice(0, 24);
+        const escrowExpiresAt = Math.floor(Date.now() / 1000) + 7 * 86_400;
+        const senderLabel = ctx.from.username ? `@${ctx.from.username}` : `tg:${tgId}`;
+        const recipientUsername = recipient.label.startsWith("@")
+          ? recipient.label.slice(1).toLowerCase()
+          : recipient.label;
         const { intent } = await createAndSignIntent(config, repo, {
           creatorTelegramUserId: tgId,
           actionType: "claim",
           chatId: String(ctx.chat.id),
           payload: {
+            claimId,
+            escrowContractId: config.claimEscrowContractId,
+            escrowExpiresAt,
             amount: "0.0000001",
             assetCode: nftCode,
             assetIssuer: nftIssuer,
             destination: recipient.address,
             recipientLabel: recipient.label,
+            recipientUsername,
+            senderLabel,
             autoEscrowReason: `Recipient lacks a ${nftCode} NFT trustline — routed to Claim Escrow (zero op_no_trust).`,
           },
         });
@@ -1530,14 +1567,18 @@ export function createTelegramBot(
             sig: intent.hmacSig,
           },
         );
-        await ctx.reply(
+        const sent = await ctx.reply(
           [
             `🖼️ <b>NFT Claim Escrow</b> · <code>${networkBadge}</code>`,
-            `Sending NFT <b>${nftCode}</b> (<code>0.0000001</code>) to <b>${recipient.label}</b>`,
+            `Sending NFT <b>${escapeTelegramHtml(nftCode)}</b> (<code>0.0000001</code>) to <b>${escapeTelegramHtml(recipient.label)}</b>`,
             `<i>Recipient lacks a trustline — routed via Zero-op_no_trust Escrow.</i>`,
           ].join("\n"),
           { parse_mode: "HTML", reply_markup: keyboard },
         );
+        await repo.attachIntentMessageRef(intent.intentId, {
+          chatId: String(sent.chat.id),
+          messageId: String(sent.message_id),
+        });
         return;
       }
 
@@ -1564,14 +1605,18 @@ export function createTelegramBot(
           sig: intent.hmacSig,
         },
       );
-      await ctx.reply(
+      const sent = await ctx.reply(
         [
           `🖼️ <b>Send Classic NFT</b> · <code>${networkBadge}</code>`,
-          `NFT: <b>${nftCode}</b> (<code>${nftIssuer.slice(0, 6)}…${nftIssuer.slice(-4)}</code>)`,
-          `To: <b>${recipient.label}</b>`,
+          `NFT: <b>${escapeTelegramHtml(nftCode)}</b> (<code>${nftIssuer.slice(0, 6)}…${nftIssuer.slice(-4)}</code>)`,
+          `To: <b>${escapeTelegramHtml(recipient.label)}</b>`,
         ].join("\n"),
         { parse_mode: "HTML", reply_markup: keyboard },
       );
+      await repo.attachIntentMessageRef(intent.intentId, {
+        chatId: String(sent.chat.id),
+        messageId: String(sent.message_id),
+      });
       return;
     }
 
@@ -1586,7 +1631,7 @@ export function createTelegramBot(
     const allNfts = results.flatMap((r) => r.nfts.map((n) => ({ label: r.acc.label, ...n })));
     const lines = allNfts.slice(0, 12).map(
       (n, idx) =>
-        `${idx + 1}. <b>${n.assetCode}</b> · <code>${(n.assetIssuer ?? "").slice(0, 6)}…${(n.assetIssuer ?? "").slice(-4)}</code> (${n.label})`,
+        `${idx + 1}. <b>${escapeTelegramHtml(n.assetCode)}</b> · <code>${(n.assetIssuer ?? "").slice(0, 6)}…${(n.assetIssuer ?? "").slice(-4)}</code> (${escapeTelegramHtml(n.label)})`,
     );
     const keyboard = appendMiniAppButton(
       new InlineKeyboard(),

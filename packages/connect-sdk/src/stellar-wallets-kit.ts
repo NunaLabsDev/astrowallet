@@ -110,17 +110,10 @@ export function createAstroWalletKitModule(
       };
     },
 
-    async signAuthEntry(entryXdr, opts) {
-      const result = await client.signMessage(entryXdr, {
-        humanSummary:
-          opts?.humanSummary ?? `Authorize Soroban entry for ${options.app.name}`,
-      });
-      cachedAddress = result.address;
-      cachedNetwork = result.network;
-      return {
-        signedAuthEntry: result.signatureBase64,
-        signerAddress: result.address,
-      };
+    async signAuthEntry(_entryXdr, _opts) {
+      throw new Error(
+        "Soroban HashIdPreimage auth-entry signing is not yet supported by AstroConnect v1; use signTransaction() with full Soroban XDR.",
+      );
     },
 
     getProviderMetadata() {

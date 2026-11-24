@@ -583,7 +583,11 @@ export function SwapSheet({
           setTxHash(res.hash);
           triggerTelegramHaptic("success");
           return;
-        } catch {
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : "";
+          if (/malicious|Scan & Shield|blocked/i.test(msg)) {
+            throw err;
+          }
           // Graceful fallback to Horizon SDEX/AMM path payment if Soroswap XDR simulation expired
           setSwapPhase("Routing via Horizon fallback...");
         }

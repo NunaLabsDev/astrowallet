@@ -137,6 +137,7 @@ async function fetchFromHorizonFailover(
     try {
       const response = await fetchFn(`${cleanBase}${path}`, {
         headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(8_000),
       });
       if (response.status === 404 || response.ok) {
         return response;
@@ -271,11 +272,13 @@ async function fetchSorobanTx(
   txHash: string,
   fetchFn: FetchLike,
 ): Promise<{ failed: true; reason: string } | { failed: false; tx: NormalizedTx } | null> {
+  let sawNotFound = false;
   for (const rpcUrl of rpcUrls) {
     try {
       const res = await fetchFn(rpcUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: AbortSignal.timeout(8_000),
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: 1,
@@ -307,10 +310,13 @@ async function fetchSorobanTx(
       if (status === "FAILED") {
         return { failed: true, reason: "Transaction failed on-chain" };
       }
-      return { failed: true, reason: "Transaction not found yet" };
+      sawNotFound = true;
     } catch {
       continue;
     }
+  }
+  if (sawNotFound) {
+    return { failed: true, reason: "Transaction not found yet" };
   }
   return null;
 }
@@ -371,12 +377,6 @@ export async function verifyTransactionConfirmed(
     }
   }
 
-  if (expected?.memo !== undefined && expected.memo !== "") {
-    if (tx.memo !== expected.memo) {
-      return { confirmed: false, reason: "Transaction memo does not match the intent memo" };
-    }
-  }
-
   let cachedDecoded: ReturnType<typeof decodeTransactionEnvelope> | null | undefined;
   const getDecodedEnvelope = (): ReturnType<typeof decodeTransactionEnvelope> | null => {
     if (cachedDecoded !== undefined) return cachedDecoded;
@@ -391,6 +391,13 @@ export async function verifyTransactionConfirmed(
     }
     return cachedDecoded;
   };
+
+  if (expected?.memo !== undefined && expected.memo !== "") {
+    const resolvedMemo = tx.memo ?? getDecodedEnvelope()?.memo;
+    if (resolvedMemo !== expected.memo) {
+      return { confirmed: false, reason: "Transaction memo does not match the intent memo" };
+    }
+  }
 
   if (expected?.sorobanInvoke) {
     if (!tx.envelopeXdr || !config.networkPassphrase) {
@@ -452,7 +459,13 @@ export async function verifyTransactionConfirmed(
     }
   }
 
-  if (expected?.expectedSourceAccount && tx.envelopeXdr && config.networkPassphrase) {
+  if (expected?.expectedSourceAccount) {
+    if (!tx.envelopeXdr || !config.networkPassphrase) {
+      return {
+        confirmed: false,
+        reason: "Unable to verify transaction source account (missing envelopeXdr)",
+      };
+    }
     const decoded = getDecodedEnvelope();
     if (!decoded) {
       return {
@@ -477,7 +490,13 @@ export async function verifyTransactionConfirmed(
     }
   }
 
-  if (expected?.expectedActionType && tx.envelopeXdr && config.networkPassphrase) {
+  if (expected?.expectedActionType) {
+    if (!tx.envelopeXdr || !config.networkPassphrase) {
+      return {
+        confirmed: false,
+        reason: `Unable to verify transaction action type (${expected.expectedActionType})`,
+      };
+    }
     const decoded = getDecodedEnvelope();
     if (!decoded) {
       return {
@@ -529,8 +548,8 @@ export async function verifyTransactionConfirmed(
     const expectedSacId = resolveSwapAssetSacId(expectedAsset, config.networkPassphrase);
 
     let sacMatched = false;
-    try {
-      const decoded = decodeTransactionEnvelope(tx.envelopeXdr, config.networkPassphrase);
+    const decoded = getDecodedEnvelope();
+    if (decoded) {
       sacMatched = decoded.operations.some((op) => {
         const s = op.soroban;
         if (!s || s.functionName !== "transfer" || s.contractId !== expectedSacId) {
@@ -544,8 +563,6 @@ export async function verifyTransactionConfirmed(
           BigInt(amtArg) >= wantedStroops
         );
       });
-    } catch {
-      sacMatched = false;
     }
     if (!sacMatched) {
       return {
@@ -584,13 +601,18 @@ export async function verifyTransactionConfirmed(
   return { confirmed: true, ledger: tx.ledger };
 }
 
+export interface IncomingPaymentsPollResult {
+  incoming: IncomingPaymentEvent[];
+  newestCursor?: string | undefined;
+}
+
 export async function fetchIncomingPaymentsSince(
   config: Pick<ServerConfig, "horizonUrls">,
   address: string,
   cursor?: string,
   limit = 5,
   fetchFn: FetchLike = fetch,
-): Promise<IncomingPaymentEvent[]> {
+): Promise<IncomingPaymentsPollResult> {
   const query = new URLSearchParams({
     order: "asc",
     limit: String(limit),
@@ -605,7 +627,7 @@ export async function fetchIncomingPaymentsSince(
     fetchFn,
   );
   if (response.status === 404) {
-    return [];
+    return { incoming: [] };
   }
 
   const payload = (await response.json()) as {
@@ -613,9 +635,12 @@ export async function fetchIncomingPaymentsSince(
   };
   const records = payload._embedded?.records ?? [];
   const events: IncomingPaymentEvent[] = [];
+  let newestCursor: string | undefined;
 
   for (const rec of records) {
-    if (!rec.paging_token || !rec.transaction_hash) continue;
+    if (!rec.paging_token) continue;
+    newestCursor = rec.paging_token;
+    if (!rec.transaction_hash) continue;
     if (
       (rec.type === "payment" ||
         rec.type === "path_payment_strict_send" ||
@@ -654,7 +679,7 @@ export async function fetchIncomingPaymentsSince(
     }
   }
 
-  return events;
+  return { incoming: events, newestCursor };
 }
 
 /**

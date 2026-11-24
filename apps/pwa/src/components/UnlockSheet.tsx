@@ -49,9 +49,12 @@ export function UnlockSheet() {
     const tick = () => {
       const rem = Math.max(0, Math.ceil((cooldownUntilMs - Date.now()) / 1000));
       setRemainingSec(rem);
+      if (rem === 0) {
+        window.clearInterval(id);
+      }
     };
-    tick();
     const id = window.setInterval(tick, 500);
+    tick();
     return () => window.clearInterval(id);
   }, [cooldownUntilMs]);
 

@@ -9,7 +9,6 @@ import {
 import { scanTransactionEnvelopeXdr } from "@astrowallet/security-shield";
 import {
   deriveCounterfactualSmartAccount,
-  expectedCaip2ChainId,
   publicKeyToRawHex,
   verifyChallengeMessage,
   type DevTemplateKind,
@@ -102,7 +101,7 @@ export function DevLabSheet() {
 
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
-  const caip2 = expectedCaip2ChainId(config.network);
+  const caip2 = config.network === "mainnet" ? "stellar:pubnet" : "stellar:testnet";
 
   const loadTelemetry = async () => {
     setTelemetryLoading(true);

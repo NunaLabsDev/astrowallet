@@ -533,7 +533,22 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
     if (body.activeAddress) {
       await repo.setDefaultLinkedAddress(tgId, body.activeAddress).catch(() => false);
     }
+    let existingPref: Record<string, unknown> = {};
+    if (c.env.CACHE) {
+      const rawExisting = await c.env.CACHE.get(`eco_pref:${tgId}`).catch(() => null);
+      if (rawExisting) {
+        try {
+          const parsed = JSON.parse(rawExisting) as unknown;
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            existingPref = parsed as Record<string, unknown>;
+          }
+        } catch {
+          // ignore corrupted preference cache
+        }
+      }
+    }
     const pref = {
+      ...existingPref,
       ...(body.preferredNetwork ? { preferredNetwork: body.preferredNetwork } : {}),
       ...(body.activeAddress ? { activeAddress: body.activeAddress } : {}),
       updatedAt: Math.floor(Date.now() / 1000),

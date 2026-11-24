@@ -126,6 +126,7 @@ export function RampSheet() {
       const cleanDomain = anchorDomain.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
       const chRes = await fetch(
         `${apiBase}/v1/proxy/sep10/challenge?domain=${encodeURIComponent(cleanDomain)}&account=${encodeURIComponent(activeAccount.address)}`,
+        { headers: { "X-Astro-Network": config.network } },
       );
       const chJson = (await chRes.json()) as { transaction?: string; error?: string };
       if (!chRes.ok || !chJson.transaction) {
@@ -135,7 +136,10 @@ export function RampSheet() {
       const signedXdr = await signSep10ChallengeXdr(chJson.transaction);
       const tokRes = await fetch(`${apiBase}/v1/proxy/sep10/token`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Astro-Network": config.network,
+        },
         body: JSON.stringify({ domain: cleanDomain, transaction: signedXdr }),
       });
       const tokJson = (await tokRes.json()) as { token?: string; error?: string };
@@ -145,7 +149,10 @@ export function RampSheet() {
 
       const sep24Res = await fetch(`${apiBase}/v1/proxy/sep24/interactive`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Astro-Network": config.network,
+        },
         body: JSON.stringify({
           domain: cleanDomain,
           direction: cashDirection === "offramp" ? "withdraw" : "deposit",
@@ -156,7 +163,7 @@ export function RampSheet() {
         }),
       });
       const sep24Json = (await sep24Res.json()) as { url?: string; error?: string };
-      if (!sep24Res.ok || !sep24Json.url) {
+      if (!sep24Res.ok || !sep24Json.url || !sep24Json.url.startsWith("https://")) {
         throw new Error(sep24Json.error ?? "MoneyGram SEP-24 interactive session failed");
       }
       setCashSessionUrl(sep24Json.url);

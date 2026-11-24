@@ -1,6 +1,6 @@
 {
   "name": "@astrowallet/connect",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Open Stellar & Soroban wallet connection SDK for Telegram Mini Apps (AstroConnect v1).",
   "type": "module",
   "main": "./dist/index.js",

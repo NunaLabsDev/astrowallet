@@ -99,6 +99,10 @@ export interface ServerRepository {
   unlinkUserAddresses(telegramUserId: string): Promise<number>;
   isAddressLinked(address: string): Promise<boolean>;
   listWatchedAccounts(): Promise<readonly WatchedAccountRecord[]>;
+  listWatchedAccountsPage?(limit: number, offset: number): Promise<readonly WatchedAccountRecord[]>;
+  listWatchedAccountsByAddresses?(
+    addresses: readonly string[],
+  ): Promise<readonly WatchedAccountRecord[]>;
 
   createSignedIntent(intent: SignedIntent): Promise<SignedIntent>;
   getSignedIntent(intentId: string): Promise<SignedIntent | null>;
@@ -132,6 +136,7 @@ export interface ServerRepository {
   listSplitPaymentTxHashes(intentId: string): Promise<readonly string[]>;
   /** Returns true the first time a dedup key is claimed, false on repeats. */
   claimAlertDedupKey(dedupKey: string): Promise<boolean>;
+  releaseAlertDedupKey?(dedupKey: string): Promise<void>;
   findRecentPendingIntent(input: {
     creatorTelegramUserId: string;
     actionType: IntentActionType;
@@ -601,7 +606,8 @@ export function createD1Repository(db: D1Database): ServerRepository {
           `SELECT la.telegram_user_id, la.address, la.label
            FROM linked_addresses la
            JOIN tg_users u ON u.telegram_user_id = la.telegram_user_id
-           WHERE u.alerts_enabled = 1`,
+           WHERE u.alerts_enabled = 1
+           ORDER BY la.address ASC`,
         )
         .all<{ telegram_user_id: string; address: string; label: string }>();
 
@@ -610,6 +616,55 @@ export function createD1Repository(db: D1Database): ServerRepository {
         address: row.address,
         label: row.label,
       }));
+    },
+
+    async listWatchedAccountsPage(limit, offset) {
+      const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+      const safeOffset = Math.max(0, Math.floor(offset));
+      const result = await db
+        .prepare(
+          `SELECT la.telegram_user_id, la.address, la.label
+           FROM linked_addresses la
+           JOIN tg_users u ON u.telegram_user_id = la.telegram_user_id
+           WHERE u.alerts_enabled = 1
+           ORDER BY la.address ASC
+           LIMIT ? OFFSET ?`,
+        )
+        .bind(safeLimit, safeOffset)
+        .all<{ telegram_user_id: string; address: string; label: string }>();
+
+      return (result.results ?? []).map((row) => ({
+        telegramUserId: row.telegram_user_id,
+        address: row.address,
+        label: row.label,
+      }));
+    },
+
+    async listWatchedAccountsByAddresses(addresses) {
+      const unique = Array.from(new Set(addresses.map((a) => a.trim()).filter(Boolean)));
+      if (unique.length === 0) return [];
+      const out: WatchedAccountRecord[] = [];
+      for (let i = 0; i < unique.length; i += 50) {
+        const chunk = unique.slice(i, i + 50);
+        const placeholders = chunk.map(() => "?").join(", ");
+        const result = await db
+          .prepare(
+            `SELECT la.telegram_user_id, la.address, la.label
+             FROM linked_addresses la
+             JOIN tg_users u ON u.telegram_user_id = la.telegram_user_id
+             WHERE u.alerts_enabled = 1 AND la.address IN (${placeholders})`,
+          )
+          .bind(...chunk)
+          .all<{ telegram_user_id: string; address: string; label: string }>();
+        for (const row of result.results ?? []) {
+          out.push({
+            telegramUserId: row.telegram_user_id,
+            address: row.address,
+            label: row.label,
+          });
+        }
+      }
+      return out;
     },
 
     async createSignedIntent(intent) {
@@ -630,7 +685,7 @@ export function createD1Repository(db: D1Database): ServerRepository {
           intent.messageId ?? null,
           intent.inlineMessageId ?? null,
           intent.status,
-          intent.txHash ?? null,
+          intent.txHash ? intent.txHash.toLowerCase() : null,
           intent.expiresAt,
           intent.createdAt,
         )
@@ -670,9 +725,9 @@ export function createD1Repository(db: D1Database): ServerRepository {
           `UPDATE signed_intents
            SET status = 'confirmed',
                tx_hash = COALESCE(?, tx_hash)
-           WHERE intent_id = ?`,
+           WHERE intent_id = ? AND status IN ('pending', 'signed')`,
         )
-        .bind(txHash ?? null, intentId)
+        .bind(txHash ? txHash.toLowerCase() : null, intentId)
         .run();
       return this.getSignedIntent(intentId);
     },
@@ -727,14 +782,14 @@ export function createD1Repository(db: D1Database): ServerRepository {
     },
 
     async isTxHashUsed(txHash) {
-      const normalized = txHash.toLowerCase();
+      const normalized = txHash.trim().toLowerCase();
       const intentRow = await db
-        .prepare("SELECT 1 AS hit FROM signed_intents WHERE lower(tx_hash) = ? LIMIT 1")
+        .prepare("SELECT 1 AS hit FROM signed_intents WHERE tx_hash = ? LIMIT 1")
         .bind(normalized)
         .first<{ hit: number }>();
       if (intentRow) return true;
       const payRow = await db
-        .prepare("SELECT 1 AS hit FROM intent_payments WHERE lower(tx_hash) = ? LIMIT 1")
+        .prepare("SELECT 1 AS hit FROM intent_payments WHERE tx_hash = ? LIMIT 1")
         .bind(normalized)
         .first<{ hit: number }>();
       return Boolean(payRow);
@@ -784,6 +839,10 @@ export function createD1Repository(db: D1Database): ServerRepository {
         .bind(dedupKey, now)
         .run();
       return (res.meta?.changes ?? 0) > 0;
+    },
+
+    async releaseAlertDedupKey(dedupKey) {
+      await db.prepare("DELETE FROM processed_alerts WHERE dedup_key = ?").bind(dedupKey).run();
     },
 
     async findRecentPendingIntent({ creatorTelegramUserId, actionType, payloadJson, sinceUnix }) {
@@ -879,14 +938,24 @@ export function createD1Repository(db: D1Database): ServerRepository {
 
     async purgeExpiredRecords(nowSec) {
       await db.batch([
-        db.prepare("DELETE FROM signed_intents WHERE expires_at < ?").bind(nowSec - 3600),
-        db.prepare("DELETE FROM connect_requests WHERE expires_at < ?").bind(nowSec - 3600),
+        db
+          .prepare(
+            "DELETE FROM signed_intents WHERE expires_at < ? AND status != 'confirmed'",
+          )
+          .bind(nowSec - 3600),
+        db
+          .prepare(
+            "DELETE FROM connect_requests WHERE expires_at < ? AND status != 'approved'",
+          )
+          .bind(nowSec - 3600),
         db.prepare("DELETE FROM rate_limits WHERE reset_at < ?").bind(nowSec - 300),
         db
           .prepare("DELETE FROM processed_tg_updates WHERE processed_at < ?")
           .bind(nowSec - 7 * 86_400),
         db
-          .prepare("DELETE FROM processed_alerts WHERE created_at < ?")
+          .prepare(
+            "DELETE FROM processed_alerts WHERE created_at < ? AND dedup_key NOT LIKE 'bootstrap:%'",
+          )
           .bind(nowSec - 30 * 86_400),
       ]);
     },

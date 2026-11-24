@@ -214,17 +214,13 @@ export function createTonClient(config: TonClientConfig) {
       const state = String(info.state ?? "uninitialized");
       let seqno = 0;
       if (state === "active") {
-        try {
-          const seqRes = await callTonRpcWithFailover<TonRunGetMethodResult>(
-            config.rpcUrls,
-            "runGetMethod",
-            { address, method: "seqno", stack: [] },
-            fetchFn,
-          );
-          seqno = parseSeqnoFromStack(seqRes);
-        } catch {
-          seqno = 0;
-        }
+        const seqRes = await callTonRpcWithFailover<TonRunGetMethodResult>(
+          config.rpcUrls,
+          "runGetMethod",
+          { address, method: "seqno", stack: [] },
+          fetchFn,
+        );
+        seqno = parseSeqnoFromStack(seqRes);
       }
 
       return {

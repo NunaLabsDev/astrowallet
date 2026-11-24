@@ -82,7 +82,24 @@ export function createMetricsRoutes(): Hono<MetricsRouteEnv> {
   router.get("/public", async (c) => {
     const config = c.get("config");
     const repo = c.get("repo");
-    const snapshot = await repo.getPublicMetricsSnapshot(config.network);
+    const cacheKey = `metrics_public:${config.network}`;
+    let snapshot: Awaited<ReturnType<typeof repo.getPublicMetricsSnapshot>> | null = null;
+    if (c.env.CACHE) {
+      try {
+        const cached = await c.env.CACHE.get(cacheKey);
+        if (cached) {
+          snapshot = JSON.parse(cached) as Awaited<ReturnType<typeof repo.getPublicMetricsSnapshot>>;
+        }
+      } catch {
+        snapshot = null;
+      }
+    }
+    if (!snapshot) {
+      snapshot = await repo.getPublicMetricsSnapshot(config.network);
+      if (c.env.CACHE) {
+        await c.env.CACHE.put(cacheKey, JSON.stringify(snapshot), { expirationTtl: 60 }).catch(() => {});
+      }
+    }
 
     c.header("Cache-Control", "public, max-age=120, stale-while-revalidate=600");
     return c.json({
@@ -187,7 +204,7 @@ export function createMetricsRoutes(): Hono<MetricsRouteEnv> {
       );
     }
 
-    if (body.txHash) {
+    if (body.txHash && session.ok) {
       tasks.push(
         repo.recordVerifiedTx({
           txHash: body.txHash.toLowerCase(),

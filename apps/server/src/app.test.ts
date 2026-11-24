@@ -2354,7 +2354,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       reply_markup?: { inline_keyboard?: Array<Array<{ web_app?: { url: string }; url?: string }>> };
     };
     expect(startMsg.reply_markup?.inline_keyboard?.[0]?.[0]?.web_app?.url).toBe(
-      "https://testnet.astrowallet.example/app",
+      "https://testnet.astrowallet.example/app?net=testnet",
     );
 
     const groupMsg = sentPayloads[1]?.body as {
@@ -3171,11 +3171,38 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     const repo = createMemoryRepo();
     const app = createApp({ createRepo: () => repo });
 
+    const authPairs: Array<[string, string]> = [
+      ["auth_date", String(Math.floor(Date.now() / 1000))],
+      ["query_id", "AAHdF6IQAAAAAN0XohDhrOrc"],
+      ["user", JSON.stringify({ id: 424242, username: "metrics_user", first_name: "Metrics" })],
+    ];
+    authPairs.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const authHash = await computeTelegramInitDataHash(
+      authPairs.map(([k, v]) => `${k}=${v}`).join("\n"),
+      TEST_ENV.TG_BOT_TOKEN,
+    );
+    const authParams = new URLSearchParams(Object.fromEntries(authPairs));
+    authParams.set("hash", authHash);
+    const authRes = await app.request(
+      "/v1/tg/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: authParams.toString() }),
+      },
+      TEST_ENV,
+    );
+    expect(authRes.status).toBe(200);
+    const session = (await authRes.json()) as { sessionToken: string };
+
     const evRes = await app.request(
       "/v1/metrics/event",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.sessionToken}`,
+        },
         body: JSON.stringify({
           eventType: "tx_sent",
           platform: "ios",

@@ -52,10 +52,11 @@ export function AgentBudgetSheet() {
   const [probeError, setProbeError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState(false);
 
-  const agentAccount = useMemo(
-    () => accounts.find((a) => a.derivationIndex === AGENT_DERIVATION_INDEX) ?? activeAccount,
-    [accounts, activeAccount],
+  const dedicatedAgentAccount = useMemo(
+    () => accounts.find((a) => a.derivationIndex === AGENT_DERIVATION_INDEX) ?? null,
+    [accounts],
   );
+  const agentAccount = dedicatedAgentAccount ?? activeAccount;
 
   const savePolicy = (next: AgentBudgetPolicy) => {
     setPolicy(next);

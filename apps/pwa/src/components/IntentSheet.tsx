@@ -13,7 +13,7 @@ import type {
 } from "@astrowallet/domain";
 import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
-import { triggerTelegramHaptic } from "../telegram/webapp.js";
+import { getTelegramWebApp, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
 import { requiresHighValueReauth } from "./flow-validators.js";
@@ -264,9 +264,12 @@ export function IntentSheet({
         const base = config.apiBaseUrl.replace(/\/+$/, "");
         const res = await fetch(
           `${base}/v1/intents/${encodeURIComponent(route.intentId)}?sig=${encodeURIComponent(route.sig)}`,
-          sessionToken
-            ? { headers: { Authorization: `Bearer ${sessionToken}` } }
-            : undefined,
+          {
+            headers: {
+              "X-Astro-Network": config.network,
+              ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+            },
+          },
         );
         const data = (await res.json()) as RemoteIntentResponse & { error?: string };
         if (!res.ok) {
@@ -324,7 +327,10 @@ export function IntentSheet({
             "Content-Type": "application/json",
             "X-Astro-Network": config.network,
           },
-          body: JSON.stringify({ target: targetValue }),
+          body: JSON.stringify({
+            target: targetValue,
+            ...(activeAccount?.address ? { sourceAddress: activeAccount.address } : {}),
+          }),
         });
         if (!res.ok) return;
         const body = (await res.json()) as { report?: ScanReport };
@@ -351,7 +357,10 @@ export function IntentSheet({
 
   const confirmOnServer = async (extraBody: Record<string, unknown>) => {
     const base = config.apiBaseUrl.replace(/\/+$/, "");
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Astro-Network": config.network,
+    };
     if (sessionToken) {
       headers.Authorization = `Bearer ${sessionToken}`;
     }
@@ -399,7 +408,10 @@ export function IntentSheet({
         includeSmartAccount,
       );
       const base = config.apiBaseUrl.replace(/\/+$/, "");
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-Astro-Network": config.network,
+    };
       if (sessionToken) {
         headers.Authorization = `Bearer ${sessionToken}`;
       }
@@ -776,6 +788,14 @@ export function IntentSheet({
   useEffect(() => {
     if (!completedMsg || autoReturnCancelled || shareClaimUrl) return undefined;
     if (typeof window !== "undefined" && window.opener && !window.opener.closed) {
+      let targetOrigin = "*";
+      try {
+        if (document.referrer) {
+          targetOrigin = new URL(document.referrer).origin;
+        }
+      } catch {
+        targetOrigin = "*";
+      }
       try {
         window.opener.postMessage(
           {
@@ -783,7 +803,7 @@ export function IntentSheet({
             status: "approved",
             intentId: route.intentId,
           },
-          "*",
+          targetOrigin,
         );
       } catch {
         // Ignore postMessage error
@@ -795,7 +815,12 @@ export function IntentSheet({
     }
     if (boomerangReturn) {
       const timer = window.setTimeout(() => {
-        window.location.href = boomerangReturn.href;
+        const wa = getTelegramWebApp();
+        if (wa?.openTelegramLink && boomerangReturn.href.startsWith("https://t.me/")) {
+          wa.openTelegramLink(boomerangReturn.href);
+        } else {
+          window.location.href = boomerangReturn.href;
+        }
       }, 900);
       return () => window.clearTimeout(timer);
     }

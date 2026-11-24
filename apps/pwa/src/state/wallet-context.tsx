@@ -430,31 +430,29 @@ export function WalletProvider({
     }
   }, [sessionLeaseKey]);
 
+  const inMemoryLeaseRef = useRef<{ pin: string; expiresAt: number } | null>(null);
+
   const saveSessionLease = useCallback(
     async (pinOrPassphrase: string) => {
-      if (expressSessionMinutes <= 0) {
-        try {
-          if (typeof window !== "undefined") {
-            window.sessionStorage.removeItem(sessionLeaseKey);
-          }
-        } catch {
-          // Ignore
+      // Never persist plaintext PINs in window.sessionStorage
+      try {
+        if (typeof window !== "undefined") {
+          window.sessionStorage.removeItem(sessionLeaseKey);
         }
+      } catch {
+        // Ignore
+      }
+      if (expressSessionMinutes <= 0) {
+        inMemoryLeaseRef.current = null;
         await tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
         return;
       }
-      const payload = JSON.stringify({
+      const lease = {
         pin: pinOrPassphrase,
         expiresAt: Date.now() + expressSessionMinutes * 60 * 1000,
-      });
-      try {
-        if (typeof window !== "undefined") {
-          window.sessionStorage.setItem(sessionLeaseKey, payload);
-        }
-      } catch {
-        // Ignore sessionStorage quota errors
-      }
-      await tgSecureStorageSet(sessionLeaseKey, payload).catch(() => false);
+      };
+      inMemoryLeaseRef.current = lease;
+      await tgSecureStorageSet(sessionLeaseKey, JSON.stringify(lease)).catch(() => false);
     },
     [sessionLeaseKey, expressSessionMinutes],
   );
@@ -463,6 +461,20 @@ export function WalletProvider({
     pin: string;
     expiresAt: number;
   } | null> => {
+    try {
+      if (typeof window !== "undefined") {
+        window.sessionStorage.removeItem(sessionLeaseKey);
+      }
+    } catch {
+      // Ignore
+    }
+
+    const mem = inMemoryLeaseRef.current;
+    if (mem && Date.now() < mem.expiresAt) {
+      return mem;
+    }
+    inMemoryLeaseRef.current = null;
+
     const parseLease = (raw: string | null) => {
       if (!raw) return null;
       try {
@@ -481,39 +493,18 @@ export function WalletProvider({
       return null;
     };
 
-    try {
-      if (typeof window !== "undefined") {
-        const memLease = parseLease(window.sessionStorage.getItem(sessionLeaseKey));
-        if (memLease) return memLease;
-      }
-    } catch {
-      // Ignore sessionStorage errors
-    }
-
     const secLease = parseLease(await tgSecureStorageGet(sessionLeaseKey).catch(() => null));
     if (secLease) {
-      try {
-        if (typeof window !== "undefined") {
-          window.sessionStorage.setItem(sessionLeaseKey, JSON.stringify(secLease));
-        }
-      } catch {
-        // Ignore
-      }
+      inMemoryLeaseRef.current = secLease;
       return secLease;
     }
 
-    try {
-      if (typeof window !== "undefined") {
-        window.sessionStorage.removeItem(sessionLeaseKey);
-      }
-    } catch {
-      // Ignore
-    }
     void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
     return null;
   }, [sessionLeaseKey]);
 
   const clearSessionLease = useCallback(() => {
+    inMemoryLeaseRef.current = null;
     try {
       if (typeof window !== "undefined") {
         window.sessionStorage.removeItem(sessionLeaseKey);
@@ -691,9 +682,13 @@ export function WalletProvider({
       .then(({ deriveTonAccount }) => {
         if (cancelled || !sessionVault.has()) return;
         const summary = sessionVault.withMnemonic((mnemonic) => {
+          const tonDerivationIndex =
+            activeAccount?.derivationIndex !== undefined && activeAccount.derivationIndex < 1000
+              ? activeAccount.derivationIndex
+              : 0;
           const derived = deriveTonAccount(
             mnemonic,
-            activeAccount?.derivationIndex ?? activeIndex ?? 0,
+            tonDerivationIndex,
             config.tonNetwork,
             "v4r2",
           );
@@ -1748,12 +1743,13 @@ export function WalletProvider({
       );
       await saveEncryptedVault(updatedEnvelope, cleanScopeId);
       setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
+      clearSessionLease();
       // Clear any previous biometric PIN wrapper so stale PIN credentials never cause a mismatch
       await disableFingerprint();
       showToast("Vault protection updated", "info");
       return { envelopeJson: serializeAgVaultBackup(updatedEnvelope) };
     },
-    [cleanScopeId, disableFingerprint, showToast],
+    [cleanScopeId, clearSessionLease, disableFingerprint, showToast],
   );
 
   const revealMnemonicWithPin = useCallback(
@@ -1816,7 +1812,9 @@ export function WalletProvider({
       });
 
       const nextIndex =
-        decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1) + 1;
+        decrypted.accounts
+          .filter((acc) => !acc.importedSecret && acc.index < 1000)
+          .reduce((max, acc) => Math.max(max, acc.index), -1) + 1;
       const derived = deriveStellarAccount(decrypted.mnemonic, nextIndex);
       const cleanLabel = label.trim() || `Account #${nextIndex + 1}`;
       const nextMeta: VaultAccountMetadata = {
@@ -2079,26 +2077,26 @@ export function WalletProvider({
     setVaultStatus("locked");
   }, [clearSessionLease]);
 
-  // Auto-lock after 4 hours of inactivity or > 4 hours in background tab
+  // Auto-lock after 15 minutes of inactivity or > 5 minutes in background tab
   useEffect(() => {
     if (vaultStatus !== "unlocked" || typeof window === "undefined") {
       return undefined;
     }
 
-    const INACTIVITY_MS = 4 * 60 * 60 * 1000;
-    const BACKGROUND_LOCK_MS = 4 * 60 * 60 * 1000;
+    const INACTIVITY_MS = 15 * 60 * 1000;
+    const BACKGROUND_LOCK_MS = 5 * 60 * 1000;
     let lastLeaseExtendAt = Date.now();
 
     let timer = window.setTimeout(() => {
       lockVault();
-      showToast("Vault auto-locked after 4 hours of inactivity", "info");
+      showToast("Vault auto-locked after 15 minutes of inactivity", "info");
     }, INACTIVITY_MS);
 
     const resetInactivityTimer = () => {
       window.clearTimeout(timer);
       timer = window.setTimeout(() => {
         lockVault();
-        showToast("Vault auto-locked after 4 hours of inactivity", "info");
+        showToast("Vault auto-locked after 15 minutes of inactivity", "info");
       }, INACTIVITY_MS);
       const now = Date.now();
       if (now - lastLeaseExtendAt > 5 * 60 * 1000) {
@@ -2348,15 +2346,43 @@ export function WalletProvider({
     [withActiveKeypair, stellarClient, refreshChainState, showToast],
   );
 
+  const accountTxQueueRef = useRef<Map<string, Promise<unknown>>>(new Map());
+
+  const enqueueAccountTx = useCallback(
+    async <T,>(accountKey: string, task: () => Promise<T>): Promise<T> => {
+      const prev = accountTxQueueRef.current.get(accountKey) ?? Promise.resolve();
+      const next = prev.catch(() => undefined).then(task);
+      accountTxQueueRef.current.set(accountKey, next);
+      try {
+        return await next;
+      } finally {
+        if (accountTxQueueRef.current.get(accountKey) === next) {
+          accountTxQueueRef.current.delete(accountKey);
+        }
+      }
+    },
+    [],
+  );
+
   const signRawXdrWithShield = useCallback(
     async (
       xdrBase64: string,
       allowWarning = false,
     ): Promise<{ signedXdr: string; scanReport: ScanReport }> => {
-      const scan = scanTransactionEnvelopeXdr(xdrBase64.trim(), {
+      const trimmedXdr = xdrBase64.trim();
+      const scan = scanTransactionEnvelopeXdr(trimmedXdr, {
         networkPassphrase: config.networkPassphrase,
         verifiedAssets,
       });
+      if (
+        activeAccount?.address &&
+        scan.decoded.sourceAccount &&
+        scan.decoded.sourceAccount !== activeAccount.address
+      ) {
+        throw new Error(
+          `SOURCE_ACCOUNT_MISMATCH: transaction source ${scan.decoded.sourceAccount} does not match active account ${activeAccount.address}`,
+        );
+      }
       if (scan.report.verdict === "malicious") {
         throw new Error(
           `Scan & Shield blocked malicious XDR: ${scan.report.findings[0]?.title ?? "threat detected"}`,
@@ -2367,16 +2393,34 @@ export function WalletProvider({
           `Scan & Shield warning: ${scan.report.findings[0]?.title ?? "review required"}. Enable "Allow warnings" to sign explicitly.`,
         );
       }
+      const hasSorobanOp = scan.decoded?.operations.some(
+        (op) => op.type === "invokeHostFunction" || Boolean(op.soroban),
+      );
+      if (hasSorobanOp && config.network === "mainnet") {
+        const sim = await sorobanDevClient.simulateRawXdr(trimmedXdr);
+        if (!sim.ok) {
+          throw new Error(
+            `Mainnet Soroban pre-sign simulation failed: ${sim.error ?? "unknown simulation error"}`,
+          );
+        }
+      }
       return withActiveKeypair(async (keypair) => {
         const signedXdr = signTransactionXdrEnvelope(
-          xdrBase64.trim(),
+          trimmedXdr,
           config.networkPassphrase,
           keypair,
         );
         return { signedXdr, scanReport: scan.report };
       });
     },
-    [config.networkPassphrase, verifiedAssets, withActiveKeypair],
+    [
+      activeAccount?.address,
+      verifiedAssets,
+      config.networkPassphrase,
+      config.network,
+      sorobanDevClient,
+      withActiveKeypair,
+    ],
   );
 
   const signAndSubmitRawXdrWithShield = useCallback(
@@ -2390,21 +2434,32 @@ export function WalletProvider({
       signedXdr: string;
       channel: "soroban-rpc" | "horizon";
     }> => {
-      const { signedXdr } = await signRawXdrWithShield(xdrBase64, allowWarning);
-      const submitted = await withActiveKeypair((sourceKeypair) =>
-        sorobanDevClient.submitRawSignedXdr(signedXdr, {
-          sourceKeypair,
-          intentAuth,
-        }),
-      );
-      await refreshChainState();
-      showToast(`Submitted via ${submitted.channel}`);
-      return {
-        ...submitted,
-        signedXdr,
-      };
+      const addr = activeAccount?.address ?? "default";
+      return enqueueAccountTx(addr, async () => {
+        const { signedXdr } = await signRawXdrWithShield(xdrBase64, allowWarning);
+        const submitted = await withActiveKeypair((sourceKeypair) =>
+          sorobanDevClient.submitRawSignedXdr(signedXdr, {
+            sourceKeypair,
+            intentAuth,
+          }),
+        );
+        await refreshChainState();
+        showToast(`Submitted via ${submitted.channel}`);
+        return {
+          ...submitted,
+          signedXdr,
+        };
+      });
     },
-    [signRawXdrWithShield, withActiveKeypair, sorobanDevClient, refreshChainState, showToast],
+    [
+      activeAccount?.address,
+      enqueueAccountTx,
+      signRawXdrWithShield,
+      withActiveKeypair,
+      sorobanDevClient,
+      refreshChainState,
+      showToast,
+    ],
   );
 
   const fetchDevTelemetry = useCallback(

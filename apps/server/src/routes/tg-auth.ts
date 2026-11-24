@@ -12,7 +12,7 @@ import {
   type ConnectChallengePayload,
   type MiniAppSessionClaims,
 } from "@astrowallet/tg-protocol";
-import type { KVNamespace } from "@cloudflare/workers-types";
+import type { DurableObjectNamespace, KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
@@ -53,6 +53,7 @@ async function sha256Hex(raw: string): Promise<string> {
 export type TgAuthRouteEnv = {
   Bindings: {
     CACHE?: KVNamespace;
+    CHAIN_WATCHER?: DurableObjectNamespace;
     [key: string]: unknown;
   };
   Variables: {
@@ -503,6 +504,19 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
       network: config.network,
       eventType: "wallet_linked",
     });
+
+    if (c.env.CHAIN_WATCHER) {
+      const id = c.env.CHAIN_WATCHER.idFromName(`watcher:${config.network}`);
+      const stub = c.env.CHAIN_WATCHER.get(id);
+      const ensurePromise = stub
+        .fetch("https://chain-watcher.internal/ensure", { method: "POST" })
+        .catch(() => {});
+      try {
+        c.executionCtx.waitUntil(ensurePromise);
+      } catch {
+        // Ignore when executionCtx is absent in unit tests
+      }
+    }
 
     return c.json({
       ok: true,

@@ -132,7 +132,8 @@ export function ReceiveSheet({
               Receive to {activeAccount.label}
             </div>
             <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
-              Classic Account (G...) · {config.network.toUpperCase()}
+              {isSmartAccount ? "Smart Account (C...) · Soroban" : "Classic Account (G...)"} ·{" "}
+              {config.network.toUpperCase()}
             </div>
           </div>
           <button type="button" className="aw-chip-btn" onClick={onClose}>
@@ -149,7 +150,7 @@ export function ReceiveSheet({
             aria-pressed={mode === "standard"}
             onClick={() => setMode("standard")}
           >
-            Standard G...
+            {isSmartAccount ? "Smart C..." : "Standard G..."}
           </button>
           <button
             type="button"
@@ -282,7 +283,9 @@ export function ReceiveSheet({
                     ? "Copy SEP-0007 URI"
                     : mode === "muxed"
                       ? "Copy M... Address"
-                      : "Copy Public G... Address"}
+                      : isSmartAccount
+                        ? "Copy Smart C... Address"
+                        : "Copy Public G... Address"}
               </span>
             </button>
 

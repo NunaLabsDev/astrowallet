@@ -1,6 +1,5 @@
 import { decimalToStroops7 } from "@astrowallet/defi";
 import type { ServerConfig } from "@astrowallet/domain";
-import { fetchSep42VerifiedAssets } from "@astrowallet/security-shield";
 import {
   buildMiniAppWebAppUrl,
   formatIncomingAlertCard,
@@ -9,6 +8,7 @@ import { Hono } from "hono";
 import type { KVNamespace } from "@cloudflare/workers-types";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
+import { getCachedSep42VerifiedAssets } from "../lib/sep42-cache.js";
 import { sendTelegramMessage, type TelegramApiDeps } from "../telegram-api.js";
 import { constantTimeEqual } from "../lib/crypto-utils.js";
 
@@ -182,26 +182,10 @@ export function createIndexerRoutes(deps: IndexerRoutesDeps = {}): Hono<IndexerR
       list.push(acc);
     }
 
-    let verifiedAssets: Awaited<ReturnType<typeof fetchSep42VerifiedAssets>> = [];
-    if (config.sep42AssetListUrls.length > 0) {
-      const kvKey = `sep42:${config.network}:v1`;
-      const cached = c.env?.CACHE ? await c.env.CACHE.get(kvKey).catch(() => null) : null;
-      if (cached) {
-        try {
-          verifiedAssets = JSON.parse(cached) as typeof verifiedAssets;
-        } catch {
-          verifiedAssets = [];
-        }
-      }
-      if (verifiedAssets.length === 0) {
-        verifiedAssets = await fetchSep42VerifiedAssets(config.sep42AssetListUrls).catch(() => []);
-        if (verifiedAssets.length > 0 && c.env?.CACHE) {
-          await c.env.CACHE
-            .put(kvKey, JSON.stringify(verifiedAssets), { expirationTtl: 600 })
-            .catch(() => undefined);
-        }
-      }
-    }
+    const verifiedAssets = await getCachedSep42VerifiedAssets({
+      config,
+      cache: c.env?.CACHE,
+    });
 
     let alertsSent = 0;
     for (const ev of limitedEvents) {

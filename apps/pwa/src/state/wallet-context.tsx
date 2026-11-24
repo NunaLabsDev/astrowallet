@@ -643,6 +643,7 @@ export function WalletProvider({
   );
 
   const [vaultStatus, setVaultStatus] = useState<VaultStatus>("loading");
+  const tonConnectResolvingRef = useRef(false);
   const [accountMetaList, setAccountMetaList] = useState<VaultAccountMetadata[]>([]);
   const [activeIndex, setActiveIndex] = useState<number>(0);
 
@@ -1235,78 +1236,87 @@ export function WalletProvider({
   const resolvePendingTonConnectTx = useCallback(
     async (approved: boolean) => {
       const req = pendingTonConnectTx;
-      if (!req) return;
-      setPendingTonConnectTx(null);
-      const sessRecord = tonConnectSessionsRef.current.find(
-        (s) => s.walletClientId === req.walletClientId,
-      );
-      if (!sessRecord || !config.tonBridgeUrl) return;
-      const {
-        TonConnectCryptoSession,
-        buildSignedTonTransfer,
-        deriveTonAccount,
-        sendTonConnectBridgeMessage,
-      } = await loadTonCore();
-      const cryptoSess = new TonConnectCryptoSession(sessRecord.walletSecretHex);
+      if (!req || tonConnectResolvingRef.current) return;
+      tonConnectResolvingRef.current = true;
+      try {
+        const sessRecord = tonConnectSessionsRef.current.find(
+          (s) => s.walletClientId === req.walletClientId,
+        );
+        if (!sessRecord || !config.tonBridgeUrl) {
+          setPendingTonConnectTx(null);
+          return;
+        }
+        const {
+          TonConnectCryptoSession,
+          buildSignedTonTransfer,
+          deriveTonAccount,
+          sendTonConnectBridgeMessage,
+        } = await loadTonCore();
+        const cryptoSess = new TonConnectCryptoSession(sessRecord.walletSecretHex);
 
-      if (!approved) {
-        const errPayload = JSON.stringify({
-          id: req.requestId,
-          error: { code: 300, message: "User rejected TON Connect transaction" },
+        if (!approved) {
+          setPendingTonConnectTx(null);
+          const errPayload = JSON.stringify({
+            id: req.requestId,
+            error: { code: 300, message: "User rejected TON Connect transaction" },
+          });
+          await sendTonConnectBridgeMessage({
+            bridgeUrl: config.tonBridgeUrl,
+            clientId: sessRecord.walletClientId,
+            to: req.dappClientId,
+            payloadBase64: cryptoSess.encrypt(errPayload, req.dappClientId),
+          }).catch(() => undefined);
+          triggerTelegramHaptic("warning");
+          showToast("Rejected TON Connect request", "info");
+          return;
+        }
+
+        if (!sessionVault.has()) {
+          throw new Error("Unlock your vault to sign TON Connect transactions");
+        }
+
+        const tonClient = await getTonClient();
+        const bocBase64 = await sessionVault.withMnemonic(async (mnemonic) => {
+          const derived = deriveTonAccount(
+            mnemonic,
+            resolveTonDerivationIndex(activeAccount, activeIndex),
+            config.tonNetwork,
+            "v4r2",
+          );
+          try {
+            const chainState = await tonClient.getAccountState(derived.friendlyAddress);
+            const boc = buildSignedTonTransfer({
+              account: derived,
+              seqno: chainState.seqno,
+              validUntil: req.validUntil,
+              messages: req.messages.map((m) => ({
+                destination: m.address,
+                amountNano: m.amountNano,
+                payloadCellBase64: m.payload,
+                stateInitBase64: m.stateInit,
+              })),
+            });
+            await tonClient.broadcastBoc(boc);
+            return boc;
+          } finally {
+            derived.zeroize();
+          }
         });
+
+        setPendingTonConnectTx(null);
+        const okPayload = JSON.stringify({ id: req.requestId, result: bocBase64 });
         await sendTonConnectBridgeMessage({
           bridgeUrl: config.tonBridgeUrl,
           clientId: sessRecord.walletClientId,
           to: req.dappClientId,
-          payloadBase64: cryptoSess.encrypt(errPayload, req.dappClientId),
-        }).catch(() => undefined);
-        triggerTelegramHaptic("warning");
-        showToast("Rejected TON Connect request", "info");
-        return;
+          payloadBase64: cryptoSess.encrypt(okPayload, req.dappClientId),
+        });
+        triggerTelegramHaptic("success");
+        await refreshTonState();
+        showToast(`Signed TON Connect transaction for ${req.dappName}`);
+      } finally {
+        tonConnectResolvingRef.current = false;
       }
-
-      if (!sessionVault.has()) {
-        throw new Error("Unlock your vault to sign TON Connect transactions");
-      }
-
-      const tonClient = await getTonClient();
-      const bocBase64 = await sessionVault.withMnemonic(async (mnemonic) => {
-        const derived = deriveTonAccount(
-          mnemonic,
-          resolveTonDerivationIndex(activeAccount, activeIndex),
-          config.tonNetwork,
-          "v4r2",
-        );
-        try {
-          const chainState = await tonClient.getAccountState(derived.friendlyAddress);
-          const boc = buildSignedTonTransfer({
-            account: derived,
-            seqno: chainState.seqno,
-            validUntil: req.validUntil,
-            messages: req.messages.map((m) => ({
-              destination: m.address,
-              amountNano: m.amountNano,
-              payloadCellBase64: m.payload,
-              stateInitBase64: m.stateInit,
-            })),
-          });
-          await tonClient.broadcastBoc(boc);
-          return boc;
-        } finally {
-          derived.zeroize();
-        }
-      });
-
-      const okPayload = JSON.stringify({ id: req.requestId, result: bocBase64 });
-      await sendTonConnectBridgeMessage({
-        bridgeUrl: config.tonBridgeUrl,
-        clientId: sessRecord.walletClientId,
-        to: req.dappClientId,
-        payloadBase64: cryptoSess.encrypt(okPayload, req.dappClientId),
-      });
-      triggerTelegramHaptic("success");
-      await refreshTonState();
-      showToast(`Signed TON Connect transaction for ${req.dappName}`);
     },
     [
       pendingTonConnectTx,

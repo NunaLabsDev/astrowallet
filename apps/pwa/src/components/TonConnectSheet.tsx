@@ -22,10 +22,24 @@ export function TonConnectSheet() {
 
   const [uriInput, setUriInput] = useState("");
   const [busy, setBusy] = useState(false);
+  const [txBusy, setTxBusy] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
   if (!tonAccount) return null;
+
+  const handleResolvePendingTx = async (approved: boolean) => {
+    if (txBusy) return;
+    setTxBusy(true);
+    setErrorMsg(null);
+    try {
+      await resolvePendingTonConnectTx(approved);
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "TON Connect signing failed");
+    } finally {
+      setTxBusy(false);
+    }
+  };
 
   const handlePair = async (e: FormEvent) => {
     e.preventDefault();
@@ -89,7 +103,8 @@ export function TonConnectSheet() {
               type="button"
               className="aw-btn-secondary"
               style={{ flex: 1 }}
-              onClick={() => void resolvePendingTonConnectTx(false)}
+              disabled={txBusy}
+              onClick={() => void handleResolvePendingTx(false)}
             >
               Reject
             </button>
@@ -97,10 +112,11 @@ export function TonConnectSheet() {
               type="button"
               className="aw-btn-primary"
               style={{ flex: 1 }}
-              onClick={() => void resolvePendingTonConnectTx(true)}
+              disabled={txBusy}
+              onClick={() => void handleResolvePendingTx(true)}
             >
               <IconCheck size={14} />
-              <span>Approve &amp; Sign BOC</span>
+              <span>{txBusy ? "Signing BOC..." : "Approve & Sign BOC"}</span>
             </button>
           </div>
         </div>

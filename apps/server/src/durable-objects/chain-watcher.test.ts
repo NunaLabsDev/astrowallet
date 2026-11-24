@@ -40,11 +40,15 @@ function createMockD1(watched: Array<{ telegramUserId: string; address: string; 
         }),
         first: vi.fn(async () => null),
         run: vi.fn(async () => {
-          if (sql.includes("INSERT OR IGNORE INTO alert_dedup")) {
+          if (sql.includes("INSERT OR IGNORE INTO processed_alerts")) {
             const key = String(args[0] ?? "");
             const isNew = !claimedKeys.has(key);
             claimedKeys.add(key);
             return { meta: { changes: isNew ? 1 : 0 } };
+          }
+          if (sql.includes("DELETE FROM processed_alerts WHERE dedup_key = ?")) {
+            claimedKeys.delete(String(args[0] ?? ""));
+            return { meta: { changes: 1 } };
           }
           return { meta: { changes: 1 } };
         }),
@@ -237,6 +241,64 @@ describe("ChainWatcherDO anti-flood & cursor seeding", () => {
       await watcher.alarm();
       expect(tgCalls).toBe(1);
       expect(store.get(`pay_cursor:mainnet:${ADDR}`)).toBe("888888890-1");
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("releases alert dedup key and preserves cursor when Telegram API fails, then delivers on retry", async () => {
+    const { state, store } = createMockDoState();
+    store.set(`pay_cursor:mainnet:${ADDR}`, "888888888-1");
+    const db = createMockD1([{ telegramUserId: "1572614676", address: ADDR, label: "external" }]);
+    let tgCalls = 0;
+    let shouldFailTelegram = true;
+    const freshIso = new Date().toISOString();
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.includes("tg.example.org")) {
+        tgCalls += 1;
+        if (shouldFailTelegram) {
+          return new Response(JSON.stringify({ ok: false, error_code: 429 }), { status: 429 });
+        }
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      if (url.includes("order=asc")) {
+        return new Response(
+          JSON.stringify({
+            _embedded: {
+              records: [
+                {
+                  paging_token: "888888891-1",
+                  transaction_hash: "tx-retryable",
+                  created_at: freshIso,
+                  type: "payment",
+                  from: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+                  to: ADDR,
+                  amount: "2.5000000",
+                  asset_type: "native",
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    });
+
+    try {
+      const watcher = new ChainWatcherDO(state, makeEnv(db));
+      await watcher.alarm();
+      expect(tgCalls).toBe(1);
+      // Cursor must NOT advance past undelivered alert
+      expect(store.get(`pay_cursor:mainnet:${ADDR}`)).toBe("888888888-1");
+
+      // Recovery on next alarm cycle succeeds once Telegram API recovers
+      shouldFailTelegram = false;
+      await watcher.alarm();
+      expect(tgCalls).toBe(2);
+      expect(store.get(`pay_cursor:mainnet:${ADDR}`)).toBe("888888891-1");
     } finally {
       fetchSpy.mockRestore();
     }

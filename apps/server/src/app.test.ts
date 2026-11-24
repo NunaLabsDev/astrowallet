@@ -344,6 +344,9 @@ function createMemoryRepo(): ServerRepository {
       dedupKeys.add(dedupKey);
       return true;
     },
+    async releaseAlertDedupKey(dedupKey) {
+      dedupKeys.delete(dedupKey);
+    },
     async findRecentPendingIntent({ creatorTelegramUserId, actionType, payloadJson, sinceUnix }) {
       const now = Math.floor(Date.now() / 1000);
       for (const it of intents.values()) {

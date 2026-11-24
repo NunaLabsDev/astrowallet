@@ -1,6 +1,5 @@
 import { decimalToStroops7 } from "@astrowallet/defi";
 import { parseServerConfig } from "@astrowallet/domain";
-import { fetchSep42VerifiedAssets } from "@astrowallet/security-shield";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import {
   buildMiniAppWebAppUrl,
@@ -8,6 +7,7 @@ import {
 } from "@astrowallet/tg-protocol";
 import type { WorkerBindings } from "../app.js";
 import { createD1Repository } from "../db/repository.js";
+import { getCachedSep42VerifiedAssets } from "../lib/sep42-cache.js";
 import { fetchIncomingPaymentsSince, fetchLatestPaymentCursor } from "../stellar-verifier.js";
 import { sendTelegramMessage } from "../telegram-api.js";
 
@@ -116,26 +116,10 @@ export class ChainWatcherDO {
       const nextOffset = batch.length < BATCH_SIZE ? 0 : savedOffset + BATCH_SIZE;
       await this.state.storage.put("batch_offset", nextOffset);
 
-      let verifiedAssets: Awaited<ReturnType<typeof fetchSep42VerifiedAssets>> = [];
-      if (config.sep42AssetListUrls.length > 0) {
-        const kvKey = `sep42:${config.network}:v1`;
-        const cached = this.env.CACHE ? await this.env.CACHE.get(kvKey).catch(() => null) : null;
-        if (cached) {
-          try {
-            verifiedAssets = JSON.parse(cached) as typeof verifiedAssets;
-          } catch {
-            verifiedAssets = [];
-          }
-        }
-        if (verifiedAssets.length === 0) {
-          verifiedAssets = await fetchSep42VerifiedAssets(config.sep42AssetListUrls).catch(() => []);
-          if (verifiedAssets.length > 0 && this.env.CACHE) {
-            await this.env.CACHE
-              .put(kvKey, JSON.stringify(verifiedAssets), { expirationTtl: 600 })
-              .catch(() => undefined);
-          }
-        }
-      }
+      const verifiedAssets = await getCachedSep42VerifiedAssets({
+        config,
+        cache: this.env.CACHE,
+      });
 
       for (const entry of batch) {
         if (entry.address.startsWith("C")) {
@@ -162,18 +146,18 @@ export class ChainWatcherDO {
             10,
           );
 
-          let newestCursor = pollResult.newestCursor ?? savedCursor;
+          let committedCursor = savedCursor;
           let sentCount = 0;
           let sawStaleRecord = false;
+          let abortedOnSendFailure = false;
           const nowMs = Date.now();
 
           for (const ev of pollResult.incoming) {
-            newestCursor = ev.pagingToken;
-
             if (ev.createdAt) {
               const createdMs = Date.parse(ev.createdAt);
               if (Number.isFinite(createdMs) && nowMs - createdMs > MAX_ALERT_AGE_MS) {
                 sawStaleRecord = true;
+                committedCursor = ev.pagingToken;
                 continue;
               }
             }
@@ -184,13 +168,16 @@ export class ChainWatcherDO {
                 : MIN_ISSUED_ALERT_STROOPS;
             try {
               if (decimalToStroops7(ev.amount) < minThreshold) {
+                committedCursor = ev.pagingToken;
                 continue;
               }
             } catch {
+              committedCursor = ev.pagingToken;
               continue;
             }
 
             if (sentCount >= MAX_ALERTS_PER_ACCOUNT_PER_POLL) {
+              committedCursor = ev.pagingToken;
               continue;
             }
 
@@ -209,9 +196,10 @@ export class ChainWatcherDO {
             const dedupKey = `alert:${config.network}:${ev.txHash.toLowerCase()}:${entry.address}:${entry.telegramUserId}`;
             const claimed = await repo.claimAlertDedupKey(dedupKey);
             if (!claimed) {
+              committedCursor = ev.pagingToken;
               continue;
             }
-            await sendTelegramMessage(
+            const sent = await sendTelegramMessage(
               {
                 botToken: config.tgBotToken,
                 chatId: entry.telegramUserId,
@@ -254,14 +242,22 @@ export class ChainWatcherDO {
               },
               { apiOrigin: config.telegramApiOrigin },
             );
+            if (!sent) {
+              await repo.releaseAlertDedupKey?.(dedupKey).catch(() => undefined);
+              abortedOnSendFailure = true;
+              break;
+            }
+            committedCursor = ev.pagingToken;
             sentCount += 1;
           }
 
-          if (sawStaleRecord) {
+          if (sawStaleRecord && !abortedOnSendFailure) {
             const headCursor = await fetchLatestPaymentCursor(config, entry.address);
             await this.state.storage.put(cursorKey, headCursor);
-          } else if (newestCursor !== savedCursor) {
-            await this.state.storage.put(cursorKey, newestCursor);
+          } else if (committedCursor !== savedCursor) {
+            await this.state.storage.put(cursorKey, committedCursor);
+          } else if (!abortedOnSendFailure && pollResult.newestCursor && pollResult.newestCursor !== savedCursor) {
+            await this.state.storage.put(cursorKey, pollResult.newestCursor);
           }
         } catch {
           // Keep polling remaining accounts even if one account query fails transiently

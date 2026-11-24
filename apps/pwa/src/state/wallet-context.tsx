@@ -1856,10 +1856,11 @@ export function WalletProvider({
         deriveKeyFn: deriveKeyInWorker,
       });
 
-      const nextIndex =
+      const rawNext =
         decrypted.accounts
-          .filter((acc) => !acc.importedSecret && acc.index < 1000)
+          .filter((acc) => !acc.importedSecret && acc.index < 1000 && acc.index !== 99)
           .reduce((max, acc) => Math.max(max, acc.index), -1) + 1;
+      const nextIndex = rawNext === 99 ? 100 : rawNext;
       const derived = deriveStellarAccount(decrypted.mnemonic, nextIndex);
       const cleanLabel = label.trim() || `Account #${nextIndex + 1}`;
       const nextMeta: VaultAccountMetadata = {

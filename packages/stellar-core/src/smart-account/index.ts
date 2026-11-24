@@ -142,10 +142,11 @@ export function resolveSacContractId(input: {
   assetIssuer?: string | undefined;
   networkPassphrase: string;
 }): ContractAddress {
+  const cleanCode = input.assetCode.trim().toUpperCase();
   const asset =
-    input.assetCode === "XLM" && !input.assetIssuer
+    cleanCode === "XLM" && !input.assetIssuer
       ? Asset.native()
-      : new Asset(input.assetCode, input.assetIssuer ?? "");
+      : new Asset(input.assetCode.trim(), input.assetIssuer ?? "");
   return asset.contractId(input.networkPassphrase) as ContractAddress;
 }
 

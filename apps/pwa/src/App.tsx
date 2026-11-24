@@ -773,7 +773,14 @@ function WalletShell({
   }, [recentPayments, activeAccount, activityFilter]);
 
   const pairedSmartAccount = useMemo(() => {
-    if (!activeAccount || !config.smartAccountWasmHash) return null;
+    if (
+      !activeAccount ||
+      activeAccount.kind !== "classic" ||
+      !activeAccount.address.startsWith("G") ||
+      !config.smartAccountWasmHash
+    ) {
+      return null;
+    }
     try {
       return deriveCounterfactualSmartAccount({
         guardianAddress: activeAccount.address as never,
@@ -1039,6 +1046,8 @@ function WalletShell({
       accounts,
       linkedAccounts,
       config.apiBaseUrl,
+      config.network,
+      config.altNetworkProfile,
       config.smartAccountWasmHash,
       config.tgBotUsername,
       signConnectChallenge,

@@ -822,7 +822,21 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       const allTxHashes = await repo.listSplitPaymentTxHashes(intent.intentId);
       const isComplete = paidCount >= participantCount;
       if (isComplete) {
-        await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+        await Promise.all([
+          repo.markIntentConfirmed(intent.intentId, parsedBody.txHash),
+          repo.recordVerifiedTx?.({
+            txHash: parsedBody.txHash.toLowerCase(),
+            network: config.network,
+            actionType: intent.actionType,
+            assetCode: payload.assetCode,
+            amountEst: payload.totalAmount ?? payload.amount,
+          }) ?? Promise.resolve(),
+          repo.incrementProductEvent?.({
+            dayUtc: new Date().toISOString().slice(0, 10),
+            network: config.network,
+            eventType: "intent_confirmed",
+          }) ?? Promise.resolve(),
+        ]);
       }
 
       const shareAmount = payload.amount ?? "?";
@@ -927,19 +941,24 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
     }
 
     const updated = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+    const derivedAssetLabel =
+      payload.assetCode ??
+      (payload.fromAsset && payload.toAsset
+        ? `${payload.fromAsset.split(":")[0]}->${payload.toAsset.split(":")[0]}`
+        : undefined);
     await Promise.all([
-      repo.recordVerifiedTx({
+      repo.recordVerifiedTx?.({
         txHash: parsedBody.txHash.toLowerCase(),
         network: config.network,
         actionType: intent.actionType,
-        assetCode: payload.assetCode,
+        assetCode: derivedAssetLabel,
         amountEst: payload.amount,
-      }),
-      repo.incrementProductEvent({
+      }) ?? Promise.resolve(),
+      repo.incrementProductEvent?.({
         dayUtc: new Date().toISOString().slice(0, 10),
         network: config.network,
         eventType: "intent_confirmed",
-      }),
+      }) ?? Promise.resolve(),
     ]);
 
     if (payload.originApp === "astrodex" || payload.originApp === "astrogate") {

@@ -430,5 +430,19 @@ describe("PWA Multi-User Client Flows & Form Validators", () => {
       includeCommunityHub: true,
     });
     expect(communityCatalog.map((c) => c.assetCode)).toEqual(["LIBRE", "xLMNR", "SVR"]);
+    expect(
+      resolveSwapAssetInput("USDE", [], [], [], "mainnet"),
+    ).toBe("USDE:GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47");
+    expect(resolveSwapAssetInput("USDE", [], [], [], "testnet")).toBe("USDE");
+    expect(
+      computeNextDerivationIndex([
+        { derivationIndex: 0 },
+        { derivationIndex: 1000 },
+        { derivationIndex: 1001 },
+      ]),
+    ).toBe(1);
+    expect(
+      computeNextDerivationIndex([{ derivationIndex: 0 }, { derivationIndex: 98 }]),
+    ).toBe(100);
   });
 });

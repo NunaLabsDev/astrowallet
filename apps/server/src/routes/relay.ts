@@ -199,6 +199,15 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
     let estimatedFeeStroops = config.relayMaxFeeStroops;
     const maxFeeAllowed = BigInt(config.relayMaxFeeStroops);
 
+    let claimedStageKey: string | null = null;
+    const releaseStageKey = async () => {
+      if (claimedStageKey && repo?.releaseAlertDedupKey) {
+        const key = claimedStageKey;
+        claimedStageKey = null;
+        await repo.releaseAlertDedupKey(key).catch(() => undefined);
+      }
+    };
+
     if (body.mode === "feebump") {
       let decoded;
       try {
@@ -235,6 +244,19 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         }
       }
 
+      const report = evaluateDecodedTransaction(decoded, {
+        networkPassphrase: config.networkPassphrase,
+      });
+      if (report.verdict === "malicious" || report.findings.some((f) => f.blocksSigning)) {
+        return c.json(
+          {
+            error: "Scan & Shield blocked relay of a malicious transaction",
+            findings: report.findings.map((f) => f.code),
+          },
+          403,
+        );
+      }
+
       if (intentAuthRecord && repo) {
         if (intentAuthRecord.actionType === "claim" && config.claimEscrowContractId) {
           const hasEscrowOp = decoded.operations.some(
@@ -249,19 +271,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         if (!claimed) {
           return c.json({ error: "Intent relay authorization already consumed" }, 409);
         }
-      }
-
-      const report = evaluateDecodedTransaction(decoded, {
-        networkPassphrase: config.networkPassphrase,
-      });
-      if (report.verdict === "malicious" || report.findings.some((f) => f.blocksSigning)) {
-        return c.json(
-          {
-            error: "Scan & Shield blocked relay of a malicious transaction",
-            findings: report.findings.map((f) => f.code),
-          },
-          403,
-        );
+        claimedStageKey = stageKey;
       }
     } else {
       let hostFn;
@@ -287,6 +297,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         dailyBudgetStroops: config.relayDailyBudgetStroops,
       });
       if (!budget.allowed) {
+        await releaseStageKey();
         return c.json({ error: "Daily sponsored relay fee budget exceeded" }, 429);
       }
     }
@@ -354,55 +365,69 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
     };
 
     let res: Response;
-    if (poolStub) {
-      const excluded: string[] = [];
-      let lease = await acquireChannel(excluded);
-      if (lease && "errorStatus" in lease) {
-        return c.json(
-          { error: "All relay channel accounts are busy; retry shortly" },
-          429,
-        );
-      }
-      try {
-        res = await submitWithChannel(lease?.channelAddress);
-        if (!res.ok) {
-          const errText = await res.text();
-          if (
-            /tx_bad_seq/i.test(errText) &&
-            lease &&
-            config.relayChannelAccounts.length > 1
-          ) {
-            excluded.push(lease.channelAddress);
-            await releaseChannel(lease.leaseId);
-            lease = await acquireChannel(excluded);
-            if (lease && !("errorStatus" in lease)) {
-              res = await submitWithChannel(lease.channelAddress);
+    try {
+      if (poolStub) {
+        const excluded: string[] = [];
+        let lease = await acquireChannel(excluded);
+        if (lease && "errorStatus" in lease) {
+          await releaseStageKey();
+          return c.json(
+            { error: "All relay channel accounts are busy; retry shortly" },
+            429,
+          );
+        }
+        try {
+          res = await submitWithChannel(lease?.channelAddress);
+          if (!res.ok) {
+            const errText = await res.text();
+            if (
+              /tx_bad_seq/i.test(errText) &&
+              lease &&
+              config.relayChannelAccounts.length > 1
+            ) {
+              excluded.push(lease.channelAddress);
+              await releaseChannel(lease.leaseId);
+              lease = await acquireChannel(excluded);
+              if (lease && !("errorStatus" in lease)) {
+                res = await submitWithChannel(lease.channelAddress);
+              } else {
+                await releaseStageKey();
+                return c.json(
+                  { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
+                  502,
+                );
+              }
             } else {
+              await releaseStageKey();
               return c.json(
                 { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
                 502,
               );
             }
-          } else {
-            return c.json(
-              { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
-              502,
-            );
+          }
+        } finally {
+          if (lease && !("errorStatus" in lease)) {
+            await releaseChannel(lease.leaseId);
           }
         }
-      } finally {
-        if (lease && !("errorStatus" in lease)) {
-          await releaseChannel(lease.leaseId);
-        }
+      } else {
+        res = await submitWithChannel();
       }
-    } else {
-      res = await submitWithChannel();
-    }
 
-    if (!res.ok) {
-      const errText = await res.text();
+      if (!res.ok) {
+        const errText = await res.text();
+        await releaseStageKey();
+        return c.json(
+          { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
+          502,
+        );
+      }
+    } catch (err) {
+      await releaseStageKey();
       return c.json(
-        { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
+        {
+          error: err instanceof Error ? `Relayer request failed: ${err.message}` : "Relayer unavailable",
+        },
         502,
       );
     }

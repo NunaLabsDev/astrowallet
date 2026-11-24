@@ -35,6 +35,8 @@ import {
 } from "./Icons.js";
 import { TokenBadge } from "./TokenBadge.js";
 import {
+  CANONICAL_MAINNET_OFT_ASSETS,
+  COMMUNITY_MAINNET_HUB_ASSETS,
   classifyTokenTrust,
   formatCompactNumber,
   resolveMissingSwapTrustline,
@@ -295,13 +297,27 @@ export function SwapSheet({
   }, [verifiedAssets, liquidAssets, fromAsset, toAsset]);
 
   const resolvedFrom = useMemo(
-    () => resolveSwapAssetInput(fromAsset, verifiedAssets, balances, liquidAssets),
-    [fromAsset, verifiedAssets, balances, liquidAssets],
+    () =>
+      resolveSwapAssetInput(
+        fromAsset,
+        verifiedAssets,
+        balances,
+        liquidAssets,
+        config.network,
+      ),
+    [fromAsset, verifiedAssets, balances, liquidAssets, config.network],
   );
 
   const resolvedTo = useMemo(
-    () => resolveSwapAssetInput(toAsset, verifiedAssets, balances, liquidAssets),
-    [toAsset, verifiedAssets, balances, liquidAssets],
+    () =>
+      resolveSwapAssetInput(
+        toAsset,
+        verifiedAssets,
+        balances,
+        liquidAssets,
+        config.network,
+      ),
+    [toAsset, verifiedAssets, balances, liquidAssets, config.network],
   );
 
   const fromParsed = useMemo(() => safeParseSwapAsset(resolvedFrom), [resolvedFrom]);
@@ -606,9 +622,21 @@ export function SwapSheet({
           if (/malicious|Scan & Shield|blocked/i.test(msg)) {
             throw err;
           }
+          if (!isClassic) {
+            throw new Error(
+              msg ||
+                "Soroban swap transaction expired or failed; Horizon Path fallback requires a Classic G... account.",
+            );
+          }
           // Graceful fallback to Horizon SDEX/AMM path payment if Soroswap XDR simulation expired
           setSwapPhase("Routing via Horizon fallback...");
         }
+      }
+
+      if (!isClassic) {
+        throw new Error(
+          "Classic Horizon path swaps require a Classic G... account (use a Soroswap XDR route for C... Smart Accounts).",
+        );
       }
 
       const horizon = createHorizonPathSwapAdapter({
@@ -673,9 +701,13 @@ export function SwapSheet({
 
   const combinedQuickTokens = useMemo(() => {
     const map = new Map<string, { id: string; code: string; badge: string }>();
-    for (const v of verifiedAssets) {
+    const mainnetCurated =
+      config.network === "mainnet"
+        ? [...CANONICAL_MAINNET_OFT_ASSETS, ...COMMUNITY_MAINNET_HUB_ASSETS]
+        : [];
+    for (const v of [...verifiedAssets, ...mainnetCurated]) {
       const id = tokenSwapIdentifier(v.code, v.issuer);
-      if (id !== resolvedFrom) {
+      if (id !== resolvedFrom && !map.has(id)) {
         map.set(id, { id, code: v.code, badge: "✓" });
       }
     }
@@ -689,8 +721,8 @@ export function SwapSheet({
         badge: l.hasLiquidityPool ? "💧" : "•",
       });
     }
-    return Array.from(map.values()).slice(0, 8);
-  }, [verifiedAssets, liquidAssets, resolvedFrom]);
+    return Array.from(map.values()).slice(0, 10);
+  }, [verifiedAssets, liquidAssets, resolvedFrom, config.network]);
 
   return (
     <section

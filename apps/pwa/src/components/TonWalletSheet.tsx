@@ -348,6 +348,15 @@ export function TonWalletSheet({
               </div>
             </div>
 
+            {(reviewPending.destination.startsWith("EQ") ||
+              reviewPending.destination.startsWith("0:")) && (
+              <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+                <strong>Bounceable TON Address:</strong> Sending to an uninitialized{" "}
+                <code>EQ…</code>/raw wallet contract will bounce the funds back; use{" "}
+                <code>UQ…</code> when funding a brand-new Telegram TON wallet.
+              </div>
+            )}
+
             {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>

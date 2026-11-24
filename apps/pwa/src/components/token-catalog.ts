@@ -229,6 +229,7 @@ export function resolveSwapAssetInput(
   verifiedAssets: readonly VerifiedAssetEntry[],
   balances: readonly AssetBalance[],
   liquidAssets: readonly TokenCatalogItem[] = [],
+  network?: "testnet" | "mainnet" | undefined,
 ): string {
   const trimmed = raw.trim();
   if (!trimmed) return "";
@@ -246,6 +247,15 @@ export function resolveSwapAssetInput(
   );
   if (held?.assetIssuer) {
     return `${held.assetCode}:${held.assetIssuer}`;
+  }
+
+  if (network === "mainnet") {
+    const mainnetMatch = [...CANONICAL_MAINNET_OFT_ASSETS, ...COMMUNITY_MAINNET_HUB_ASSETS].find(
+      (v) => v.code.toUpperCase() === code,
+    );
+    if (mainnetMatch) {
+      return `${mainnetMatch.code}:${mainnetMatch.issuer}`;
+    }
   }
 
   const official = verifiedAssets.find((v) => v.code.toUpperCase() === code);

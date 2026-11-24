@@ -638,11 +638,24 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       );
     }
 
+    const MAINNET_CANONICAL_ASSETS: Record<string, string> = {
+      USDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+      SUSDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+      USDT0: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q",
+      LIBRE: "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY",
+      XLMNR: "GDKA6WVMFSA73BMEVKPO6WXSSWP4MPRBDJVSXLLSEVIEVH226L5RJ7NL",
+      SVR: "GAGORNGHVJP5X2QO2NNIIDXKLNHVWJWXC5S73EZNCHOALGFTB2V25YGF",
+    };
+
     const resolveBareAsset = async (raw: string): Promise<string> => {
       const trimmed = raw.trim();
       const upper = trimmed.toUpperCase();
       if (!trimmed || upper === "XLM" || upper === "NATIVE" || trimmed.includes(":")) {
         return trimmed;
+      }
+      if (config.network === "mainnet" && MAINNET_CANONICAL_ASSETS[upper]) {
+        const displayCode = upper === "XLMNR" ? "xLMNR" : upper;
+        return `${displayCode}:${MAINNET_CANONICAL_ASSETS[upper]}`;
       }
       if (config.sep42AssetListUrls.length === 0) return trimmed;
       const verified = await fetchSep42VerifiedAssets(config.sep42AssetListUrls, {

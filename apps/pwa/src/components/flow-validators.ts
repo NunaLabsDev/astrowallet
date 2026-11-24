@@ -68,12 +68,18 @@ export function validateTransferAmount(
 }
 
 /**
- * Computes the next sequential SEP-0005 derivation index across contiguous or sparse accounts.
+ * Computes the next sequential SEP-0005 derivation index across derived accounts,
+ * ignoring imported external accounts (>= 1000) and reserving index 99 for the x402 agent.
  */
 export function computeNextDerivationIndex(
   accounts: ReadonlyArray<{ derivationIndex?: number | undefined }>,
 ): number {
-  return accounts.reduce((max, acc) => Math.max(max, acc.derivationIndex ?? 0), -1) + 1;
+  const next =
+    accounts
+      .map((acc) => acc.derivationIndex ?? 0)
+      .filter((idx) => idx >= 0 && idx < 1000 && idx !== 99)
+      .reduce((max, idx) => Math.max(max, idx), -1) + 1;
+  return next === 99 ? 100 : next;
 }
 
 const STABLECOIN_CODES = new Set([

@@ -326,6 +326,11 @@ export function SendSheet({
             );
             if (match) {
               setSelectedAssetKey(assetKeyOf(match.assetCode, match.assetIssuer));
+            } else {
+              setError(
+                `SEP-0007 request asks for ${parsed.assetCode} (${parsed.assetIssuer.slice(0, 6)}…${parsed.assetIssuer.slice(-4)}), which is not held in your wallet yet.`,
+              );
+              return;
             }
           }
         }
@@ -657,6 +662,17 @@ export function SendSheet({
               <code className="tabular-nums">~0.00001 XLM (100 stroops)</code>
             </div>
           </div>
+
+          {!reviewPending.assetCode.toUpperCase().startsWith("XLM") &&
+            reviewPending.assetIssuer &&
+            reviewPending.destination.startsWith("G") && (
+              <div className="aw-banner" style={{ fontSize: 12 }}>
+                <strong>Classic Trustline Note:</strong> Ensure the recipient{" "}
+                <code>{reviewPending.destination.slice(0, 6)}…</code> has an active{" "}
+                <strong>{reviewPending.assetCode}</strong> trustline (otherwise use{" "}
+                <code>/pay</code> in @{config.tgBotUsername} for Zero-op_no_trust Auto-Escrow).
+              </div>
+            )}
 
           {destShieldReport?.verdict === "warning" && destShieldReport.findings[0] && (
             <div className="aw-banner aw-banner--warn" style={{ fontSize: 12, display: "grid", gap: 8 }}>

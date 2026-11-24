@@ -122,13 +122,12 @@ export function DevLabSheet() {
   }, [fetchDevTelemetry]);
 
   useEffect(() => {
-    if (activeAccount && !faucetTarget) {
+    if (!activeAccount) return;
+    if (activeAccount.address.startsWith("G")) {
       setFaucetTarget(activeAccount.address);
-    }
-    if (activeAccount) {
       setVerifyPubkey(activeAccount.address);
     }
-  }, [activeAccount, faucetTarget]);
+  }, [activeAccount]);
 
   const activeRawHex = useMemo(() => {
     if (!activeAccount || !activeAccount.address.startsWith("G")) return null;
@@ -140,7 +139,14 @@ export function DevLabSheet() {
   }, [activeAccount]);
 
   const pairedSmartAddress = useMemo(() => {
-    if (!activeAccount || !config.smartAccountWasmHash) return null;
+    if (
+      !activeAccount ||
+      activeAccount.kind !== "classic" ||
+      !activeAccount.address.startsWith("G") ||
+      !config.smartAccountWasmHash
+    ) {
+      return null;
+    }
     try {
       return deriveCounterfactualSmartAccount({
         guardianAddress: activeAccount.address as ClassicAddress,

@@ -1906,7 +1906,17 @@ function WalletShell({
                                     </button>
 
                                     <div className="aw-balance-row-amount tabular-nums">
-                                      {formatAssetBalance(b.balance)}
+                                      <div>{formatAssetBalance(b.balance)}</div>
+                                      {(() => {
+                                        const quote = oraclePrices[b.assetCode.trim().toUpperCase()];
+                                        const qty = Number(b.balance);
+                                        if (!quote || !Number.isFinite(qty) || qty <= 0) return null;
+                                        return (
+                                          <div style={{ fontSize: 10.5, fontWeight: 500, color: "var(--aw-ink-secondary)" }}>
+                                            ${(qty * quote.priceUsd).toFixed(2)} USD
+                                          </div>
+                                        );
+                                      })()}
                                     </div>
                                   </div>
 

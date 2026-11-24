@@ -384,8 +384,13 @@ export function CollectiblesSheet({
           </div>
         ) : sep50Loading && !sep50Snapshot ? (
           <div className="aw-sorobit-grid">
-            <div className="aw-sorobit-skeleton" />
-            <div className="aw-sorobit-skeleton" />
+            {[0, 1].map((idx) => (
+              <div key={idx} className="aw-sorobit-skeleton">
+                <div className="aw-skeleton-art" />
+                <div className="aw-skeleton-line" />
+                <div className="aw-skeleton-line aw-skeleton-line--short" />
+              </div>
+            ))}
           </div>
         ) : !sep50Snapshot || sep50Snapshot.items.length === 0 ? (
           <div className="aw-banner" style={{ fontSize: 12 }}>
@@ -398,25 +403,16 @@ export function CollectiblesSheet({
         ) : (
           <div className="aw-sorobit-grid">
             {sep50Snapshot.items.map((item) => (
-              <div
+              <button
                 key={`${item.contractId}:${item.tokenId}`}
-                className="aw-sorobit-card"
-                role="button"
-                tabIndex={0}
+                type="button"
+                className="aw-sorobit-card aw-sorobit-card--interactive"
+                aria-pressed={selectedSep50?.tokenId === item.tokenId}
                 onClick={() => {
                   setSelectedSep50(item);
                   setTransferError(null);
                   setTransferTxHash(null);
                 }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    setSelectedSep50(item);
-                    setTransferError(null);
-                    setTransferTxHash(null);
-                  }
-                }}
-                style={{ cursor: "pointer" }}
               >
                 <div className="aw-sorobit-media">
                   {item.image ? (
@@ -447,7 +443,7 @@ export function CollectiblesSheet({
                     </div>
                   )}
                 </div>
-              </div>
+              </button>
             ))}
           </div>
         )}

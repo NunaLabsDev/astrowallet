@@ -360,6 +360,41 @@ select:focus-visible {
   border-color: var(--aw-nebula-lavender);
 }
 
+.aw-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 9px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(165, 139, 224, 0.28);
+  background: rgba(8, 17, 46, 0.68);
+  color: var(--aw-ink-secondary);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, box-shadow 160ms ease;
+}
+
+.aw-tab:hover:not(:disabled) {
+  border-color: var(--aw-nebula-lavender);
+  color: var(--aw-ink-primary);
+}
+
+.aw-tab--active {
+  background: linear-gradient(135deg, rgba(128, 80, 200, 0.92), rgba(99, 102, 241, 0.88));
+  border-color: var(--aw-nebula-lavender);
+  color: var(--aw-ink-primary);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    0 6px 18px rgba(128, 80, 200, 0.34);
+}
+
 .aw-input,
 .aw-textarea {
   width: 100%;
@@ -418,6 +453,12 @@ select:focus-visible {
 .aw-banner--danger {
   background: rgba(239, 68, 68, 0.16);
   border-color: rgba(239, 68, 68, 0.48);
+}
+
+.aw-banner--trust {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: rgba(16, 185, 129, 0.48);
+  color: var(--aw-ink-emerald-soft);
 }
 
 .aw-list-row {
@@ -782,13 +823,38 @@ select:focus-visible {
 
 .aw-sorobit-grid {
   display: grid;
-  gap: 14px;
-  grid-template-columns: 1fr;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  min-width: 0;
 }
 
 .aw-sorobit-card {
   display: grid;
-  gap: 12px;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 18px;
+  background: rgba(8, 17, 46, 0.65);
+  border: 1px solid rgba(165, 139, 224, 0.26);
+  font-family: inherit;
+  color: inherit;
+  text-align: left;
+  transition: transform 140ms ease, border-color 140ms ease, background-color 140ms ease, box-shadow 140ms ease;
+}
+
+.aw-sorobit-card--interactive {
+  width: 100%;
+  cursor: pointer;
+}
+
+.aw-sorobit-card--interactive:hover {
+  transform: translateY(-2px);
+  border-color: var(--aw-nebula-lavender);
+  background: rgba(14, 26, 68, 0.85);
+}
+
+.aw-sorobit-card[aria-pressed="true"] {
+  border-color: var(--aw-stellar-gold);
+  box-shadow: 0 0 0 1px rgba(245, 201, 40, 0.36);
 }
 
 .aw-sorobit-media {
@@ -796,16 +862,37 @@ select:focus-visible {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 18px;
-  border-radius: 16px;
-  background: rgba(6, 14, 36, 0.85);
-  border: 1px solid rgba(165, 139, 224, 0.28);
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  padding: 14px;
+  border-radius: 14px;
+  overflow: hidden;
+  background: rgba(6, 14, 36, 0.88);
+  border: 1px solid rgba(165, 139, 224, 0.24);
+}
+
+.aw-sorobit-media img {
+  width: 100%;
+  height: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  display: block;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
 }
 
 .aw-sorobit-badge {
   position: absolute;
-  top: 10px;
-  right: 10px;
+  top: 8px;
+  right: 8px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  background: rgba(11, 20, 51, 0.9);
+  border: 1px solid rgba(245, 201, 40, 0.44);
+  color: var(--aw-stellar-gold);
 }
 
 .aw-sorobit-info {
@@ -816,13 +903,16 @@ select:focus-visible {
 .aw-sorobit-title {
   font-weight: 700;
   font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .aw-sorobit-meta {
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--aw-ink-secondary);
 }
 
@@ -835,6 +925,10 @@ select:focus-visible {
 .aw-sorobit-skeleton {
   display: grid;
   gap: 10px;
+  padding: 12px;
+  border-radius: 18px;
+  background: rgba(8, 17, 46, 0.56);
+  border: 1px solid rgba(165, 139, 224, 0.22);
 }
 
 .aw-skeleton-art {
@@ -1108,6 +1202,12 @@ select:focus-visible {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.aw-balance-row:hover {
+  border-color: rgba(165, 139, 224, 0.38);
+  background: rgba(12, 24, 62, 0.7);
 }
 
 .aw-balance-row-top {
@@ -2442,8 +2542,8 @@ select:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 40px;
+  height: 40px;
   border-radius: 999px;
   border: none;
   background: rgba(165, 139, 224, 0.2);
@@ -2852,6 +2952,7 @@ select:focus-visible {
   .glass-pill,
   .glass-dock,
   .aw-drawer,
+  .aw-modal-backdrop,
   .aw-chart-expanded,
   .aw-toast,
   .aw-reveal-veil {

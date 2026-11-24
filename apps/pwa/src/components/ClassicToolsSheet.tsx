@@ -10,6 +10,7 @@ import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 
 export function ClassicToolsSheet() {
   const {
+    config,
     activeAccount,
     accountState,
     claimableBalances,
@@ -43,9 +44,13 @@ export function ClassicToolsSheet() {
   const [showSpamClaimables, setShowSpamClaimables] = useState(false);
 
   const safeClaimableIds = useMemo(() => {
-    const filtered = filterSpamClaimableBalances(claimableBalances, { verifiedAssets });
+    const filtered = filterSpamClaimableBalances(claimableBalances, {
+      verifiedAssets,
+      network: config.network,
+      networkPassphrase: config.networkPassphrase,
+    });
     return new Set(filtered.map((c) => c.id));
-  }, [claimableBalances, verifiedAssets]);
+  }, [claimableBalances, verifiedAssets, config.network, config.networkPassphrase]);
 
   const hiddenSpamCount = Math.max(0, claimableBalances.length - safeClaimableIds.size);
   const visibleClaimables = showSpamClaimables

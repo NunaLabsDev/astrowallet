@@ -322,9 +322,10 @@ export function SwapSheet({
             assetCode: fromParsed.code,
             assetIssuer: fromParsed.issuer,
             verifiedAssets,
+            network: config.network,
           })
         : null,
-    [fromParsed, verifiedAssets],
+    [fromParsed, verifiedAssets, config.network],
   );
 
   const toTrust = useMemo(
@@ -334,9 +335,10 @@ export function SwapSheet({
             assetCode: toParsed.code,
             assetIssuer: toParsed.issuer,
             verifiedAssets,
+            network: config.network,
           })
         : null,
-    [toParsed, verifiedAssets],
+    [toParsed, verifiedAssets, config.network],
   );
 
   const fromVerified = fromParsed

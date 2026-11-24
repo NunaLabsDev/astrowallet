@@ -186,7 +186,8 @@ export function PublicStatsPage() {
   const [error, setError] = useState<string | null>(null);
   const [mainnetData, setMainnetData] = useState<WalletMetricsPayload | null>(null);
   const [testnetData, setTestnetData] = useState<WalletMetricsPayload | null>(null);
-  const [dexData, setDexData] = useState<DexMetricsPayload | null>(null);
+  const [dexMainnetData, setDexMainnetData] = useState<DexMetricsPayload | null>(null);
+  const [dexTestnetData, setDexTestnetData] = useState<DexMetricsPayload | null>(null);
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -204,19 +205,28 @@ export function PublicStatsPage() {
       setMainnetData(mainJson);
       setTestnetData(testJson);
 
-      const dexBase =
-        testJson?.ecosystem?.astroDexApiBaseUrl ||
-        mainJson?.ecosystem?.astroDexApiBaseUrl ||
-        (import.meta.env.VITE_ASTRODEX_API_BASE_URL as string | undefined) ||
-        "https://astrodex-testnet.pages.dev";
-      if (dexBase) {
-        const dexRes = await fetch(`${dexBase.replace(/\/+$/, "")}/v1/metrics/public`).catch(
-          () => null,
-        );
-        if (dexRes?.ok) {
-          setDexData((await dexRes.json()) as DexMetricsPayload);
-        }
-      }
+      const envDex = (import.meta.env.VITE_ASTRODEX_API_BASE_URL as string | undefined)?.trim();
+      const mainDexBase = mainJson?.ecosystem?.astroDexApiBaseUrl || envDex || "";
+      const testDexBase = testJson?.ecosystem?.astroDexApiBaseUrl || envDex || "";
+
+      const [mainDexRes, testDexRes] = await Promise.all([
+        mainDexBase
+          ? fetch(`${mainDexBase.replace(/\/+$/, "")}/v1/metrics/public`, {
+              headers: { "X-Astro-Network": "mainnet" },
+            }).catch(() => null)
+          : Promise.resolve(null),
+        testDexBase
+          ? fetch(`${testDexBase.replace(/\/+$/, "")}/v1/metrics/public`, {
+              headers: { "X-Astro-Network": "testnet" },
+            }).catch(() => null)
+          : Promise.resolve(null),
+      ]);
+      setDexMainnetData(
+        mainDexRes?.ok ? ((await mainDexRes.json()) as DexMetricsPayload) : null,
+      );
+      setDexTestnetData(
+        testDexRes?.ok ? ((await testDexRes.json()) as DexMetricsPayload) : null,
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load public metrics");
     } finally {
@@ -234,6 +244,17 @@ export function PublicStatsPage() {
     if ((scope === "all" || scope === "testnet") && testnetData) items.push(testnetData);
     return items;
   }, [scope, mainnetData, testnetData]);
+
+  const activeDexSources = useMemo(() => {
+    const items: DexMetricsPayload[] = [];
+    if ((scope === "all" || scope === "mainnet") && dexMainnetData) {
+      items.push(dexMainnetData);
+    }
+    if ((scope === "all" || scope === "testnet") && dexTestnetData) {
+      items.push(dexTestnetData);
+    }
+    return items;
+  }, [scope, dexMainnetData, dexTestnetData]);
 
   const summary = useMemo(() => {
     const sum = (pick: (m: WalletMetricsPayload["metrics"]) => number) =>
@@ -256,11 +277,13 @@ export function PublicStatsPage() {
         txs.push({ ...tx, network: s.network, source: "AstroWallet" });
       }
     }
-    if (dexData && (scope === "all" || scope === dexData.network)) {
-      for (const tx of dexData.metrics.recentVerifiedTxs) {
-        txs.push({ ...tx, network: dexData.network, source: "AstroDex" });
+    let dexVerifiedTxTotal = 0;
+    for (const dex of activeDexSources) {
+      dexVerifiedTxTotal += dex.metrics.verifiedTxCount ?? 0;
+      for (const tx of dex.metrics.recentVerifiedTxs) {
+        txs.push({ ...tx, network: dex.network, source: "AstroDex" });
       }
-      for (const [k, v] of Object.entries(dexData.metrics.eventBreakdown)) {
+      for (const [k, v] of Object.entries(dex.metrics.eventBreakdown)) {
         events[`dex:${k}`] = (events[`dex:${k}`] ?? 0) + v;
       }
     }
@@ -274,20 +297,18 @@ export function PublicStatsPage() {
       dau: sum((m) => m.dau),
       wau: sum((m) => m.wau),
       mau: sum((m) => m.mau),
-      verifiedTxs: sum((m) => m.verifiedTxCount) + (dexData?.metrics.verifiedTxCount ?? 0),
+      verifiedTxs: sum((m) => m.verifiedTxCount) + dexVerifiedTxTotal,
       connectApprovals: sum((m) => m.approvedConnectRequests),
       vaultBackups: sum((m) => m.encryptedVaultBackups),
       dailySeries: mergeDailySeries([
         ...activeSources.map((s) => s.metrics.dailySeries),
-        ...(dexData && (scope === "all" || scope === dexData.network)
-          ? [dexData.metrics.dailySeries]
-          : []),
+        ...activeDexSources.map((dex) => dex.metrics.dailySeries),
       ]),
       platforms: Object.entries(platforms).sort((a, b) => b[1] - a[1]),
       events: Object.entries(events).sort((a, b) => b[1] - a[1]),
       recentTxs: txs.slice(0, 15),
     };
-  }, [activeSources, dexData, scope]);
+  }, [activeSources, activeDexSources]);
 
   const handleExportJson = () => {
     const payload = {
@@ -296,7 +317,8 @@ export function PublicStatsPage() {
       summary,
       astrowalletMainnet: mainnetData,
       astrowalletTestnet: testnetData,
-      astrodex: dexData,
+      astrodexMainnet: dexMainnetData,
+      astrodexTestnet: dexTestnetData,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -442,10 +464,12 @@ export function PublicStatsPage() {
           <div className="glass-card aw-stat-tile">
             <span className="aw-stat-label">AstroDex Markets</span>
             <strong className="aw-stat-value tabular-nums" style={{ fontSize: 22 }}>
-              {dexData ? `${dexData.metrics.totalPairs} Pairs` : "—"}
+              {activeDexSources[0] ? `${activeDexSources[0].metrics.totalPairs} Pairs` : "—"}
             </strong>
             <span style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }} className="tabular-nums">
-              {dexData ? `${dexData.metrics.totalTokens} Tokens · ${dexData.metrics.mau} MAU` : "Loading DEX metrics…"}
+              {activeDexSources[0]
+                ? `${activeDexSources[0].metrics.totalTokens} Tokens · ${activeDexSources[0].metrics.mau} MAU`
+                : "No DEX metrics for selected network scope"}
             </span>
           </div>
         </section>

@@ -58,7 +58,8 @@ export function createDiscoveryRoutes(): Hono<DiscoveryRouteEnv> {
         },
         "/v1/connect/requests": {
           post: {
-            summary: "Create an ephemeral AstroConnect v1 request (auth, sign_message, or sign_xdr)",
+            summary:
+              "Create an ephemeral AstroConnect v1 request (auth, sign_message, sign_xdr, or sign_auth_entry)",
             requestBody: {
               required: true,
               content: {
@@ -67,7 +68,10 @@ export function createDiscoveryRoutes(): Hono<DiscoveryRouteEnv> {
                     type: "object",
                     required: ["action", "app", "payload"],
                     properties: {
-                      action: { type: "string", enum: ["auth", "sign_message", "sign_xdr"] },
+                      action: {
+                        type: "string",
+                        enum: ["auth", "sign_message", "sign_xdr", "sign_auth_entry"],
+                      },
                       ttlSeconds: { type: "integer", minimum: 60, maximum: 300 },
                       app: {
                         type: "object",
@@ -147,7 +151,7 @@ export function createDiscoveryRoutes(): Hono<DiscoveryRouteEnv> {
       "",
       "## Open Endpoints (CORS Enabled)",
       `- GET ${serverUrl}/v1/identity/resolve?q=<telegramUserId|@username|G...|C...>`,
-      `- POST ${serverUrl}/v1/connect/requests  (actions: auth | sign_message | sign_xdr)`,
+      `- POST ${serverUrl}/v1/connect/requests  (actions: auth | sign_message | sign_xdr | sign_auth_entry)`,
       `- GET ${serverUrl}/v1/connect/requests/:requestId  (Header: X-Connect-Token: <resultToken>)`,
       `- POST ${serverUrl}/v1/connect/requests/:requestId/complete`,
       "",

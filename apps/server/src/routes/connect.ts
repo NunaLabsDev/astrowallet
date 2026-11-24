@@ -4,12 +4,14 @@ import {
   ConnectAppMetadataSchema,
   ConnectAuthPayloadSchema,
   ConnectResultSchema,
+  ConnectSignAuthEntryPayloadSchema,
   ConnectSignMessagePayloadSchema,
   ConnectSignXdrPayloadSchema,
   type ConnectAppMetadata,
   type ConnectAppTrustTier,
   type ConnectAuthPayload,
   type ConnectResult,
+  type ConnectSignAuthEntryPayload,
   type ConnectSignMessagePayload,
   type ConnectSignXdrPayload,
   type ServerConfig,
@@ -24,7 +26,7 @@ import {
   verifyConnectSignature,
 } from "@astrowallet/tg-protocol";
 import type { KVNamespace } from "@cloudflare/workers-types";
-import { FeeBumpTransaction, Keypair, TransactionBuilder } from "@stellar/stellar-sdk";
+import { FeeBumpTransaction, Keypair, TransactionBuilder, xdr } from "@stellar/stellar-sdk";
 import { Hono } from "hono";
 import { constantTimeEqual, sha256Hex } from "../lib/crypto-utils.js";
 import { z } from "zod";
@@ -80,6 +82,12 @@ const CreateConnectRequestBodySchema = z.discriminatedUnion("action", [
     payload: ConnectSignXdrPayloadSchema,
     ttlSeconds: z.number().int().min(60).max(300).optional(),
   }),
+  z.object({
+    action: z.literal("sign_auth_entry"),
+    app: ConnectAppMetadataSchema,
+    payload: ConnectSignAuthEntryPayloadSchema,
+    ttlSeconds: z.number().int().min(60).max(300).optional(),
+  }),
 ]);
 
 const CompleteConnectRequestBodySchema = z.object({
@@ -90,6 +98,7 @@ const CompleteConnectRequestBodySchema = z.object({
   accounts: z.array(ConnectAccountSummarySchema).max(10).optional(),
   signatureBase64: z.string().trim().min(16).max(256).optional(),
   signedXdr: z.string().trim().min(16).max(49_152).optional(),
+  signedAuthEntry: z.string().trim().min(16).max(49_152).optional(),
   txHash: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   ledger: z.number().int().positive().optional(),
 });
@@ -165,6 +174,11 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
       const computedSha = await sha256Hex(body.payload.unsignedXdr);
       if (!constantTimeEqual(computedSha, body.payload.xdrSha256.toLowerCase())) {
         return c.json({ error: "payload.xdrSha256 does not match unsignedXdr" }, 400);
+      }
+    } else if (body.action === "sign_auth_entry") {
+      const computedSha = await sha256Hex(body.payload.authEntryXdr);
+      if (!constantTimeEqual(computedSha, body.payload.entrySha256.toLowerCase())) {
+        return c.json({ error: "payload.entrySha256 does not match authEntryXdr" }, 400);
       }
     }
 
@@ -498,6 +512,74 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
         ...(responderUsername ? { username: responderUsername } : {}),
         signedMessage: msgPayload.message,
         signatureBase64: body.signatureBase64,
+        completedAt: now,
+      });
+    } else if (record.action === "sign_auth_entry") {
+      const authEntryPayload = safeParseJson<ConnectSignAuthEntryPayload>(record.payloadJson);
+      if (!authEntryPayload?.authEntryXdr) {
+        return c.json({ error: "Corrupted sign_auth_entry payload" }, 500);
+      }
+      if (!body.address || !body.signedAuthEntry) {
+        return c.json(
+          { error: "address and signedAuthEntry are required for sign_auth_entry approval" },
+          400,
+        );
+      }
+      const kp = Keypair.fromPublicKey(body.address);
+      let preimage: xdr.HashIdPreimage | null = null;
+      try {
+        preimage = xdr.HashIdPreimage.fromXDR(authEntryPayload.authEntryXdr, "base64");
+      } catch {
+        preimage = null;
+      }
+
+      if (preimage !== null) {
+        try {
+          const digest = new Uint8Array(
+            await crypto.subtle.digest("SHA-256", new Uint8Array(preimage.toXDR())),
+          );
+          const rawSig = Uint8Array.from(atob(body.signedAuthEntry.trim()), (ch) =>
+            ch.charCodeAt(0),
+          );
+          if (!kp.verify(digest as unknown as Buffer, rawSig as unknown as Buffer)) {
+            return c.json(
+              { error: "Invalid Ed25519 signature over Soroban HashIdPreimage" },
+              400,
+            );
+          }
+        } catch {
+          return c.json({ error: "Malformed signedAuthEntry signature" }, 400);
+        }
+      } else {
+        try {
+          const originalEntry = xdr.SorobanAuthorizationEntry.fromXDR(
+            authEntryPayload.authEntryXdr,
+            "base64",
+          );
+          const signedEntry = xdr.SorobanAuthorizationEntry.fromXDR(
+            body.signedAuthEntry.trim(),
+            "base64",
+          );
+          if (
+            Buffer.from(originalEntry.rootInvocation.toXDR()).toString("base64") !==
+            Buffer.from(signedEntry.rootInvocation.toXDR()).toString("base64")
+          ) {
+            return c.json(
+              { error: "signedAuthEntry invocation does not match original entry" },
+              400,
+            );
+          }
+        } catch {
+          return c.json({ error: "Malformed signed SorobanAuthorizationEntry XDR" }, 400);
+        }
+      }
+
+      resultPayload = ConnectResultSchema.parse({
+        status: "approved",
+        address: body.address,
+        ...(responderTelegramUserId ? { telegramUserId: responderTelegramUserId } : {}),
+        ...(responderUsername ? { username: responderUsername } : {}),
+        signedAuthEntry: body.signedAuthEntry,
         completedAt: now,
       });
     } else {

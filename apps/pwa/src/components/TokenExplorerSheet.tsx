@@ -183,8 +183,17 @@ export function TokenExplorerSheet({
         horizonResults: mergedHorizonHits,
         filter: catalogFilter,
         query: searchQuery,
+        includeCanonicalOfts: config.network === "mainnet",
+        includeCommunityHub: config.network === "mainnet",
       }),
-    [accountState?.balances, verifiedAssets, mergedHorizonHits, catalogFilter, searchQuery],
+    [
+      accountState?.balances,
+      verifiedAssets,
+      mergedHorizonHits,
+      catalogFilter,
+      searchQuery,
+      config.network,
+    ],
   );
 
   useEffect(() => {
@@ -445,6 +454,12 @@ export function TokenExplorerSheet({
               ["all", `All (${catalogItems.length})`],
               ["holdings", "Holdings"],
               ["official", `Official (${verifiedAssets.length + 1})`],
+              ...(config.network === "mainnet"
+                ? ([
+                    ["oft", "Ethena & OFT"],
+                    ["community", "Community Hub"],
+                  ] as const)
+                : []),
               ["liquid", "Liquid Pools"],
             ] as const
           ).map(([id, label]) => (
@@ -491,6 +506,7 @@ export function TokenExplorerSheet({
                 assetCode: item.assetCode,
                 assetIssuer: item.assetIssuer,
                 verifiedAssets,
+                network: config.network,
               });
               return (
                 <button
@@ -596,6 +612,7 @@ export function TokenExplorerSheet({
     assetCode: selectedToken.assetCode,
     assetIssuer: selectedToken.assetIssuer,
     verifiedAssets,
+    network: config.network,
   });
   const isOfficial = trust.status === "official";
   const userHolding = accountState?.balances.find(

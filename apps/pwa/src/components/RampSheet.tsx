@@ -18,11 +18,16 @@ import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 type RampTab = "cash" | "any_chain" | "pro_bridge";
 
 const NEAR_ORIGIN_ASSETS = [
-  { id: "nep141:btc.omft.near", label: "Bitcoin (BTC)", decimals: 8 },
-  { id: "nep141:eth.omft.near", label: "Ethereum (ETH)", decimals: 18 },
-  { id: "nep141:sol.omft.near", label: "Solana (SOL)", decimals: 9 },
-  { id: "nep141:ton.omft.near", label: "TON (TON)", decimals: 9 },
-  { id: NEAR_STELLAR_USDC_ASSET_ID, label: "Stellar USDC (Origin -> Cross-Chain)", decimals: 7 },
+  { id: "nep141:btc.omft.near", label: "Bitcoin (BTC)", decimals: 8, chain: "Bitcoin" },
+  { id: "nep141:eth.omft.near", label: "Ethereum (ETH)", decimals: 18, chain: "Ethereum" },
+  { id: "nep141:sol.omft.near", label: "Solana (SOL)", decimals: 9, chain: "Solana" },
+  { id: "nep141:ton.omft.near", label: "TON (TON)", decimals: 9, chain: "TON" },
+  {
+    id: NEAR_STELLAR_USDC_ASSET_ID,
+    label: "Stellar USDC (Origin → Cross-Chain)",
+    decimals: 7,
+    chain: "Stellar",
+  },
 ] as const;
 
 function decimalToAtomicString(decimalInput: string, decimals: number): string {
@@ -53,9 +58,16 @@ async function readJsonSafe<T>(res: Response): Promise<T> {
   }
 }
 
-const NEAR_DEST_ASSETS = [
-  { id: NEAR_STELLAR_USDC_ASSET_ID, label: "Stellar USDC" },
-  { id: NEAR_STELLAR_XLM_ASSET_ID, label: "Stellar XLM" },
+const NEAR_DEST_STELLAR_ASSETS = [
+  { id: NEAR_STELLAR_USDC_ASSET_ID, label: "Stellar USDC", chain: "Stellar" },
+  { id: NEAR_STELLAR_XLM_ASSET_ID, label: "Stellar XLM", chain: "Stellar" },
+] as const;
+
+const NEAR_DEST_CROSSCHAIN_ASSETS = [
+  { id: "nep141:btc.omft.near", label: "Bitcoin (BTC)", chain: "Bitcoin" },
+  { id: "nep141:eth.omft.near", label: "Ethereum (ETH)", chain: "Ethereum" },
+  { id: "nep141:sol.omft.near", label: "Solana (SOL)", chain: "Solana" },
+  { id: "nep141:ton.omft.near", label: "TON (TON)", chain: "TON" },
 ] as const;
 
 /**
@@ -65,7 +77,7 @@ const NEAR_DEST_ASSETS = [
  * 3) Pro Bridge Validator (Circle CCTP 6<->7 + LayerZero V2 OFT)
  */
 export function RampSheet() {
-  const { config, activeAccount, accountState, signSep10ChallengeXdr } = useWallet();
+  const { config, activeAccount, accountState, tonAccount, signSep10ChallengeXdr } = useWallet();
 
   const [activeTab, setActiveTab] = useState<RampTab>("cash");
 
@@ -83,13 +95,52 @@ export function RampSheet() {
 
   // NEAR Intents 1-Click state
   const [originAsset, setOriginAsset] = useState<string>(NEAR_ORIGIN_ASSETS[0].id);
-  const [destAsset, setDestAsset] = useState<string>(NEAR_DEST_ASSETS[0].id);
+  const [destAsset, setDestAsset] = useState<string>(NEAR_DEST_STELLAR_ASSETS[0].id);
   const [nearAmountDecimal, setNearAmountDecimal] = useState("0.01");
+  const [nearRefundAddress, setNearRefundAddress] = useState("");
+  const [nearDestAddress, setNearDestAddress] = useState("");
   const [nearBusy, setNearBusy] = useState(false);
   const [nearQuote, setNearQuote] = useState<NearIntentsQuoteResult | null>(null);
   const [nearLockedQuote, setNearLockedQuote] = useState<NearIntentsQuoteResult | null>(null);
   const [nearError, setNearError] = useState<string | null>(null);
   const [copiedAddr, setCopiedAddr] = useState(false);
+
+  const isStellarOrigin = originAsset === NEAR_STELLAR_USDC_ASSET_ID;
+  const destOptions = isStellarOrigin
+    ? NEAR_DEST_CROSSCHAIN_ASSETS
+    : NEAR_DEST_STELLAR_ASSETS;
+
+  useEffect(() => {
+    setNearQuote(null);
+    setNearLockedQuote(null);
+    setNearError(null);
+    if (isStellarOrigin) {
+      if (!NEAR_DEST_CROSSCHAIN_ASSETS.some((d) => d.id === destAsset)) {
+        setDestAsset(NEAR_DEST_CROSSCHAIN_ASSETS[0].id);
+      }
+      setNearRefundAddress(activeAccount?.address ?? "");
+    } else {
+      if (!NEAR_DEST_STELLAR_ASSETS.some((d) => d.id === destAsset)) {
+        setDestAsset(NEAR_DEST_STELLAR_ASSETS[0].id);
+      }
+      setNearDestAddress(activeAccount?.address ?? "");
+      if (originAsset === "nep141:ton.omft.near" && tonAccount?.friendlyAddress) {
+        setNearRefundAddress(tonAccount.friendlyAddress);
+      } else if (nearRefundAddress === activeAccount?.address) {
+        setNearRefundAddress("");
+      }
+    }
+  }, [originAsset, isStellarOrigin, activeAccount?.address, tonAccount?.friendlyAddress]);
+
+  useEffect(() => {
+    if (isStellarOrigin && destAsset === "nep141:ton.omft.near" && tonAccount?.friendlyAddress) {
+      setNearDestAddress(tonAccount.friendlyAddress);
+    } else if (!isStellarOrigin && activeAccount?.address) {
+      setNearDestAddress(activeAccount.address);
+    } else if (isStellarOrigin && nearDestAddress === activeAccount?.address) {
+      setNearDestAddress("");
+    }
+  }, [destAsset, isStellarOrigin, activeAccount?.address, tonAccount?.friendlyAddress]);
 
   useEffect(() => {
     setAnchorDomain(
@@ -160,6 +211,11 @@ export function RampSheet() {
     setCashError(null);
     setCashSessionUrl(null);
     try {
+      if (activeAccount.kind !== "classic" || !activeAccount.address.startsWith("G")) {
+        throw new Error(
+          "MoneyGram SEP-10 authentication requires a Classic G... account. Switch from your Smart Account first.",
+        );
+      }
       if (accountState?.funded) {
         const hasUsdcTrustline = accountState.balances.some(
           (b) => b.assetCode.toUpperCase() === "USDC" && Boolean(b.assetIssuer),
@@ -233,6 +289,28 @@ export function RampSheet() {
     }
     try {
       const originMeta = NEAR_ORIGIN_ASSETS.find((a) => a.id === originAsset);
+      const effectiveRecipient = (
+        isStellarOrigin ? nearDestAddress : nearDestAddress || activeAccount.address
+      ).trim();
+      const effectiveRefundTo = (
+        isStellarOrigin ? nearRefundAddress || activeAccount.address : nearRefundAddress
+      ).trim();
+      if (!effectiveRecipient) {
+        throw new Error("Enter a valid destination address for the target chain.");
+      }
+      if (!effectiveRefundTo) {
+        throw new Error(
+          `Enter your ${originMeta?.chain ?? "origin chain"} refund address before quoting.`,
+        );
+      }
+      if (
+        originAsset !== NEAR_STELLAR_USDC_ASSET_ID &&
+        effectiveRefundTo === activeAccount.address
+      ) {
+        throw new Error(
+          `Refund address must be a valid ${originMeta?.chain ?? "origin chain"} address (not Stellar G...).`,
+        );
+      }
       const amountAtomic = decimalToAtomicString(nearAmountDecimal, originMeta?.decimals ?? 8);
       const adapter = createNearIntentsQuoteAdapter({
         apiBaseUrl: config.nearIntentsApiBase,
@@ -241,8 +319,8 @@ export function RampSheet() {
         originAsset,
         destinationAsset: destAsset,
         amountAtomic,
-        recipient: activeAccount.address,
-        refundTo: activeAccount.address,
+        recipient: effectiveRecipient,
+        refundTo: effectiveRefundTo,
         dry,
       });
       if (dry) {
@@ -456,7 +534,7 @@ export function RampSheet() {
             </div>
             <div>
               <label className="aw-label" htmlFor="near-dest">
-                To Stellar Asset
+                Destination Asset
               </label>
               <select
                 id="near-dest"
@@ -464,13 +542,58 @@ export function RampSheet() {
                 value={destAsset}
                 onChange={(e) => setDestAsset(e.target.value)}
               >
-                {NEAR_DEST_ASSETS.map((a) => (
+                {destOptions.map((a) => (
                   <option key={a.id} value={a.id}>
                     {a.label}
                   </option>
                 ))}
               </select>
             </div>
+          </div>
+
+          {!isStellarOrigin && destAsset === NEAR_STELLAR_USDC_ASSET_ID && !hasUsdcTrustline && (
+            <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+              Your Stellar account does not have a USDC trustline yet. Add a USDC trustline first
+              or switch destination to Stellar XLM.
+            </div>
+          )}
+
+          <div>
+            <label className="aw-label" htmlFor="near-dest-addr">
+              {isStellarOrigin ? "Destination Chain Recipient Address" : "Stellar Recipient Address"}
+            </label>
+            <input
+              id="near-dest-addr"
+              type="text"
+              className="aw-input"
+              placeholder={
+                isStellarOrigin ? "Enter target chain wallet address" : activeAccount.address
+              }
+              value={nearDestAddress}
+              onChange={(e) => {
+                setNearDestAddress(e.target.value);
+                setNearQuote(null);
+                setNearLockedQuote(null);
+              }}
+            />
+          </div>
+
+          <div>
+            <label className="aw-label" htmlFor="near-refund-addr">
+              Origin Chain Refund Address ({NEAR_ORIGIN_ASSETS.find((a) => a.id === originAsset)?.chain ?? "Origin"})
+            </label>
+            <input
+              id="near-refund-addr"
+              type="text"
+              className="aw-input"
+              placeholder={`Enter ${NEAR_ORIGIN_ASSETS.find((a) => a.id === originAsset)?.chain ?? "origin"} refund address`}
+              value={nearRefundAddress}
+              onChange={(e) => {
+                setNearRefundAddress(e.target.value);
+                setNearQuote(null);
+                setNearLockedQuote(null);
+              }}
+            />
           </div>
 
           <div>
@@ -502,7 +625,10 @@ export function RampSheet() {
                 Dry Quote Preview ({nearQuote.amountOutFormatted ?? nearQuote.minAmountOut ?? "est."})
               </strong>
               <span style={{ color: "var(--aw-ink-secondary)" }}>
-                Refund address: <code>{activeAccount.address.slice(0, 8)}…{activeAccount.address.slice(-6)}</code>
+                Refund address:{" "}
+                <code style={{ wordBreak: "break-all" }}>
+                  {nearRefundAddress || activeAccount.address}
+                </code>
               </span>
               <button
                 type="button"

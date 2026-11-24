@@ -126,6 +126,30 @@ function describeSingleOp(op: DecodedOperation): {
         category: "soroban",
         step: "Renew Protocol 23 archival storage lifetime for the target contract.",
       };
+    case "restoreFootprint":
+      return {
+        headline: "Restore Archived Soroban State",
+        category: "soroban",
+        step: "Restore expired Soroban contract state back to active ledger storage.",
+      };
+    case "claimClaimableBalance":
+      return {
+        headline: "Claim Pending Balance",
+        category: "escrow",
+        step: "Claim a claimable Stellar balance into your account.",
+      };
+    case "manageData":
+      return {
+        headline: "Update Account Data Entry",
+        category: "soroban",
+        step: `Attach or remove a key/value data entry on ${shortAddr(op.source)}.`,
+      };
+    case "setTrustLineFlags":
+      return {
+        headline: "Modify Asset Authorization Flags",
+        category: "trustline",
+        step: "Update issuer trustline authorization or clawback flags.",
+      };
     case "setOptions":
     case "accountMerge":
       return {

@@ -128,6 +128,7 @@ export function SendSheet({
   const [error, setError] = useState<string | null>(null);
   const [reviewPending, setReviewPending] = useState<PendingStellarReview | null>(null);
   const [reauthVerified, setReauthVerified] = useState(false);
+  const [warnAck, setWarnAck] = useState(false);
   const [confirmedTxHash, setConfirmedTxHash] = useState<string | null>(null);
   const [copiedHash, setCopiedHash] = useState(false);
 
@@ -150,8 +151,9 @@ export function SendSheet({
         assetCode: selectedBalance.assetCode,
         assetIssuer: selectedBalance.assetIssuer,
         verifiedAssets,
+        network: config.network,
       }),
-    [selectedBalance.assetCode, selectedBalance.assetIssuer, verifiedAssets],
+    [selectedBalance.assetCode, selectedBalance.assetIssuer, verifiedAssets, config.network],
   );
 
   const selectedAssetToml = selectedBalance.assetIssuer
@@ -465,19 +467,9 @@ export function SendSheet({
       }
     }
 
-    const reauthCheck = reviewPending
-      ? requiresHighValueReauth({
-          amount: reviewPending.amount,
-          assetCode: reviewPending.assetCode,
-          spendableBalance: maxSpendableNumber,
-          thresholdXlm: config.highValueReauthXlm,
-          network: config.network,
-          hasWarningVerdict: destShieldReport?.verdict === "warning",
-        })
-      : { required: false };
-
     triggerTelegramHaptic("selection");
     setReauthVerified(false);
+    setWarnAck(false);
     setReviewPending({
       destination: parsedDest.data,
       amount: amount.trim(),
@@ -488,7 +480,6 @@ export function SendSheet({
       saveAsContact,
       contactLabel: contactLabel.trim(),
     });
-    void reauthCheck;
   };
 
   const handleConfirmBroadcast = async () => {
@@ -668,9 +659,20 @@ export function SendSheet({
           </div>
 
           {destShieldReport?.verdict === "warning" && destShieldReport.findings[0] && (
-            <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
-              <strong>{destShieldReport.findings[0].title}:</strong>{" "}
-              {destShieldReport.findings[0].description}
+            <div className="aw-banner aw-banner--warn" style={{ fontSize: 12, display: "grid", gap: 8 }}>
+              <div>
+                <strong>{destShieldReport.findings[0].title}:</strong>{" "}
+                {destShieldReport.findings[0].description}
+              </div>
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+                <input
+                  type="checkbox"
+                  checked={warnAck}
+                  onChange={(e) => setWarnAck(e.target.checked)}
+                  style={{ width: 16, height: 16, marginTop: 2 }}
+                />
+                <span>I understand this Scan &amp; Shield warning and still want to continue.</span>
+              </label>
             </div>
           )}
 
@@ -718,6 +720,7 @@ export function SendSheet({
               style={{ flex: "2 1 160px" }}
               disabled={
                 busy ||
+                (destShieldReport?.verdict === "warning" && !warnAck) ||
                 (requiresHighValueReauth({
                   amount: reviewPending.amount,
                   assetCode: reviewPending.assetCode,

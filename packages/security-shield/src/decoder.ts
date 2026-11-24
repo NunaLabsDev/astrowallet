@@ -196,9 +196,13 @@ export function decodeTransactionEnvelope(
         ? rec.amount
         : typeof rec.startingBalance === "string"
           ? rec.startingBalance
-          : typeof rec.destAmount === "string"
-            ? rec.destAmount
-            : undefined;
+          : typeof rec.sendAmount === "string"
+            ? rec.sendAmount
+            : typeof rec.destAmount === "string"
+              ? rec.destAmount
+              : typeof rec.destMin === "string"
+                ? rec.destMin
+                : undefined;
 
     const asset = extractAssetRef(rec.asset ?? rec.line);
     const sendAsset = extractAssetRef(rec.sendAsset);

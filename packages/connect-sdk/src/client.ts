@@ -6,6 +6,8 @@ import type {
   ConnectStatusResponse,
   LoginOptions,
   LoginResult,
+  SignAuthEntryOptions,
+  SignAuthEntryResult,
   SignMessageOptions,
   SignMessageResult,
   SignTransactionOptions,
@@ -80,6 +82,10 @@ export interface AstroConnectClient {
     message: string,
     opts?: SignMessageOptions,
   ): Promise<ConnectRequestHandle>;
+  createSignAuthEntryRequest(
+    authEntryXdr: string,
+    opts?: SignAuthEntryOptions,
+  ): Promise<ConnectRequestHandle>;
   getRequestStatus(requestId: string, resultToken: string): Promise<ConnectStatusResponse>;
   waitForResult(
     requestId: string,
@@ -93,6 +99,10 @@ export interface AstroConnectClient {
     opts: SignTransactionOptions,
   ): Promise<SignTransactionResult>;
   signMessage(message: string, opts?: SignMessageOptions): Promise<SignMessageResult>;
+  signAuthEntry(
+    authEntryXdr: string,
+    opts?: SignAuthEntryOptions,
+  ): Promise<SignAuthEntryResult>;
   resolveIdentity(query: string): Promise<AstroIdentity>;
   resolveTelegramIdentity(user?: {
     id?: number | string | undefined;
@@ -179,6 +189,23 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
         payload: {
           message,
           ...(opts.humanSummary ? { humanSummary: opts.humanSummary } : {}),
+        },
+      });
+    },
+
+    async createSignAuthEntryRequest(authEntryXdr, opts = {}) {
+      const entrySha256 = await sha256Hex(authEntryXdr);
+      return postCreateRequest({
+        action: "sign_auth_entry",
+        app: config.app,
+        ...(opts.ttlSeconds ? { ttlSeconds: opts.ttlSeconds } : {}),
+        payload: {
+          authEntryXdr,
+          entrySha256,
+          humanSummary:
+            opts.humanSummary ?? `Approve Soroban authorization for ${config.app.name}`,
+          ...(opts.subAction ? { subAction: opts.subAction } : {}),
+          ...(opts.sourceAddress ? { sourceAddress: opts.sourceAddress } : {}),
         },
       });
     },
@@ -309,6 +336,31 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
         address: result.address,
         message: result.signedMessage ?? message,
         signatureBase64: result.signatureBase64,
+        completedAt: result.completedAt,
+      };
+    },
+
+    async signAuthEntry(authEntryXdr, opts = {}) {
+      const handle = await this.createSignAuthEntryRequest(authEntryXdr, opts);
+      if (opts.autoOpen ?? true) {
+        this.openDeepLink(handle.deepLink);
+      }
+      const { status, result } = await this.waitForResult(
+        handle.requestId,
+        handle.resultToken,
+        opts,
+      );
+      if (!result.address || !result.signedAuthEntry) {
+        throw new AstroConnectError(
+          "http_error",
+          "Incomplete Soroban auth entry signature returned by AstroWallet",
+        );
+      }
+      return {
+        requestId: handle.requestId,
+        network: status.network,
+        address: result.address,
+        signedAuthEntry: result.signedAuthEntry,
         completedAt: result.completedAt,
       };
     },

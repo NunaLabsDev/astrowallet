@@ -26,6 +26,7 @@ import {
 import { formatSmartAccountLinkMessage } from "@astrowallet/tg-protocol";
 import { reportTelemetryEvent } from "./telemetry.js";
 import {
+  AGENT_DERIVATION_INDEX,
   clearPinLockoutState,
   createSorobanDevClient,
   createStellarClient,
@@ -50,7 +51,9 @@ import {
   serializeAgVaultBackup,
   signChallengeMessage,
   signSep10ChallengeTransaction,
+  signSorobanAuthEntry,
   signTransactionXdrEnvelope,
+  signX402ChallengeWithKeypair,
   unlockWithFingerprint,
   validateMnemonicPhrase,
   type AccountTradeRecord,
@@ -88,7 +91,11 @@ import {
   triggerTelegramHaptic,
   updateTelegramBiometricToken,
 } from "../telegram/webapp.js";
-import { sessionVault } from "./session-vault.js";
+import {
+  inspectDappAuthEntrySecurity,
+  sessionVault,
+  type DappAuthEntryInspection,
+} from "./session-vault.js";
 import {
   clearAllTonConnectSessions,
   loadTonConnectSessions,
@@ -322,8 +329,33 @@ export interface WalletContextValue {
   simulateRawXdr(xdrBase64: string): Promise<SorobanSimulationSummary>;
   buildDevTemplateXdr(template: DevTemplateKind): Promise<string>;
   derivePublicKeyPreview(count: number): DerivedPublicKeyPreview[];
+  deriveAgentAccountAddress(): ClassicAddress | null;
+  signAgentX402Challenge(challenge: {
+    x402Version: number;
+    network: string;
+    asset: string;
+    amount: string;
+    payTo: string;
+    nonce: string;
+  }): {
+    payer: string;
+    signingPayload: string;
+    signatureBase64: string;
+    paymentHeader: string;
+  };
   signSep10ChallengeXdr(challengeXdr: string): Promise<string>;
   signActiveSep53Message(message: string): Promise<{ signature: string; signerAddress: ClassicAddress }>;
+  signAuthEntryWithShield(
+    entryXdr: string,
+    allowWarning?: boolean,
+  ): Promise<{
+    signedAuthEntry: string;
+    signerAddress: ClassicAddress;
+    inspection: DappAuthEntryInspection;
+  }>;
+  bootstrapActiveAccount(
+    sessionToken: string,
+  ): Promise<{ hash?: string | undefined; address: ClassicAddress; status: string }>;
   signConnectChallenge(
     message: string,
     selectedIndices: readonly number[],
@@ -2593,6 +2625,47 @@ export function WalletProvider({
     [config.smartAccountWasmHash, config.networkPassphrase],
   );
 
+  const deriveAgentAccountAddress = useCallback((): ClassicAddress | null => {
+    if (!sessionVault.has()) return null;
+    try {
+      return sessionVault.withMnemonic((mnemonic) => {
+        const derived = deriveStellarAccount(mnemonic, AGENT_DERIVATION_INDEX);
+        try {
+          return derived.publicKey;
+        } finally {
+          derived.zeroize();
+        }
+      });
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const signAgentX402Challenge = useCallback(
+    (challenge: {
+      x402Version: number;
+      network: string;
+      asset: string;
+      amount: string;
+      payTo: string;
+      nonce: string;
+    }) => {
+      if (!sessionVault.has()) {
+        throw new Error("Unlock vault before signing agent x402 payments.");
+      }
+      return sessionVault.withMnemonic((mnemonic) => {
+        const derived = deriveStellarAccount(mnemonic, AGENT_DERIVATION_INDEX);
+        const kp = derived.toKeypair();
+        try {
+          return signX402ChallengeWithKeypair(kp, challenge);
+        } finally {
+          derived.zeroize();
+        }
+      });
+    },
+    [],
+  );
+
   const signSep10ChallengeXdr = useCallback(
     async (challengeXdr: string): Promise<string> => {
       return withActiveKeypair(async (keypair) =>
@@ -2610,6 +2683,81 @@ export function WalletProvider({
       }));
     },
     [withActiveKeypair],
+  );
+
+  const signAuthEntryWithShield = useCallback(
+    async (entryXdr: string, allowWarning = false) => {
+      const inspection = await inspectDappAuthEntrySecurity(
+        entryXdr,
+        config.networkPassphrase,
+      );
+      if (inspection.blockedReason) {
+        throw new Error(`Scan & Shield blocked Soroban auth entry: ${inspection.blockedReason}`);
+      }
+      const warning = inspection.findings.find((f) => f.severity === "warning");
+      if (warning && !allowWarning) {
+        throw new Error(`Warning requires review: ${warning.title}`);
+      }
+      const signed = await withActiveKeypair((keypair) =>
+        signSorobanAuthEntry(keypair, entryXdr, {
+          networkPassphrase: config.networkPassphrase,
+        }),
+      );
+      return {
+        signedAuthEntry: signed.signedAuthEntry,
+        signerAddress: signed.signerAddress,
+        inspection,
+      };
+    },
+    [withActiveKeypair, config.networkPassphrase],
+  );
+
+  const bootstrapActiveAccount = useCallback(
+    async (sessionToken: string) => {
+      if (!sessionToken.trim()) {
+        throw new Error("Open AstroWallet inside Telegram to claim sponsored activation.");
+      }
+      const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
+      return withActiveKeypair(async (keypair) => {
+        const address = keypair.publicKey() as ClassicAddress;
+        const timestamp = Math.floor(Date.now() / 1000);
+        const nonceBytes = new Uint8Array(12);
+        crypto.getRandomValues(nonceBytes);
+        const nonce = Array.from(nonceBytes, (b) => b.toString(16).padStart(2, "0")).join("");
+        const challengeMsg = `astrowallet-bootstrap:v1:${config.network}:${address}:${timestamp}:${nonce}`;
+        const signatureBase64 = signChallengeMessage(keypair, challengeMsg);
+        const res = await fetch(`${apiBase}/v1/relay/bootstrap`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Astro-Network": config.network,
+            Authorization: `Bearer ${sessionToken}`,
+          },
+          body: JSON.stringify({
+            address,
+            timestamp,
+            nonce,
+            signatureBase64,
+          }),
+        });
+        const body = (await res.json().catch(() => ({}))) as {
+          error?: string;
+          hash?: string;
+          status?: string;
+        };
+        if (!res.ok) {
+          throw new Error(body.error ?? `Sponsored activation failed (${res.status})`);
+        }
+        await refreshChainState();
+        showToast("Account activated on Stellar via sponsored bootstrap.", "success");
+        return {
+          hash: body.hash,
+          address,
+          status: body.status ?? "submitted",
+        };
+      });
+    },
+    [config.apiBaseUrl, config.network, withActiveKeypair, refreshChainState, showToast],
   );
 
   const signConnectChallenge = useCallback(
@@ -2837,8 +2985,12 @@ export function WalletProvider({
       simulateRawXdr,
       buildDevTemplateXdr,
       derivePublicKeyPreview,
+      deriveAgentAccountAddress,
+      signAgentX402Challenge,
       signSep10ChallengeXdr,
       signActiveSep53Message,
+      signAuthEntryWithShield,
+      bootstrapActiveAccount,
       signConnectChallenge,
       fundClaimEscrow,
       claimFromEscrow,
@@ -2922,8 +3074,12 @@ export function WalletProvider({
       simulateRawXdr,
       buildDevTemplateXdr,
       derivePublicKeyPreview,
+      deriveAgentAccountAddress,
+      signAgentX402Challenge,
       signSep10ChallengeXdr,
       signActiveSep53Message,
+      signAuthEntryWithShield,
+      bootstrapActiveAccount,
       signConnectChallenge,
       fundClaimEscrow,
       claimFromEscrow,

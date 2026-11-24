@@ -3,7 +3,13 @@ import type { AssetBalance, ClassicAddress } from "@astrowallet/domain";
 import type { VerifiedAssetEntry } from "@astrowallet/security-shield";
 import type { TokenCatalogItem } from "@astrowallet/stellar-core";
 
-export type TokenCatalogFilter = "all" | "holdings" | "official" | "liquid";
+export type TokenCatalogFilter =
+  | "all"
+  | "holdings"
+  | "official"
+  | "oft"
+  | "community"
+  | "liquid";
 export type TokenTrustClassification = "official" | "scam_spoof" | "unverified";
 
 export interface TokenTrustVerdict {
@@ -55,6 +61,32 @@ export const CANONICAL_MAINNET_OFT_ASSETS: readonly VerifiedAssetEntry[] = [
   },
 ];
 
+export const COMMUNITY_MAINNET_HUB_ASSETS: readonly VerifiedAssetEntry[] = [
+  {
+    code: "LIBRE",
+    issuer: "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY",
+    name: "LIBRE (#ACTHUB)",
+    domain: "librequidity.org",
+    contract: "CBEM2CAIYLM3HBOPU5HLQL7V5BUAKM3N77DYQKX4FNHTQLQUUD2ZFBOX",
+    decimals: 7,
+  },
+  {
+    code: "xLMNR",
+    issuer: "GDKA6WVMFSA73BMEVKPO6WXSSWP4MPRBDJVSXLLSEVIEVH226L5RJ7NL",
+    name: "Lumenaire (#ACTHUB)",
+    domain: "thelumenaire.com",
+    contract: "CCEIVLOFQHALNB2ZVQJW55OYKEL7GG52JIGLUGHLRTEAFMISNSMOM5XW",
+    decimals: 7,
+  },
+  {
+    code: "SVR",
+    issuer: "GAGORNGHVJP5X2QO2NNIIDXKLNHVWJWXC5S73EZNCHOALGFTB2V25YGF",
+    name: "SVR Token (#ACTHUB)",
+    domain: "svrtoken.com",
+    decimals: 7,
+  },
+];
+
 /**
  * Normalizes an asset code + optional issuer into a deterministic lookup key.
  */
@@ -97,9 +129,11 @@ export function classifyTokenTrust(input: {
   assetCode: string;
   assetIssuer?: string | undefined;
   verifiedAssets: readonly VerifiedAssetEntry[];
+  network?: "testnet" | "mainnet" | undefined;
 }): TokenTrustVerdict {
   const code = input.assetCode.trim().toUpperCase();
   const issuer = input.assetIssuer?.trim();
+  const useMainnetRegistries = input.network === "mainnet";
 
   if (code === "XLM" && !issuer) {
     return {
@@ -117,15 +151,31 @@ export function classifyTokenTrust(input: {
     };
   }
 
-  const exactOft = CANONICAL_MAINNET_OFT_ASSETS.find(
-    (v) => v.code.toUpperCase() === code && v.issuer === issuer,
-  );
+  const exactOft = useMainnetRegistries
+    ? CANONICAL_MAINNET_OFT_ASSETS.find(
+        (v) => v.code.toUpperCase() === code && v.issuer === issuer,
+      )
+    : undefined;
   if (exactOft) {
     return {
       status: "official",
       label: "Canonical LayerZero OFT",
       reason: `Verified canonical omnichain asset (${exactOft.domain ?? "LayerZero V2 EID 30600"}).`,
       matchedVerified: exactOft,
+    };
+  }
+
+  const exactCommunity = useMainnetRegistries
+    ? COMMUNITY_MAINNET_HUB_ASSETS.find(
+        (v) => v.code.toUpperCase() === code && v.issuer === issuer,
+      )
+    : undefined;
+  if (exactCommunity) {
+    return {
+      status: "official",
+      label: "Community Hub Verified",
+      reason: `Curated #ACTHUB ecosystem token (${exactCommunity.domain ?? "community-verified"}).`,
+      matchedVerified: exactCommunity,
     };
   }
 
@@ -145,7 +195,9 @@ export function classifyTokenTrust(input: {
 
   const officialForCode =
     input.verifiedAssets.find((v) => v.code.toUpperCase() === code) ??
-    CANONICAL_MAINNET_OFT_ASSETS.find((v) => v.code.toUpperCase() === code);
+    (useMainnetRegistries
+      ? CANONICAL_MAINNET_OFT_ASSETS.find((v) => v.code.toUpperCase() === code)
+      : undefined);
   if (
     officialForCode ||
     (input.verifiedAssets.length > 0 && PROTECTED_ASSET_SYMBOLS.has(code))
@@ -222,6 +274,7 @@ export function buildTokenCatalog(input: {
   filter: TokenCatalogFilter;
   query: string;
   includeCanonicalOfts?: boolean | undefined;
+  includeCommunityHub?: boolean | undefined;
 }): TokenCatalogItem[] {
   const verifiedMap = new Map<string, VerifiedAssetEntry>();
   for (const v of input.verifiedAssets) {
@@ -261,7 +314,10 @@ export function buildTokenCatalog(input: {
     });
   }
 
-  const extraVerified = input.includeCanonicalOfts ? CANONICAL_MAINNET_OFT_ASSETS : [];
+  const extraVerified = [
+    ...(input.includeCanonicalOfts ? CANONICAL_MAINNET_OFT_ASSETS : []),
+    ...(input.includeCommunityHub ? COMMUNITY_MAINNET_HUB_ASSETS : []),
+  ];
   for (const v of [...input.verifiedAssets, ...extraVerified]) {
     const k = tokenAssetKey(v.code, v.issuer);
     if (map.has(k)) continue;
@@ -299,10 +355,20 @@ export function buildTokenCatalog(input: {
     }
   }
 
+  const oftKeySet = new Set(
+    CANONICAL_MAINNET_OFT_ASSETS.map((v) => tokenAssetKey(v.code, v.issuer)),
+  );
+  const communityKeySet = new Set(
+    COMMUNITY_MAINNET_HUB_ASSETS.map((v) => tokenAssetKey(v.code, v.issuer)),
+  );
+
   const q = input.query.trim().toLowerCase();
   return Array.from(map.values()).filter((item) => {
+    const k = tokenAssetKey(item.assetCode, item.assetIssuer);
     if (input.filter === "holdings" && !item.hasTrustline) return false;
     if (input.filter === "official" && !item.isVerified) return false;
+    if (input.filter === "oft" && !oftKeySet.has(k)) return false;
+    if (input.filter === "community" && !communityKeySet.has(k)) return false;
     if (input.filter === "liquid" && !item.hasLiquidityPool) return false;
     if (!q) return true;
     return (

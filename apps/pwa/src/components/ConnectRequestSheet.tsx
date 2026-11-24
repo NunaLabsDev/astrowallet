@@ -1,4 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  decodeAuthEntryXdr,
+  type DecodedAuthEntrySummary,
+} from "@astrowallet/security-shield";
 import type {
   ConnectActionType,
   ConnectAppMetadata,
@@ -39,6 +43,8 @@ interface RemoteConnectRequest {
     humanSummary?: string | undefined;
     unsignedXdr?: string | undefined;
     xdrSha256?: string | undefined;
+    authEntryXdr?: string | undefined;
+    entrySha256?: string | undefined;
     submit?: boolean | undefined;
     subAction?: string | undefined;
     sourceAddress?: string | undefined;
@@ -93,11 +99,14 @@ export function ConnectRequestSheet({
     activeAccount,
     setActiveIndex,
     signActiveSep53Message,
+    signAuthEntryWithShield,
     signRawXdrWithShield,
     signAndSubmitRawXdrWithShield,
   } = useWallet();
 
   const [request, setRequest] = useState<RemoteConnectRequest | null>(null);
+  const [authEntrySummary, setAuthEntrySummary] = useState<DecodedAuthEntrySummary | null>(null);
+  const [showRawAuthEntry, setShowRawAuthEntry] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -161,10 +170,80 @@ export function ConnectRequestSheet({
     return () => {
       cancelled = true;
     };
-  }, [config.apiBaseUrl, route.requestId, route.sig]);
+  }, [config.apiBaseUrl, config.network, route.requestId, route.sig]);
 
   useEffect(() => {
-    if (!request || request.action !== "sign_xdr" || !request.payload.unsignedXdr) {
+    if (!request) {
+      setScanReport(null);
+      setAuthEntrySummary(null);
+      return undefined;
+    }
+
+    if (request.action === "sign_auth_entry" && request.payload.authEntryXdr) {
+      let cancelled = false;
+      try {
+        const decoded = decodeAuthEntryXdr(request.payload.authEntryXdr);
+        if (!cancelled) {
+          setAuthEntrySummary(decoded);
+        }
+      } catch {
+        if (!cancelled) setAuthEntrySummary(null);
+      }
+      setScanningXdr(true);
+      void import("../state/session-vault.js")
+        .then(({ inspectDappAuthEntrySecurity }) =>
+          inspectDappAuthEntrySecurity(
+            request.payload.authEntryXdr ?? "",
+            config.networkPassphrase,
+          ),
+        )
+        .then((inspected) => {
+          if (cancelled) return;
+          const verdict = inspected.blockedReason
+            ? "malicious"
+            : inspected.findings.some((f) => f.severity === "warning")
+              ? "warning"
+              : "benign";
+          setScanReport({
+            verdict,
+            operationsCount: 1,
+            findings: inspected.findings,
+            balanceDiffs: [],
+            requiresMemoCheck: false,
+            estimatedFeeStroops: "0",
+          });
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setScanReport({
+              verdict: "malicious",
+              operationsCount: 1,
+              findings: [
+                {
+                  code: "AUTH_ENTRY_INVALID",
+                  severity: "malicious",
+                  title: "Invalid or cross-network Soroban auth entry",
+                  description:
+                    err instanceof Error ? err.message : "Failed to verify auth entry XDR",
+                  blocksSigning: true,
+                },
+              ],
+              balanceDiffs: [],
+              requiresMemoCheck: false,
+              estimatedFeeStroops: "0",
+            });
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setScanningXdr(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setAuthEntrySummary(null);
+    if (request.action !== "sign_xdr" || !request.payload.unsignedXdr) {
       setScanReport(null);
       return undefined;
     }
@@ -205,7 +284,13 @@ export function ConnectRequestSheet({
     return () => {
       cancelled = true;
     };
-  }, [request, config.apiBaseUrl]);
+  }, [
+    request,
+    config.apiBaseUrl,
+    config.network,
+    config.networkPassphrase,
+    activeAccount?.address,
+  ]);
 
   const trustMeta = useMemo(
     () => (request ? trustTierLabel(request.trustTier) : null),
@@ -288,6 +373,27 @@ export function ConnectRequestSheet({
         });
         triggerTelegramHaptic("success");
         setCompletedMsg(`Signed SEP-53 message for ${request.app.name}.`);
+      } else if (request.action === "sign_auth_entry") {
+        const authEntryXdr = request.payload.authEntryXdr;
+        if (!authEntryXdr) {
+          throw new Error("Missing authEntryXdr payload");
+        }
+        if (scanReport?.verdict === "malicious") {
+          throw new Error(
+            `Scan & Shield blocked auth entry: ${scanReport.findings[0]?.title ?? "malicious authorization"}`,
+          );
+        }
+        if (scanReport?.verdict === "warning" && !warningAcknowledged) {
+          throw new Error("Acknowledge the Scan & Shield warning before signing.");
+        }
+        const signed = await signAuthEntryWithShield(authEntryXdr, true);
+        returnUrl = await submitCompletion({
+          status: "approved",
+          address: signed.signerAddress,
+          signedAuthEntry: signed.signedAuthEntry,
+        });
+        triggerTelegramHaptic("success");
+        setCompletedMsg(`Signed Soroban authorization entry for ${request.app.name}.`);
       } else {
         const unsignedXdr = request.payload.unsignedXdr;
         if (!unsignedXdr) {
@@ -581,9 +687,9 @@ export function ConnectRequestSheet({
                 </div>
               )}
 
-              {request.action === "sign_xdr" && (
+              {(request.action === "sign_xdr" || request.action === "sign_auth_entry") && (
                 <>
-                  {request.payload.unsignedXdr && (
+                  {request.action === "sign_xdr" && request.payload.unsignedXdr && (
                     <ClearSignSummaryCard
                       unsignedXdr={request.payload.unsignedXdr}
                       networkPassphrase={config.networkPassphrase}
@@ -591,14 +697,72 @@ export function ConnectRequestSheet({
                       overrideSummary={request.payload.humanSummary}
                     />
                   )}
+                  {request.action === "sign_auth_entry" && request.payload.authEntryXdr && (
+                    <div className="glass-card" style={{ display: "grid", gap: 8, padding: 12 }}>
+                      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--aw-nebula-lavender)", fontWeight: 700 }}>
+                        Soroban Auth Entry Clear-Sign (SEP-60)
+                      </div>
+                      <div style={{ fontSize: 14, fontWeight: 700 }}>
+                        {request.payload.humanSummary ??
+                          `Authorize ${authEntrySummary?.invocation.functionName ?? "Soroban contract"}()`}
+                      </div>
+                      {authEntrySummary && (
+                        <div className="aw-review-rows" style={{ fontSize: 12 }}>
+                          <div className="aw-review-row">
+                            <span>Function</span>
+                            <code>{authEntrySummary.invocation.functionName}</code>
+                          </div>
+                          {authEntrySummary.invocation.contractId && (
+                            <div className="aw-review-row">
+                              <span>Contract</span>
+                              <code style={{ wordBreak: "break-all" }}>
+                                {authEntrySummary.invocation.contractId}
+                              </code>
+                            </div>
+                          )}
+                          {authEntrySummary.signatureExpirationLedger !== undefined && (
+                            <div className="aw-review-row">
+                              <span>Expires Ledger</span>
+                              <code className="tabular-nums">
+                                #{authEntrySummary.signatureExpirationLedger}
+                              </code>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                      <button
+                        type="button"
+                        className="aw-chip-btn"
+                        style={{ justifySelf: "flex-start", fontSize: 11 }}
+                        onClick={() => setShowRawAuthEntry((prev) => !prev)}
+                      >
+                        {showRawAuthEntry ? "Hide Raw Auth XDR" : "Pro Inspector · Auth XDR"}
+                      </button>
+                      {showRawAuthEntry && (
+                        <pre style={{ margin: 0, padding: 8, borderRadius: 8, background: "rgba(11,20,51,0.85)", fontSize: 11, overflowX: "auto", maxHeight: 160 }}>
+                          {JSON.stringify(
+                            {
+                              kind: authEntrySummary?.kind ?? "unknown",
+                              invocation: authEntrySummary?.invocation ?? null,
+                              rawPrefix: request.payload.authEntryXdr.slice(0, 120),
+                            },
+                            null,
+                            2,
+                          )}
+                        </pre>
+                      )}
+                    </div>
+                  )}
                   <div className="aw-list-row">
                     <span style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
                       Execution Mode
                     </span>
                     <span style={{ fontSize: 12, fontWeight: 600 }}>
-                      {request.payload.submit !== false
-                        ? "Sign & Submit to Stellar"
-                        : "Sign Only (Return Signed XDR)"}
+                      {request.action === "sign_auth_entry"
+                        ? "Zero-XLM Auth Signature Only (Returns signed auth)"
+                        : request.payload.submit !== false
+                          ? "Sign & Submit to Stellar"
+                          : "Sign Only (Return Signed XDR)"}
                     </span>
                   </div>
                   {scanningXdr && (
@@ -665,7 +829,7 @@ export function ConnectRequestSheet({
                     scanningXdr ||
                     vaultStatus !== "unlocked" ||
                     !activeAccount ||
-                    (request.action === "sign_xdr" &&
+                    ((request.action === "sign_xdr" || request.action === "sign_auth_entry") &&
                       (scanReport?.verdict === "malicious" ||
                         (scanReport?.verdict === "warning" && !warningAcknowledged) ||
                         (requiresHighValueReauth({
@@ -683,9 +847,11 @@ export function ConnectRequestSheet({
                       ? "Approve & Sign In"
                       : request.action === "sign_message"
                         ? "Sign Message"
-                        : request.payload.submit !== false
-                          ? "Sign & Execute"
-                          : "Sign XDR Only"}
+                        : request.action === "sign_auth_entry"
+                          ? "Approve Soroban Auth"
+                          : request.payload.submit !== false
+                            ? "Sign & Execute"
+                            : "Sign XDR Only"}
                 </button>
               </div>
             </>

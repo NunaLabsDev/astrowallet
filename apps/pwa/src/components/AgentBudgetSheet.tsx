@@ -1,9 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AGENT_DERIVATION_INDEX,
-  buildX402PaymentHeader,
   createDefaultAgentBudgetPolicy,
   evaluateAgentSpendRequest,
+  getEffectiveSpentTodayStroops,
   parseX402PaymentRequiredHeader,
   recordAgentSpend,
   type AgentBudgetPolicy,
@@ -14,7 +14,15 @@ import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 
 const STORAGE_KEY = "astrowallet_x402_agent_policy_v1";
 
-function loadPolicy(network: "testnet" | "mainnet"): AgentBudgetPolicy {
+function loadPolicy(
+  network: "testnet" | "mainnet",
+  configuredHost?: string,
+): AgentBudgetPolicy {
+  const defaultDomains = configuredHost
+    ? Array.from(
+        new Set([configuredHost, "astrodex.pages.dev", "astrodex-testnet.pages.dev"]),
+      )
+    : undefined;
   try {
     const raw = localStorage.getItem(`${STORAGE_KEY}:${network}`);
     if (raw) {
@@ -23,7 +31,9 @@ function loadPolicy(network: "testnet" | "mainnet"): AgentBudgetPolicy {
   } catch {
     // Fallback to default policy
   }
-  return createDefaultAgentBudgetPolicy(network);
+  return createDefaultAgentBudgetPolicy(network, Date.now(), {
+    allowedDomains: defaultDomains,
+  });
 }
 
 function formatStroopsUsdc(stroops: string): string {
@@ -37,26 +47,65 @@ function formatStroopsUsdc(stroops: string): string {
  * for isolated sub-account m/44'/148'/99' + test live HTTP 402 endpoints (AstroDex Forensic Alpha).
  */
 export function AgentBudgetSheet() {
-  const { config, activeAccount, accounts, vaultStatus, signActiveSep53Message } = useWallet();
+  const {
+    config,
+    activeAccount,
+    accounts,
+    vaultStatus,
+    deriveAgentAccountAddress,
+    signAgentX402Challenge,
+  } = useWallet();
+
+  const envDexUrl = (import.meta.env.VITE_ASTRODEX_API_BASE_URL as string | undefined)?.trim();
+
+  const configuredDexHost = useMemo(() => {
+    try {
+      return envDexUrl ? new URL(envDexUrl).hostname : undefined;
+    } catch {
+      return undefined;
+    }
+  }, [envDexUrl]);
 
   const [policy, setPolicy] = useState<AgentBudgetPolicy>(() =>
-    loadPolicy(config.network),
+    loadPolicy(config.network, configuredDexHost),
   );
-  const [probeUrl, setProbeUrl] = useState(() =>
-    config.network === "mainnet"
-      ? "https://astrodex.pages.dev/v1/agent/forensic-alpha/XLM"
-      : "https://astrodex-testnet.pages.dev/v1/agent/forensic-alpha/XLM",
-  );
+  const [domainsInput, setDomainsInput] = useState(() => policy.allowedDomains.join(", "));
+  const [probeUrl, setProbeUrl] = useState(() => {
+    const base = (
+      envDexUrl ||
+      (config.network === "mainnet"
+        ? "https://astrodex.pages.dev"
+        : "https://astrodex-testnet.pages.dev")
+    ).replace(/\/+$/, "");
+    return `${base}/v1/agent/forensic-alpha/XLM`;
+  });
   const [probing, setProbing] = useState(false);
   const [probeResult, setProbeResult] = useState<string | null>(null);
   const [probeError, setProbeError] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState(false);
 
+  useEffect(() => {
+    const next = loadPolicy(config.network, configuredDexHost);
+    setPolicy(next);
+    setDomainsInput(next.allowedDomains.join(", "));
+    const base = (
+      envDexUrl ||
+      (config.network === "mainnet"
+        ? "https://astrodex.pages.dev"
+        : "https://astrodex-testnet.pages.dev")
+    ).replace(/\/+$/, "");
+    setProbeUrl(`${base}/v1/agent/forensic-alpha/XLM`);
+  }, [config.network, envDexUrl, configuredDexHost]);
+
+  const derivedAgentAddress = useMemo(
+    () => (vaultStatus === "unlocked" ? deriveAgentAccountAddress() : null),
+    [vaultStatus, deriveAgentAccountAddress],
+  );
   const dedicatedAgentAccount = useMemo(
     () => accounts.find((a) => a.derivationIndex === AGENT_DERIVATION_INDEX) ?? null,
     [accounts],
   );
-  const agentAccount = dedicatedAgentAccount ?? activeAccount;
+  const agentAddress = derivedAgentAddress ?? dedicatedAgentAccount?.address ?? null;
 
   const savePolicy = (next: AgentBudgetPolicy) => {
     setPolicy(next);
@@ -69,10 +118,11 @@ export function AgentBudgetSheet() {
 
   if (!activeAccount) return null;
 
+  const effectiveSpentTodayStroops = getEffectiveSpentTodayStroops(policy);
   const dailyPct = Math.min(
     100,
     Math.round(
-      (Number(policy.spentTodayStroops) / Math.max(1, Number(policy.dailyCapStroops))) * 100,
+      (Number(effectiveSpentTodayStroops) / Math.max(1, Number(policy.dailyCapStroops))) * 100,
     ),
   );
 
@@ -106,36 +156,39 @@ export function AgentBudgetSheet() {
         }
         if (vaultStatus !== "unlocked") {
           setProbeResult(
-            `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC on ${first.network} -> APPROVED by policy. Unlock vault to sign X-PAYMENT proof.`,
+            `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC on ${first.network} -> APPROVED by policy. Unlock vault to sign payment proof.`,
           );
           return;
         }
         const nonce = crypto.randomUUID().replace(/-/g, "").slice(0, 16);
-        const challenge = `x402:${first.network}:${first.asset}:${first.amount}:${first.payTo}:${nonce}`;
-        const signed = await signActiveSep53Message(challenge);
-        const xPayment = buildX402PaymentHeader({
+        const signed = signAgentX402Challenge({
           x402Version: terms.x402Version,
           network: first.network,
-          payer: signed.signerAddress,
           asset: first.asset,
           amount: first.amount,
           payTo: first.payTo,
           nonce,
-          signatureBase64: signed.signature,
         });
+        const paymentHeaderName =
+          terms.x402Version >= 2 ? "PAYMENT-SIGNATURE" : "X-PAYMENT";
         const paidRes = await fetch(parsedUrl.toString(), {
           method: "GET",
-          headers: { "X-PAYMENT": xPayment },
+          headers: {
+            [paymentHeaderName]: signed.paymentHeader,
+            "X-PAYMENT": signed.paymentHeader,
+          },
         });
         if (paidRes.ok) {
           savePolicy(recordAgentSpend(policy, first.amount));
           const receiptHdr = paidRes.headers.get("PAYMENT-RESPONSE");
+          const bodyPreview = await paidRes.text().catch(() => "");
           setProbeResult(
-            `HTTP 200 PAID (${formatStroopsUsdc(first.amount)} USDC) · Receipt: ${receiptHdr ? "PAYMENT-RESPONSE verified" : "settled"}`,
+            `HTTP 200 PAID via m/44'/148'/${AGENT_DERIVATION_INDEX}' (${signed.payer.slice(0, 6)}…${signed.payer.slice(-4)} · ${formatStroopsUsdc(first.amount)} USDC) · ${receiptHdr ? "PAYMENT-RESPONSE verified" : "settled"}${bodyPreview ? ` · ${bodyPreview.slice(0, 120)}` : ""}`,
           );
         } else {
+          const errText = await paidRes.text().catch(() => "");
           setProbeResult(
-            `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC · Policy APPROVED · Facilitator status ${paidRes.status} (requires funded USDC auth entry)`,
+            `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC · Signed by m/44'/148'/${AGENT_DERIVATION_INDEX}' (${signed.payer.slice(0, 6)}…${signed.payer.slice(-4)}) · Status ${paidRes.status}${errText ? ` (${errText.slice(0, 100)})` : ""}`,
           );
         }
       } else if (res.ok) {
@@ -183,14 +236,14 @@ export function AgentBudgetSheet() {
         </button>
       </div>
 
-      {agentAccount && (
+      {agentAddress ? (
         <div className="aw-list-row">
           <div style={{ minWidth: 0 }}>
             <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-              Agent Allowance Address (m/44&apos;/148&apos;/{AGENT_DERIVATION_INDEX}&apos;)
+              Isolated Agent Address (m/44&apos;/148&apos;/{AGENT_DERIVATION_INDEX}&apos;)
             </div>
             <code style={{ fontSize: 12, wordBreak: "break-all" }}>
-              {agentAccount.address}
+              {agentAddress}
             </code>
           </div>
           <button
@@ -198,7 +251,7 @@ export function AgentBudgetSheet() {
             className="aw-chip-btn"
             style={{ minHeight: 34, padding: "4px 10px", fontSize: 11 }}
             onClick={async () => {
-              const ok = await copyTextToClipboard(agentAccount.address);
+              const ok = await copyTextToClipboard(agentAddress);
               if (ok) {
                 setCopiedKey(true);
                 setTimeout(() => setCopiedKey(false), 1800);
@@ -208,13 +261,19 @@ export function AgentBudgetSheet() {
             {copiedKey ? "Copied" : "Copy"}
           </button>
         </div>
+      ) : (
+        <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+          Unlock your vault to derive isolated sub-account m/44&apos;/148&apos;/
+          {AGENT_DERIVATION_INDEX}&apos;.
+        </div>
       )}
 
       <div className="aw-banner" style={{ display: "grid", gap: 6, fontSize: 12 }}>
         <div style={{ display: "flex", justifyContent: "space-between" }}>
           <span>Spent Today (UTC)</span>
           <strong className="tabular-nums">
-            {formatStroopsUsdc(policy.spentTodayStroops)} / {formatStroopsUsdc(policy.dailyCapStroops)}
+            {formatStroopsUsdc(effectiveSpentTodayStroops)} /{" "}
+            {formatStroopsUsdc(policy.dailyCapStroops)}
           </strong>
         </div>
         <div style={{ height: 6, borderRadius: 999, background: "rgba(165, 139, 224, 0.18)", overflow: "hidden" }}>
@@ -260,6 +319,28 @@ export function AgentBudgetSheet() {
             <option value="1000000">$0.10 max</option>
           </select>
         </div>
+      </div>
+
+      <div>
+        <label className="aw-label" htmlFor="x402-allowed-domains">
+          Allowed Endpoint Domains (comma-separated)
+        </label>
+        <input
+          id="x402-allowed-domains"
+          type="text"
+          className="aw-input"
+          placeholder="astrodex.pages.dev, astrodex-testnet.pages.dev"
+          value={domainsInput}
+          onChange={(e) => {
+            const raw = e.target.value;
+            setDomainsInput(raw);
+            const parsed = raw
+              .split(",")
+              .map((d) => d.trim().toLowerCase())
+              .filter(Boolean);
+            savePolicy({ ...policy, allowedDomains: parsed });
+          }}
+        />
       </div>
 
       <div style={{ display: "grid", gap: 8 }}>

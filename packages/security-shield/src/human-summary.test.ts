@@ -90,5 +90,18 @@ describe("buildHumanClearSignSummary", () => {
     });
     expect(blocked.actionCategory).toBe("danger");
     expect(blocked.headline).toContain("Blocked: Master Key Lockout Blocked");
+
+    const extraOps = buildHumanClearSignSummary({
+      decoded: baseTx([
+        { type: "claimClaimableBalance" },
+        { type: "manageData" },
+        { type: "restoreFootprint" },
+        { type: "setTrustLineFlags" },
+      ]),
+      findings: [],
+      verdict: "benign",
+    });
+    expect(extraOps.headline).toBe("Claim Pending Balance (+ Trustline)");
+    expect(extraOps.plainSteps).toHaveLength(3);
   });
 });

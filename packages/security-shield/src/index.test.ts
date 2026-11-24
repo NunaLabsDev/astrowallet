@@ -20,6 +20,7 @@ import {
   evaluateSorobanInvocation,
   fetchSep42VerifiedAssets,
   filterSpamClaimableBalances,
+  decodeTransactionEnvelope,
   sanitizeMemoPhishing,
   scanTransactionEnvelopeXdr,
   simulateSorobanTransaction,
@@ -769,5 +770,63 @@ describe("Scan & Shield deterministic pre-sign rules", () => {
         (f) => f.code === "SOROBAN_SIMULATION_FAILED" && f.blocksSigning === true,
       ),
     ).toBe(true);
+  });
+
+  it("extracts sendAmount on pathPaymentStrictSend and isolates LayerZero OFTs to Mainnet", () => {
+    const strictSendXdr = buildTestTxXdr((b) => {
+      b.addOperation(
+        Operation.pathPaymentStrictSend({
+          sendAsset: Asset.native(),
+          sendAmount: "42.5000000",
+          destination: DEST_KP.publicKey(),
+          destAsset: new Asset("USDC", OFFICIAL_USDC_ISSUER),
+          destMin: "10.0000000",
+          path: [],
+        }),
+      );
+    });
+    const decoded = decodeTransactionEnvelope(strictSendXdr, TESTNET_PASSPHRASE);
+    expect(decoded.operations[0]?.type).toBe("pathPaymentStrictSend");
+    expect(decoded.operations[0]?.amount).toBe("42.5000000");
+
+    const MAINNET_USDE_ISSUER = "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47";
+    const usdeXdr = buildTestTxXdr((b) => {
+      b.addOperation(
+        Operation.payment({
+          destination: DEST_KP.publicKey(),
+          asset: new Asset("USDE", MAINNET_USDE_ISSUER),
+          amount: "5",
+        }),
+      );
+    });
+    const testnetScan = scanTransactionEnvelopeXdr(usdeXdr, {
+      networkPassphrase: TESTNET_PASSPHRASE,
+      verifiedAssets: [{ code: "USDC", issuer: OFFICIAL_USDC_ISSUER }],
+    });
+    expect(
+      testnetScan.report.findings.some((f) => f.code === "SPOOFED_PROTECTED_ASSET"),
+    ).toBe(true);
+
+    const mainnetTx = new TransactionBuilder(new Account(SOURCE_KP.publicKey(), "100"), {
+      fee: BASE_FEE,
+      networkPassphrase: "Public Global Stellar Network ; September 2015",
+    })
+      .addOperation(
+        Operation.payment({
+          destination: DEST_KP.publicKey(),
+          asset: new Asset("USDE", MAINNET_USDE_ISSUER),
+          amount: "5",
+        }),
+      )
+      .setTimeout(60)
+      .build()
+      .toXDR();
+    const mainnetScan = scanTransactionEnvelopeXdr(mainnetTx, {
+      networkPassphrase: "Public Global Stellar Network ; September 2015",
+      verifiedAssets: [{ code: "USDC", issuer: OFFICIAL_USDC_ISSUER }],
+    });
+    expect(
+      mainnetScan.report.findings.some((f) => f.code === "SPOOFED_PROTECTED_ASSET"),
+    ).toBe(false);
   });
 });

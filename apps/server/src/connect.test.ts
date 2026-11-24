@@ -6,7 +6,7 @@ import type {
   SignedIntent,
   TelegramUserBinding,
 } from "@astrowallet/domain";
-import { Account, Keypair, Operation, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Account, Address, Keypair, Operation, TransactionBuilder, xdr } from "@stellar/stellar-sdk";
 import { computeTelegramInitDataHash } from "@astrowallet/tg-protocol";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
@@ -647,5 +647,114 @@ describe("AstroConnect v1 Open Standard API (/v1/connect/* & discovery)", () => 
       TEST_ENV,
     );
     expect(confirmed.status).toBe(200);
+  });
+
+  it("supports SEP-60 sign_auth_entry creation, Ed25519 verification, and polling", async () => {
+    const repo = createConnectMemoryRepo();
+    const signer = Keypair.random();
+    const contractId = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUWDA";
+    const netHash = new Uint8Array(
+      await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(TEST_ENV.STELLAR_NETWORK_PASSPHRASE),
+      ),
+    );
+    const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+      new xdr.HashIdPreimageSorobanAuthorization({
+        networkId: Buffer.from(netHash),
+        nonce: xdr.Int64.fromString("77"),
+        signatureExpirationLedger: 987654,
+        invocation: new xdr.SorobanAuthorizedInvocation({
+          function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+            new xdr.InvokeContractArgs({
+              contractAddress: new Address(contractId).toScAddress(),
+              functionName: "transfer",
+              args: [],
+            }),
+          ),
+          subInvocations: [],
+        }),
+      }),
+    );
+    const authEntryXdr = preimage.toXDR("base64");
+    const entryHashHex = Array.from(
+      new Uint8Array(
+        await crypto.subtle.digest("SHA-256", new TextEncoder().encode(authEntryXdr)),
+      ),
+      (b) => b.toString(16).padStart(2, "0"),
+    ).join("");
+
+    const app = createApp({ createRepo: () => repo });
+    const createRes = await app.request(
+      "/v1/connect/requests",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "sign_auth_entry",
+          app: { name: "x402 Client", botUsername: "AstroDexBot" },
+          payload: {
+            authEntryXdr,
+            entrySha256: entryHashHex,
+            humanSummary: "Authorize x402 Soroban USDC call",
+          },
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(createRes.status).toBe(201);
+    const reqInfo = (await createRes.json()) as {
+      requestId: string;
+      sig: string;
+      resultToken: string;
+    };
+
+    const badComplete = await app.request(
+      `/v1/connect/requests/${reqInfo.requestId}/complete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: reqInfo.sig,
+          status: "approved",
+          address: signer.publicKey(),
+          signedAuthEntry: Buffer.from(new Uint8Array(64).fill(1)).toString("base64"),
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(badComplete.status).toBe(400);
+
+    const preimageDigest = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new Uint8Array(preimage.toXDR())),
+    );
+    const signedAuthEntry = Buffer.from(
+      signer.sign(Buffer.from(preimageDigest)),
+    ).toString("base64");
+
+    const okComplete = await app.request(
+      `/v1/connect/requests/${reqInfo.requestId}/complete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: reqInfo.sig,
+          status: "approved",
+          address: signer.publicKey(),
+          signedAuthEntry,
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(okComplete.status).toBe(200);
+
+    const pollRes = await app.request(
+      `/v1/connect/requests/${reqInfo.requestId}`,
+      { headers: { "X-Connect-Token": reqInfo.resultToken } },
+      TEST_ENV,
+    );
+    expect(
+      ((await pollRes.json()) as { result: { signedAuthEntry: string } }).result.signedAuthEntry,
+    ).toBe(signedAuthEntry);
   });
 });

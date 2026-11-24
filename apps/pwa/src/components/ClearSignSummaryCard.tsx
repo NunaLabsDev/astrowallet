@@ -122,31 +122,49 @@ export function ClearSignSummaryCard({
       </div>
 
       {showInspector && (
-        <pre
-          style={{
-            margin: 0,
-            padding: 10,
-            borderRadius: 10,
-            background: "rgba(11, 20, 51, 0.85)",
-            border: "1px solid rgba(165, 139, 224, 0.22)",
-            fontSize: 11,
-            overflowX: "auto",
-            maxHeight: 180,
-          }}
-        >
-          {JSON.stringify(
-            {
-              sourceAccount: decoded.sourceAccount,
-              operations: decoded.operations.map((o) => ({
-                type: o.type,
-                sorobanFn: o.soroban?.functionName,
-                contractId: o.soroban?.contractId,
-              })),
-            },
-            null,
-            2,
-          )}
-        </pre>
+        <div style={{ display: "grid", gap: 8 }}>
+          <pre
+            style={{
+              margin: 0,
+              padding: 10,
+              borderRadius: 10,
+              background: "rgba(11, 20, 51, 0.85)",
+              border: "1px solid rgba(165, 139, 224, 0.22)",
+              fontSize: 11,
+              overflowX: "auto",
+              maxHeight: 200,
+            }}
+          >
+            {JSON.stringify(
+              {
+                sourceAccount: decoded.sourceAccount,
+                memo: decoded.memo,
+                feeStroops: decoded.feeStroops,
+                operations: decoded.operations.map((o) => ({
+                  type: o.type,
+                  ...(o.destination ? { destination: o.destination } : {}),
+                  ...(o.amount ? { amount: o.amount } : {}),
+                  ...(o.asset ? { asset: o.asset } : {}),
+                  ...(o.sendAsset ? { sendAsset: o.sendAsset } : {}),
+                  ...(o.destAsset ? { destAsset: o.destAsset } : {}),
+                  ...(o.soroban
+                    ? {
+                        sorobanFn: o.soroban.functionName,
+                        contractId: o.soroban.contractId,
+                        args: o.soroban.args,
+                      }
+                    : {}),
+                })),
+              },
+              null,
+              2,
+            )}
+          </pre>
+          <div style={{ fontSize: 10, color: "var(--aw-ink-secondary)", wordBreak: "break-all" }}>
+            <strong>Raw Envelope XDR:</strong> {unsignedXdr.slice(0, 140)}
+            {unsignedXdr.length > 140 ? `… (${unsignedXdr.length} chars)` : ""}
+          </div>
+        </div>
       )}
     </div>
   );

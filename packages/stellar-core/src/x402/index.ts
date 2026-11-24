@@ -1,3 +1,6 @@
+import type { Keypair } from "@stellar/stellar-sdk";
+import { signChallengeMessage } from "../sep0005.js";
+
 export const AGENT_DERIVATION_INDEX = 99;
 
 export interface AgentBudgetPolicy {
@@ -29,16 +32,28 @@ export function getUtcDayString(nowMs = Date.now()): string {
   return new Date(nowMs).toISOString().slice(0, 10);
 }
 
+export function getEffectiveSpentTodayStroops(
+  policy: Pick<AgentBudgetPolicy, "spentTodayStroops" | "lastResetDayUtc">,
+  nowMs = Date.now(),
+): string {
+  return policy.lastResetDayUtc === getUtcDayString(nowMs)
+    ? policy.spentTodayStroops
+    : "0";
+}
+
 export function createDefaultAgentBudgetPolicy(
   network: "testnet" | "mainnet",
   nowMs = Date.now(),
+  options?: { allowedDomains?: readonly string[] | undefined },
 ): AgentBudgetPolicy {
   return {
     enabled: false,
     dailyCapStroops: "20000000", // 2.00 USDC
     maxPerRequestStroops: "500000", // 0.05 USDC
     allowedNetworks: [network === "mainnet" ? "stellar:pubnet" : "stellar:testnet"],
-    allowedDomains: ["astrodex-testnet.pages.dev", "astrodex.pages.dev"],
+    allowedDomains: options?.allowedDomains
+      ? [...options.allowedDomains]
+      : ["astrodex-testnet.pages.dev", "astrodex.pages.dev"],
     spentTodayStroops: "0",
     lastResetDayUtc: getUtcDayString(nowMs),
   };
@@ -173,4 +188,45 @@ export function buildX402PaymentHeader(input: {
     bin += String.fromCharCode(b);
   }
   return btoa(bin);
+}
+
+/**
+ * Signs an x402 payment authorization challenge using the dedicated agent Ed25519 keypair
+ * (`m/44'/148'/99'`) and builds the Base64 x402 payment header.
+ */
+export function signX402ChallengeWithKeypair(
+  agentKeypair: Keypair,
+  input: {
+    x402Version: number;
+    network: string;
+    asset: string;
+    amount: string;
+    payTo: string;
+    nonce: string;
+  },
+): {
+  payer: string;
+  signingPayload: string;
+  signatureBase64: string;
+  paymentHeader: string;
+} {
+  const payer = agentKeypair.publicKey();
+  const signingPayload = `x402:${input.network}:${input.asset}:${input.amount}:${input.payTo}:${input.nonce}:${payer}`;
+  const signatureBase64 = signChallengeMessage(agentKeypair, signingPayload);
+  const paymentHeader = buildX402PaymentHeader({
+    x402Version: input.x402Version,
+    network: input.network,
+    payer,
+    asset: input.asset,
+    amount: input.amount,
+    payTo: input.payTo,
+    nonce: input.nonce,
+    signatureBase64,
+  });
+  return {
+    payer,
+    signingPayload,
+    signatureBase64,
+    paymentHeader,
+  };
 }

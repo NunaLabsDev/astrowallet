@@ -6,7 +6,7 @@ import {
   validateMnemonic,
 } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
-import { Keypair } from "@stellar/stellar-sdk";
+import { authorizeEntry, Keypair, xdr } from "@stellar/stellar-sdk";
 import type { ClassicAddress } from "@astrowallet/domain";
 
 const SLIP10_ED25519_SEED_KEY = new TextEncoder().encode("ed25519 seed");
@@ -209,4 +209,87 @@ export function verifyChallengeMessage(
 export function publicKeyToRawHex(publicKey: ClassicAddress): string {
   const raw = Keypair.fromPublicKey(publicKey).rawPublicKey();
   return Array.from(raw, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Signs a Soroban `HashIdPreimage` or `SorobanAuthorizationEntry` Base64 XDR
+ * using the supplied Ed25519 Classic keypair (SEP-43 / SEP-60).
+ */
+export async function signSorobanAuthEntry(
+  keypair: Keypair,
+  entryXdr: string,
+  options?: {
+    networkPassphrase?: string | undefined;
+    validUntilLedgerSeq?: number | undefined;
+  },
+): Promise<{
+  kind: "hash_id_preimage" | "soroban_authorization_entry";
+  signedAuthEntry: string;
+  signatureBase64: string;
+  signerAddress: ClassicAddress;
+}> {
+  const cleaned = entryXdr.trim();
+  if (!cleaned) {
+    throw new Error("Authorization entry XDR is required");
+  }
+
+  let preimage: xdr.HashIdPreimage | null = null;
+  try {
+    preimage = xdr.HashIdPreimage.fromXDR(cleaned, "base64");
+  } catch {
+    preimage = null;
+  }
+
+  const signerAddress = keypair.publicKey() as ClassicAddress;
+
+  if (preimage !== null) {
+    const digest = sha256(preimage.toXDR());
+    const signatureBase64 = toBase64(keypair.sign(digest));
+    return {
+      kind: "hash_id_preimage",
+      signedAuthEntry: signatureBase64,
+      signatureBase64,
+      signerAddress,
+    };
+  }
+
+  let entry: xdr.SorobanAuthorizationEntry;
+  try {
+    entry = xdr.SorobanAuthorizationEntry.fromXDR(cleaned, "base64");
+  } catch (err) {
+    throw new Error(
+      `Invalid Soroban auth entry XDR: ${err instanceof Error ? err.message : "decode failed"}`,
+    );
+  }
+
+  if (!options?.networkPassphrase) {
+    throw new Error(
+      "networkPassphrase is required to authorize a raw SorobanAuthorizationEntry XDR",
+    );
+  }
+
+  const cred = entry.credentials as unknown as {
+    address?: { signatureExpirationLedger?: number | bigint };
+  };
+  const fallbackLedger = Number(cred.address?.signatureExpirationLedger ?? 0);
+  const validUntil = options.validUntilLedgerSeq ?? (fallbackLedger > 0 ? fallbackLedger : 1);
+
+  let lastSigBase64 = "";
+  const authorized = await authorizeEntry(
+    entry,
+    async (pre) => {
+      const sigBytes = keypair.sign(sha256(pre.toXDR()));
+      lastSigBase64 = toBase64(sigBytes);
+      return sigBytes;
+    },
+    validUntil,
+    options.networkPassphrase,
+  );
+
+  return {
+    kind: "soroban_authorization_entry",
+    signedAuthEntry: authorized.toXDR("base64"),
+    signatureBase64: lastSigBase64 || toBase64(sha256(authorized.toXDR())),
+    signerAddress,
+  };
 }

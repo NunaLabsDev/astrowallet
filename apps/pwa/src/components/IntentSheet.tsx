@@ -125,6 +125,7 @@ export function IntentSheet({
     setActiveIndex,
     accountState,
     fundActiveTestnetAccount,
+    bootstrapActiveAccount,
     addOrRemoveTrustline,
     signConnectChallenge,
     sendPayment,
@@ -209,10 +210,22 @@ export function IntentSheet({
     }
   };
 
+  const handleBootstrapActivate = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await bootstrapActiveAccount(sessionToken ?? "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Sponsored account activation failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const renderUnfundedBanner = (reason: string) => (
     <div className="aw-banner aw-banner--warn" style={{ display: "grid", gap: 8, fontSize: 12 }}>
       <div>{reason}</div>
-      {config.network === "testnet" && config.friendbotUrl && (
+      {config.network === "testnet" && config.friendbotUrl ? (
         <button
           type="button"
           className="aw-chip-btn"
@@ -221,6 +234,17 @@ export function IntentSheet({
         >
           {busy ? "Funding Testnet Account..." : "Activate Account with Testnet Friendbot"}
         </button>
+      ) : (
+        sessionToken && (
+          <button
+            type="button"
+            className="aw-chip-btn"
+            disabled={busy}
+            onClick={() => void handleBootstrapActivate()}
+          >
+            {busy ? "Activating Account..." : "Activate Account (Sponsored Bootstrap)"}
+          </button>
+        )
       )}
     </div>
   );
@@ -297,7 +321,7 @@ export function IntentSheet({
     return () => {
       cancelled = true;
     };
-  }, [config.apiBaseUrl, route.intentId, route.sig, sessionToken]);
+  }, [config.apiBaseUrl, config.network, route.intentId, route.sig, sessionToken]);
 
   useEffect(() => {
     if (!intent) {
@@ -352,7 +376,7 @@ export function IntentSheet({
     return () => {
       cancelled = true;
     };
-  }, [intent, config.apiBaseUrl]);
+  }, [intent, config.apiBaseUrl, config.network, activeAccount?.address]);
 
   const toggleIndex = (idx: number) => {
     setSelectedIndices((prev) =>
@@ -681,7 +705,8 @@ export function IntentSheet({
       setError("Claim escrow configuration or claimId is missing");
       return;
     }
-    const isExpired = Math.floor(Date.now() / 1000) >= intent.expiresAt;
+    const isExpired =
+      Math.floor(Date.now() / 1000) >= (intent.payload.escrowExpiresAt ?? intent.expiresAt);
     setBusy(true);
     setError(null);
     try {
@@ -1241,6 +1266,14 @@ export function IntentSheet({
                     : `(~${intent.payload.priceImpactPct}% impact)`}
                 </span>
               </div>
+              {intent.payload.unsignedXdr && (
+                <ClearSignSummaryCard
+                  unsignedXdr={intent.payload.unsignedXdr}
+                  networkPassphrase={config.networkPassphrase}
+                  scanReport={destScanReport}
+                  overrideSummary={`Swap ${intent.payload.amount ?? ""} ${intent.payload.fromAsset ?? ""} → ${intent.payload.toAsset ?? ""}`.trim()}
+                />
+              )}
               {scanningIntent && (
                 <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
                   Running Scan &amp; Shield pre-sign inspection...

@@ -76,7 +76,15 @@ export function computeNextDerivationIndex(
   return accounts.reduce((max, acc) => Math.max(max, acc.derivationIndex ?? 0), -1) + 1;
 }
 
-const STABLECOIN_CODES = new Set(["USDC", "USDT", "EURC", "PYUSD"]);
+const STABLECOIN_CODES = new Set([
+  "USDC",
+  "USDT",
+  "USDT0",
+  "USDE",
+  "SUSDE",
+  "EURC",
+  "PYUSD",
+]);
 
 /**
  * Determines whether a transaction requires fresh PIN or biometric re-authentication

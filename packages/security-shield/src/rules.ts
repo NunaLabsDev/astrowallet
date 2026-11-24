@@ -77,7 +77,20 @@ export const CANONICAL_LAYERZERO_OFT_ASSETS: readonly VerifiedAssetEntry[] = [
   },
 ];
 
-function isCanonicalLayerZeroOft(code: string, issuer: string): boolean {
+function isMainnetPassphrase(networkPassphrase?: string): boolean {
+  return Boolean(
+    networkPassphrase && networkPassphrase.trim().toLowerCase().startsWith("public "),
+  );
+}
+
+function isCanonicalLayerZeroOft(
+  code: string,
+  issuer: string,
+  networkPassphrase?: string,
+): boolean {
+  if (!isMainnetPassphrase(networkPassphrase)) {
+    return false;
+  }
   const upperCode = code.trim().toUpperCase();
   return CANONICAL_LAYERZERO_OFT_ASSETS.some(
     (entry) => entry.code.toUpperCase() === upperCode && entry.issuer === issuer,
@@ -352,7 +365,11 @@ export function evaluateDecodedTransaction(
         PROTECTED_ASSET_SYMBOLS.has(asset.code.toUpperCase())
       ) {
         const verifiedList = context.verifiedAssets ?? [];
-        const isOft = isCanonicalLayerZeroOft(asset.code, asset.issuer);
+        const isOft = isCanonicalLayerZeroOft(
+          asset.code,
+          asset.issuer,
+          context.networkPassphrase,
+        );
         if (isOft) {
           continue;
         }
@@ -444,11 +461,15 @@ export function filterSpamClaimableBalances(
     verifiedAssets?: readonly VerifiedAssetEntry[] | undefined;
     maliciousAddresses?: ReadonlySet<string> | undefined;
     minNativeXlmThreshold?: number | undefined;
+    networkPassphrase?: string | undefined;
+    network?: "testnet" | "mainnet" | undefined;
   } = {},
 ): ClaimableBalanceCandidate[] {
   const minXlm = options.minNativeXlmThreshold ?? 0.05;
   const verified = options.verifiedAssets ?? [];
   const malicious = options.maliciousAddresses;
+  const allowMainnetOft =
+    options.network === "mainnet" || isMainnetPassphrase(options.networkPassphrase);
 
   return items.filter((item) => {
     if (item.sponsor && malicious?.has(item.sponsor)) return false;
@@ -464,7 +485,13 @@ export function filterSpamClaimableBalances(
 
     if (PROTECTED_ASSET_SYMBOLS.has(item.assetCode.toUpperCase())) {
       const ok =
-        (item.assetIssuer ? isCanonicalLayerZeroOft(item.assetCode, item.assetIssuer) : false) ||
+        (allowMainnetOft && item.assetIssuer
+          ? isCanonicalLayerZeroOft(
+              item.assetCode,
+              item.assetIssuer,
+              options.networkPassphrase ?? (options.network === "mainnet" ? "public global" : undefined),
+            )
+          : false) ||
         verified.some(
           (v) =>
             v.code.toUpperCase() === item.assetCode.toUpperCase() &&

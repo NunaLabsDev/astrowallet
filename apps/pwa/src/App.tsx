@@ -1787,6 +1787,7 @@ function WalletShell({
                                 assetCode: b.assetCode,
                                 assetIssuer: b.assetIssuer,
                                 verifiedAssets,
+                                network: config.network,
                               });
                               const explorerTarget: SelectedTokenTarget = {
                                 assetCode: b.assetCode,

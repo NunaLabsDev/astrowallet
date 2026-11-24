@@ -333,6 +333,9 @@ export function createTelegramBot(
         USDC: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
         AQUA: "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA",
         EURC: "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2",
+        LIBRE: "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY",
+        XLMNR: "GDKA6WVMFSA73BMEVKPO6WXSSWP4MPRBDJVSXLLSEVIEVH226L5RJ7NL",
+        SVR: "GAGORNGHVJP5X2QO2NNIIDXKLNHVWJWXC5S73EZNCHOALGFTB2V25YGF",
       };
       const canonicalIssuer = CANONICAL_MAINNET_ASSETS[assetCode];
       if (canonicalIssuer) {
@@ -611,6 +614,61 @@ export function createTelegramBot(
     });
   });
 
+  async function createAutoEscrowClaimIntent(params: {
+    creatorTelegramUserId: string;
+    chatId?: string | undefined;
+    amount: string;
+    assetCode: string;
+    assetIssuer: string;
+    recipientUsername: string;
+    senderLabel: string;
+    destination: string;
+  }) {
+    const recipientLive = await fetchLiveAccountBalances(
+      config,
+      params.destination,
+      fetchFn,
+    ).catch(() => null);
+    const hasTrustline = Boolean(
+      recipientLive?.funded &&
+        recipientLive.balances.some(
+          (b) =>
+            b.assetCode.toUpperCase() === params.assetCode.toUpperCase() &&
+            b.assetIssuer === params.assetIssuer,
+        ),
+    );
+    if (!recipientLive || hasTrustline || !config.claimEscrowContractId) {
+      return null;
+    }
+    const autoEscrowReason: "missing_trustline" | "unfunded_account" =
+      recipientLive.funded ? "missing_trustline" : "unfunded_account";
+    const intentId = generateId("it");
+    const claimId = await deriveClaimId(intentId);
+    const escrowExpiresAt = Math.floor(Date.now() / 1000) + 86_400 * 7;
+    const created = await createAndSignIntent(config, repo, {
+      intentId,
+      creatorTelegramUserId: params.creatorTelegramUserId,
+      actionType: "claim",
+      ...(params.chatId ? { chatId: params.chatId } : {}),
+      ttlSeconds: 86_400 * 7,
+      payload: {
+        amount: params.amount,
+        assetCode: params.assetCode,
+        assetIssuer: params.assetIssuer,
+        recipientUsername: params.recipientUsername,
+        senderLabel: params.senderLabel,
+        claimId,
+        escrowContractId: config.claimEscrowContractId,
+        escrowExpiresAt,
+        autoEscrowReason,
+      },
+    });
+    return {
+      intent: created.intent,
+      autoEscrowReason,
+    };
+  }
+
   bot.command("pay", async (ctx) => {
     if (!ctx.from) return;
     const tgId = String(ctx.from.id);
@@ -722,44 +780,18 @@ export function createTelegramBot(
       config.claimEscrowContractId &&
       rawRecipient.startsWith("@")
     ) {
-      const recipientLive = await fetchLiveAccountBalances(
-        config,
-        resolved.address,
-        fetchFn,
-      ).catch(() => null);
-      const hasTrustline = Boolean(
-        recipientLive?.funded &&
-          recipientLive.balances.some(
-            (b) =>
-              b.assetCode.toUpperCase() === assetCode.toUpperCase() &&
-              b.assetIssuer === assetIssuer,
-          ),
-      );
-      if (recipientLive && !hasTrustline) {
-        const autoEscrowReason = recipientLive.funded ? "missing_trustline" : "unfunded_account";
-        const recipientHandle = rawRecipient.slice(1).toLowerCase();
-        const intentId = generateId("it");
-        const claimId = await deriveClaimId(intentId);
-        const escrowExpiresAt = Math.floor(Date.now() / 1000) + 86_400 * 7;
-        const { intent } = await createAndSignIntent(config, repo, {
-          intentId,
-          creatorTelegramUserId: tgId,
-          actionType: "claim",
-          chatId: String(ctx.chat.id),
-          ttlSeconds: 86_400 * 7,
-          payload: {
-            amount,
-            assetCode,
-            assetIssuer,
-            recipientUsername: recipientHandle,
-            senderLabel: username,
-            claimId,
-            escrowContractId: config.claimEscrowContractId,
-            escrowExpiresAt,
-            autoEscrowReason,
-          },
-        });
-
+      const recipientHandle = rawRecipient.slice(1).toLowerCase();
+      const autoEscrow = await createAutoEscrowClaimIntent({
+        creatorTelegramUserId: tgId,
+        chatId: String(ctx.chat.id),
+        amount,
+        assetCode,
+        assetIssuer,
+        recipientUsername: recipientHandle,
+        senderLabel: username,
+        destination: resolved.address,
+      });
+      if (autoEscrow) {
         const keyboard = appendMiniAppButton(
           new InlineKeyboard(),
           `Fund Auto-Escrow (${amount} ${assetCode})`,
@@ -767,8 +799,8 @@ export function createTelegramBot(
             isPrivateChat: ctx.chat?.type === "private",
             config,
             botUsername: ctx.me?.username,
-            intentId: intent.intentId,
-            sig: intent.hmacSig,
+            intentId: autoEscrow.intent.intentId,
+            sig: autoEscrow.intent.hmacSig,
           },
         );
         const sent = await ctx.reply(
@@ -779,11 +811,11 @@ export function createTelegramBot(
             senderLabel: username,
             recipientUsername: recipientHandle,
             network: config.network,
-            autoEscrowReason,
+            autoEscrowReason: autoEscrow.autoEscrowReason,
           }),
           { parse_mode: "HTML", reply_markup: keyboard },
         );
-        await repo.attachIntentMessageRef(intent.intentId, {
+        await repo.attachIntentMessageRef(autoEscrow.intent.intentId, {
           chatId: String(sent.chat.id),
           messageId: String(sent.message_id),
         });
@@ -1328,6 +1360,7 @@ export function createTelegramBot(
           provider: quote.provider,
           priceImpactPct: quote.priceImpactPct,
           unsignedXdr: quote.unsignedXdr,
+          ...(defaultClassic?.address ? { sourceAddress: defaultClassic.address } : {}),
         },
       });
 
@@ -1510,13 +1543,17 @@ export function createTelegramBot(
       }
 
       const recipient = await resolveRecipient(repo, rawRecipient);
-      if (!recipient.ok) {
+      const isUnregisteredHandle =
+        !recipient.ok &&
+        rawRecipient.startsWith("@") &&
+        /^@[A-Za-z0-9_]{5,32}$/.test(rawRecipient);
+      if (!recipient.ok && !isUnregisteredHandle) {
         await ctx.reply(recipient.message);
         return;
       }
 
-      let lacksTrustline = false;
-      if (recipient.address.startsWith("G")) {
+      let lacksTrustline = isUnregisteredHandle;
+      if (recipient.ok && recipient.address.startsWith("G")) {
         try {
           const recBalances = await fetchLiveAccountBalances(config, recipient.address, fetchFn);
           lacksTrustline = !recBalances.balances.some(
@@ -1530,7 +1567,9 @@ export function createTelegramBot(
       if (lacksTrustline) {
         if (!config.claimEscrowContractId) {
           await ctx.reply(
-            `Recipient lacks a <b>${escapeTelegramHtml(nftCode)}</b> trustline and Claim Escrow is not configured on <code>${networkBadge}</code>.`,
+            isUnregisteredHandle
+              ? `${escapeTelegramHtml(rawRecipient)} has not linked an AstroWallet yet and Claim Escrow is not configured on <code>${networkBadge}</code>.`
+              : `Recipient lacks a <b>${escapeTelegramHtml(nftCode)}</b> trustline and Claim Escrow is not configured on <code>${networkBadge}</code>.`,
             { parse_mode: "HTML" },
           );
           return;
@@ -1539,9 +1578,10 @@ export function createTelegramBot(
         const claimId = await deriveClaimId(intentId);
         const escrowExpiresAt = Math.floor(Date.now() / 1000) + 7 * 86_400;
         const senderLabel = ctx.from.username ? `@${ctx.from.username}` : `tg:${tgId}`;
+        const recipientLabel = recipient.ok ? recipient.label : rawRecipient;
         const recipientUsername = rawRecipient.startsWith("@")
           ? rawRecipient.slice(1).toLowerCase()
-          : recipient.label.toLowerCase();
+          : recipientLabel.toLowerCase();
         const { intent } = await createAndSignIntent(config, repo, {
           intentId,
           creatorTelegramUserId: tgId,
@@ -1555,11 +1595,13 @@ export function createTelegramBot(
             amount: "0.0000001",
             assetCode: nftCode,
             assetIssuer: nftIssuer,
-            destination: recipient.address,
-            recipientLabel: recipient.label,
+            ...(recipient.ok ? { destination: recipient.address } : {}),
+            recipientLabel,
             recipientUsername,
             senderLabel,
-            autoEscrowReason: `Recipient lacks a ${nftCode} NFT trustline — routed to Claim Escrow (zero op_no_trust).`,
+            autoEscrowReason: isUnregisteredHandle
+              ? `${recipientLabel} has not linked AstroWallet yet — routed to Claim Escrow.`
+              : `Recipient lacks a ${nftCode} NFT trustline — routed to Claim Escrow (zero op_no_trust).`,
           },
         });
         const keyboard = appendMiniAppButton(
@@ -1576,8 +1618,8 @@ export function createTelegramBot(
         const sent = await ctx.reply(
           [
             `🖼️ <b>NFT Claim Escrow</b> · <code>${networkBadge}</code>`,
-            `Sending NFT <b>${escapeTelegramHtml(nftCode)}</b> (<code>0.0000001</code>) to <b>${escapeTelegramHtml(recipient.label)}</b>`,
-            `<i>Recipient lacks a trustline — routed via Zero-op_no_trust Escrow.</i>`,
+            `Sending NFT <b>${escapeTelegramHtml(nftCode)}</b> (<code>0.0000001</code>) to <b>${escapeTelegramHtml(recipientLabel)}</b>`,
+            `<i>${isUnregisteredHandle ? "Recipient not yet linked — routed via Claim Link Escrow." : "Recipient lacks a trustline — routed via Zero-op_no_trust Escrow."}</i>`,
           ].join("\n"),
           { parse_mode: "HTML", reply_markup: keyboard },
         );
@@ -1585,6 +1627,10 @@ export function createTelegramBot(
           chatId: String(sent.chat.id),
           messageId: String(sent.message_id),
         });
+        return;
+      }
+
+      if (!recipient.ok) {
         return;
       }
 
@@ -1673,9 +1719,66 @@ export function createTelegramBot(
     if (verb === "pay" && parts.length >= 4) {
       const amount = parsePositiveAmount(parts[1] ?? "");
       const assetRes = await resolveCommandAsset(parts[2] ?? "", undefined);
+      const rawInlineRecipient = (parts[3] ?? "").trim();
       if (amount && assetRes.ok) {
-        const resolved = await resolveRecipient(repo, parts[3] ?? "");
+        const resolved = await resolveRecipient(repo, rawInlineRecipient);
         if (resolved.ok) {
+          if (
+            assetRes.assetIssuer &&
+            resolved.address.startsWith("G") &&
+            config.claimEscrowContractId &&
+            rawInlineRecipient.startsWith("@")
+          ) {
+            const recipientHandle = rawInlineRecipient.slice(1).toLowerCase();
+            const autoEscrow = await createAutoEscrowClaimIntent({
+              creatorTelegramUserId: tgId,
+              amount,
+              assetCode: assetRes.assetCode,
+              assetIssuer: assetRes.assetIssuer,
+              recipientUsername: recipientHandle,
+              senderLabel: username,
+              destination: resolved.address,
+            });
+            if (autoEscrow) {
+              const keyboard = appendMiniAppButton(
+                new InlineKeyboard(),
+                `Fund Auto-Escrow (${amount} ${assetRes.assetCode})`,
+                {
+                  isPrivateChat: false,
+                  config,
+                  botUsername: ctx.me?.username,
+                  intentId: autoEscrow.intent.intentId,
+                  sig: autoEscrow.intent.hmacSig,
+                },
+              );
+              await ctx.answerInlineQuery(
+                [
+                  {
+                    type: "article",
+                    id: autoEscrow.intent.intentId,
+                    title: `Auto-Escrow ${amount} ${assetRes.assetCode} to ${resolved.label}`,
+                    description: `Zero op_no_trust Claim Escrow (${config.network})`,
+                    input_message_content: {
+                      message_text: formatClaimLinkCard({
+                        status: "pending_funding",
+                        amount,
+                        assetCode: assetRes.assetCode,
+                        senderLabel: username,
+                        recipientUsername: recipientHandle,
+                        network: config.network,
+                        autoEscrowReason: autoEscrow.autoEscrowReason,
+                      }),
+                      parse_mode: "HTML",
+                    },
+                    reply_markup: keyboard,
+                  },
+                ],
+                { cache_time: 0, is_personal: true },
+              );
+              return;
+            }
+          }
+
           const now = Math.floor(Date.now() / 1000);
           const payload = {
             amount,

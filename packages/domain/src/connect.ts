@@ -2,7 +2,12 @@ import { z } from "zod";
 import { AccountKindSchema, StellarAddressSchema } from "./accounts.js";
 import type { StellarNetwork } from "./config.js";
 
-export const ConnectActionTypeSchema = z.enum(["auth", "sign_xdr", "sign_message"]);
+export const ConnectActionTypeSchema = z.enum([
+  "auth",
+  "sign_xdr",
+  "sign_message",
+  "sign_auth_entry",
+]);
 export const ConnectRequestStatusSchema = z.enum([
   "pending",
   "approved",
@@ -99,6 +104,14 @@ export const ConnectAccountSummarySchema = z.object({
   isDefault: z.boolean(),
 });
 
+export const ConnectSignAuthEntryPayloadSchema = z.object({
+  authEntryXdr: z.string().trim().min(16).max(32_768),
+  entrySha256: z.string().regex(/^[a-f0-9]{64}$/i),
+  humanSummary: z.string().trim().min(1).max(400),
+  subAction: z.string().trim().max(64).optional(),
+  sourceAddress: StellarAddressSchema.optional(),
+});
+
 export const ConnectResultSchema = z.object({
   status: z.enum(["approved", "rejected"]),
   reason: z.string().trim().max(280).optional(),
@@ -109,6 +122,7 @@ export const ConnectResultSchema = z.object({
   signedMessage: z.string().min(1).max(2048).optional(),
   signatureBase64: z.string().min(16).max(256).optional(),
   signedXdr: z.string().min(16).max(49_152).optional(),
+  signedAuthEntry: z.string().min(16).max(49_152).optional(),
   txHash: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
   ledger: z.number().int().positive().optional(),
   completedAt: z.number().int().positive(),
@@ -121,6 +135,7 @@ export type ConnectAppMetadata = z.infer<typeof ConnectAppMetadataSchema>;
 export type ConnectAuthPayload = z.infer<typeof ConnectAuthPayloadSchema>;
 export type ConnectSignMessagePayload = z.infer<typeof ConnectSignMessagePayloadSchema>;
 export type ConnectSignXdrPayload = z.infer<typeof ConnectSignXdrPayloadSchema>;
+export type ConnectSignAuthEntryPayload = z.infer<typeof ConnectSignAuthEntryPayloadSchema>;
 export type ConnectAccountSummary = z.infer<typeof ConnectAccountSummarySchema>;
 export type ConnectResult = z.infer<typeof ConnectResultSchema>;
 

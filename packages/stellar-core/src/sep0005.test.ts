@@ -1,11 +1,12 @@
 import { sha256 } from "@noble/hashes/sha2.js";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Address, Keypair, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import {
   deriveMultipleAccounts,
   deriveStellarAccount,
   generateMnemonicPhrase,
   signChallengeMessage,
+  signSorobanAuthEntry,
   validateMnemonicPhrase,
 } from "./sep0005.js";
 
@@ -72,6 +73,35 @@ describe("SEP-0005 BIP-39 / SLIP-0010 Ed25519 derivation", () => {
     const digest = sha256(new TextEncoder().encode(`Stellar Signed Message:\n${message}`));
     const verifier = Keypair.fromPublicKey(account.publicKey);
     expect(verifier.verify(digest, sigBytes)).toBe(true);
+    account.zeroize();
+  });
+
+  it("signs Soroban HashIdPreimage auth entries for SEP-60", async () => {
+    const account = deriveStellarAccount(SEP0005_MNEMONIC, 0);
+    const kp = account.toKeypair();
+    const contractId = "CA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJUWDA";
+    const preimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+      new xdr.HashIdPreimageSorobanAuthorization({
+        networkId: Buffer.from(sha256(new TextEncoder().encode("Test SDF Network ; September 2015"))),
+        nonce: xdr.Int64.fromString("42"),
+        signatureExpirationLedger: 12345,
+        invocation: new xdr.SorobanAuthorizedInvocation({
+          function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+            new xdr.InvokeContractArgs({
+              contractAddress: new Address(contractId).toScAddress(),
+              functionName: "transfer",
+              args: [],
+            }),
+          ),
+          subInvocations: [],
+        }),
+      }),
+    );
+    const signed = await signSorobanAuthEntry(kp, preimage.toXDR("base64"));
+    expect(signed.kind).toBe("hash_id_preimage");
+    expect(signed.signerAddress).toBe(account.publicKey);
+    const sigBytes = Uint8Array.from(atob(signed.signedAuthEntry), (c) => c.charCodeAt(0));
+    expect(kp.verify(Buffer.from(sha256(preimage.toXDR())), Buffer.from(sigBytes))).toBe(true);
     account.zeroize();
   });
 });

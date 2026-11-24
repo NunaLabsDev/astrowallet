@@ -1,5 +1,5 @@
 export type AstroNetwork = "testnet" | "mainnet";
-export type ConnectActionType = "auth" | "sign_xdr" | "sign_message";
+export type ConnectActionType = "auth" | "sign_xdr" | "sign_message" | "sign_auth_entry";
 export type ConnectRequestStatus = "pending" | "approved" | "rejected" | "expired";
 export type ConnectTrustTier = "official" | "verified" | "external";
 
@@ -48,6 +48,7 @@ export interface ConnectResult {
   signedMessage?: string | undefined;
   signatureBase64?: string | undefined;
   signedXdr?: string | undefined;
+  signedAuthEntry?: string | undefined;
   txHash?: string | undefined;
   ledger?: number | undefined;
   completedAt: number;
@@ -133,6 +134,21 @@ export interface SignMessageResult {
   address: string;
   message: string;
   signatureBase64: string;
+  completedAt: number;
+}
+
+export interface SignAuthEntryOptions extends WaitOptions {
+  humanSummary?: string | undefined;
+  subAction?: string | undefined;
+  sourceAddress?: string | undefined;
+  ttlSeconds?: number | undefined;
+}
+
+export interface SignAuthEntryResult {
+  requestId: string;
+  network: AstroNetwork;
+  address: string;
+  signedAuthEntry: string;
   completedAt: number;
 }
 

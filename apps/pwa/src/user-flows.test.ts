@@ -388,4 +388,47 @@ describe("PWA Multi-User Client Flows & Form Validators", () => {
       }).required,
     ).toBe(true);
   });
+
+  it("isolates Mainnet OFT & #ACTHUB community catalogs from Testnet", () => {
+    const MAINNET_USDE_ISSUER = "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47";
+    const MAINNET_LIBRE_ISSUER = "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY";
+
+    expect(
+      classifyTokenTrust({
+        assetCode: "USDE",
+        assetIssuer: MAINNET_USDE_ISSUER,
+        verifiedAssets: [],
+        network: "mainnet",
+      }).status,
+    ).toBe("official");
+
+    expect(
+      classifyTokenTrust({
+        assetCode: "USDE",
+        assetIssuer: MAINNET_USDE_ISSUER,
+        verifiedAssets: [],
+        network: "testnet",
+      }).status,
+    ).toBe("unverified");
+
+    expect(
+      classifyTokenTrust({
+        assetCode: "LIBRE",
+        assetIssuer: MAINNET_LIBRE_ISSUER,
+        verifiedAssets: [],
+        network: "mainnet",
+      }).status,
+    ).toBe("official");
+
+    const communityCatalog = buildTokenCatalog({
+      balances: [],
+      verifiedAssets: [],
+      horizonResults: [],
+      filter: "community",
+      query: "",
+      includeCanonicalOfts: true,
+      includeCommunityHub: true,
+    });
+    expect(communityCatalog.map((c) => c.assetCode)).toEqual(["LIBRE", "xLMNR", "SVR"]);
+  });
 });

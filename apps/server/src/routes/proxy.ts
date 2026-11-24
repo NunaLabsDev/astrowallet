@@ -28,7 +28,7 @@ import {
   type MarketTimeframe,
 } from "../market-horizon.js";
 import type { KVNamespace } from "@cloudflare/workers-types";
-import { FeeBumpTransaction, Keypair, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
+import { Asset, FeeBumpTransaction, Keypair, Transaction, TransactionBuilder } from "@stellar/stellar-sdk";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
@@ -57,7 +57,7 @@ const SwapQuoteBodySchema = z.object({
   slippageBps: z.number().int().min(1).max(5000).default(50),
   sourceAddress: z
     .string()
-    .regex(/^G[A-Z2-7]{55}$/)
+    .regex(/^[GC][A-Z2-7]{55}$/)
     .optional(),
 });
 
@@ -80,6 +80,41 @@ const BLOCKED_DOMAIN_SUFFIXES = [
   ".invalid",
 ];
 const STELLAR_TOML_MAX_BYTES = 128 * 1024;
+
+async function readBoundedResponseText(res: Response, maxBytes: number): Promise<string> {
+  const declared = Number(res.headers.get("Content-Length") ?? "0");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`Upstream response exceeds ${maxBytes} bytes limit`);
+  }
+  if (!res.body) {
+    const text = await res.text();
+    if (new TextEncoder().encode(text).length > maxBytes) {
+      throw new Error(`Upstream response exceeds ${maxBytes} bytes limit`);
+    }
+    return text;
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new Error(`Upstream response exceeds ${maxBytes} bytes limit`);
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
 
 export function isSafePublicDomain(domain: string): boolean {
   if (!SAFE_PUBLIC_DOMAIN_REGEX.test(domain)) return false;
@@ -514,10 +549,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
                 image = gwUrl;
                 break;
               }
-              const len = Number(ipfsRes.headers.get("Content-Length") ?? "0");
-              if (Number.isFinite(len) && len > 65536) continue;
-              const text = await ipfsRes.text();
-              if (text.length > 65536) continue;
+              const text = await readBoundedResponseText(ipfsRes, 65_536);
               const meta = JSON.parse(text) as {
                 name?: unknown;
                 description?: unknown;
@@ -560,7 +592,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         return {
           code,
           issuer,
-          ...(homeDomain ? { homeDomain } : {}),
+          ...(homeDomain && isSafePublicDomain(homeDomain) ? { homeDomain } : {}),
           ...(ipfsHash ? { ipfsHash } : {}),
           ...(name ? { name } : {}),
           ...(description ? { description } : {}),
@@ -1071,7 +1103,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     if (!res.ok) {
       throw new Error(`Failed to fetch stellar.toml from ${cleanDomain} (${res.status})`);
     }
-    const toml = (await res.text()).slice(0, STELLAR_TOML_MAX_BYTES);
+    const toml = await readBoundedResponseText(res, STELLAR_TOML_MAX_BYTES);
     const webAuthMatch = toml.match(/^\s*WEB_AUTH_ENDPOINT\s*=\s*"([^"]+)"/m);
     const sep24Match = toml.match(/^\s*TRANSFER_SERVER_SEP0024\s*=\s*"([^"]+)"/m);
     const signingKeyMatch = toml.match(/^\s*SIGNING_KEY\s*=\s*"([^"]+)"/m);
@@ -1081,9 +1113,16 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     if (!webAuthEndpoint.startsWith("https://") || !transferServerSep24.startsWith("https://")) {
       throw new Error(`Anchor ${cleanDomain} missing HTTPS WEB_AUTH_ENDPOINT or TRANSFER_SERVER_SEP0024`);
     }
-    const webAuthHost = new URL(webAuthEndpoint).hostname.toLowerCase();
-    const sep24Host = new URL(transferServerSep24).hostname.toLowerCase();
-    if (!isSafePublicDomain(webAuthHost) || !isSafePublicDomain(sep24Host)) {
+    const webAuthUrl = new URL(webAuthEndpoint);
+    const sep24Url = new URL(transferServerSep24);
+    const webAuthHost = webAuthUrl.hostname.toLowerCase();
+    const sep24Host = sep24Url.hostname.toLowerCase();
+    if (
+      webAuthUrl.port ||
+      sep24Url.port ||
+      !isSafePublicDomain(webAuthHost) ||
+      !isSafePublicDomain(sep24Host)
+    ) {
       throw new Error("Anchor endpoint hostname failed SSRF check");
     }
 
@@ -1160,17 +1199,21 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
           return c.json({ error: "Refusing to cosign non-manageData SEP-10 challenge" }, 502);
         }
         const clientKp = Keypair.fromSecret(config.sep10ClientSigningSecret);
-        if (endpoints.signingKey && /^G[A-Z2-7]{55}$/.test(endpoints.signingKey)) {
-          const anchorKp = Keypair.fromPublicKey(endpoints.signingKey);
-          const anchorSigned = parsed.signatures.some((decSig) =>
-            anchorKp.verify(
-              Buffer.from(parsed.hash()),
-              decSig.signature as unknown as Buffer,
-            ),
+        if (!endpoints.signingKey || !/^G[A-Z2-7]{55}$/.test(endpoints.signingKey)) {
+          return c.json(
+            { error: "Anchor stellar.toml missing valid SIGNING_KEY for SEP-10 challenge verification" },
+            502,
           );
-          if (!anchorSigned) {
-            return c.json({ error: "SEP-10 challenge is not signed by anchor SIGNING_KEY" }, 502);
-          }
+        }
+        const anchorKp = Keypair.fromPublicKey(endpoints.signingKey);
+        const anchorSigned = parsed.signatures.some((decSig) =>
+          anchorKp.verify(
+            Buffer.from(parsed.hash()),
+            decSig.signature as unknown as Buffer,
+          ),
+        );
+        if (!anchorSigned) {
+          return c.json({ error: "SEP-10 challenge is not signed by anchor SIGNING_KEY" }, 502);
         }
         const firstOp = parsed.operations[0];
         if (!firstOp || firstOp.source !== parsedAcct.data) {
@@ -1308,6 +1351,21 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     }
 
     const rawAssets = (c.req.query("assets") ?? "XLM,USDC,USDT0,USDE,SUSDE,EURC,BTC,ETH").trim();
+    const CANONICAL_ORACLE_ISSUERS: Record<"mainnet" | "testnet", Record<string, string>> = {
+      mainnet: {
+        USDC: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+        EURC: "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2",
+        USDT0: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q",
+        USDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+        SUSDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+        LIBRE: "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY",
+        XLMNR: "GDKA6WVMFSA73BMEVKPO6WXSSWP4MPRBDJVSXLLSEVIEVH226L5RJ7NL",
+        SVR: "GAGORNGHVJP5X2QO2NNIIDXKLNHVWJWXC5S73EZNCHOALGFTB2V25YGF",
+      },
+      testnet: {
+        USDC: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+      },
+    };
     const parsedAssets: Sep40PriceRequestAsset[] = [];
     const seenKeys = new Set<string>();
     for (const part of rawAssets.split(",").slice(0, 16)) {
@@ -1315,11 +1373,27 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       if (!clean) continue;
       const [symPart, contractPart] = clean.split(":");
       const symbol = (symPart ?? "").trim().slice(0, 16);
-      const contractId =
+      const upperSym = symbol.toUpperCase();
+      let contractId =
         contractPart && /^C[A-Z2-7]{55}$/.test(contractPart.trim())
           ? contractPart.trim()
           : undefined;
-      const key = symbol ? symbol.toUpperCase() : contractId;
+      if (!contractId && upperSym) {
+        try {
+          if (upperSym === "XLM" || upperSym === "NATIVE") {
+            contractId = Asset.native().contractId(config.networkPassphrase);
+          } else {
+            const issuer = CANONICAL_ORACLE_ISSUERS[config.network][upperSym];
+            if (issuer) {
+              const assetCode = upperSym === "XLMNR" ? "xLMNR" : upperSym;
+              contractId = new Asset(assetCode, issuer).contractId(config.networkPassphrase);
+            }
+          }
+        } catch {
+          // Leave contractId undefined and fall back to Asset::Other(symbol)
+        }
+      }
+      const key = symbol ? upperSym : contractId;
       if (!key || seenKeys.has(key)) continue;
       seenKeys.add(key);
       parsedAssets.push({

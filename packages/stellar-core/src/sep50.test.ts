@@ -40,4 +40,15 @@ describe("SEP-50 Soroban NFT token_uri parser", () => {
       "https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/9.json",
     );
   });
+
+  it("rejects base64 SVG data URIs containing <script> or inline event handlers", () => {
+    const evilSvg = Buffer.from('<svg onload="alert(1)"><circle/></svg>', "utf8").toString("base64");
+    const json = JSON.stringify({
+      name: "Event Handler Attack",
+      image: `data:image/svg+xml;base64,${evilSvg}`,
+    });
+    const parsed = parseSep50TokenUri(SAMPLE_CONTRACT, 10, json);
+    expect(parsed.name).toBe("Event Handler Attack");
+    expect(parsed.image).toBeUndefined();
+  });
 });

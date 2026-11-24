@@ -33,6 +33,7 @@ import {
   sendTelegramMessage,
   type TelegramApiDeps,
 } from "../telegram-api.js";
+import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
 import {
   ConnectAccountSubmissionSchema,
   verifyConnectAccountSubmissions,
@@ -70,7 +71,7 @@ const ConfirmIntentBodySchema = z.object({
   txHash: z.string().regex(/^[a-fA-F0-9]{64}$/),
   stage: z.enum(["funded", "claimed", "cancelled", "refunded"]).optional(),
   payerAddress: z.string().min(8).max(100).optional(),
-  senderAddress: ClassicAddressSchema.optional(),
+  senderAddress: z.string().regex(/^[GC][A-Z2-7]{55}$/).optional(),
   expiresAt: z.number().int().positive().optional(),
 });
 
@@ -359,6 +360,18 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
     const config = c.get("config");
     const repo = c.get("repo");
     const intentId = c.req.param("intentId");
+
+    const connectLimit = await checkRateLimit({
+      repository: repo,
+      cache: c.env.CACHE,
+      scope: `intent_connect:${intentId}`,
+      clientKey: clientKeyFromHeaders(c.req.raw.headers),
+      limitPerMin: 10,
+    });
+    if (!connectLimit.allowed) {
+      c.header("Retry-After", String(connectLimit.retryAfterSeconds));
+      return c.json({ error: "Too many connect attempts; wait a minute before retrying" }, 429);
+    }
 
     let parsedBody: z.infer<typeof ConnectIntentBodySchema>;
     try {

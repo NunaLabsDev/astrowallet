@@ -78,13 +78,16 @@ export function ReceiveSheet({
         if (!cancelled) setQrDataUrl(url);
       })
       .catch(() => {
-        if (!cancelled) setQrDataUrl(null);
+        if (!cancelled) {
+          setQrDataUrl(null);
+          showToast("Unable to generate QR code preview", "error");
+        }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [activePayload]);
+  }, [activePayload, showToast]);
 
   if (!activeAccount) return null;
 
@@ -96,6 +99,7 @@ export function ReceiveSheet({
     } else {
       showToast("Clipboard copy blocked by WebView", "error");
     }
+    return ok;
   };
 
   const handleShare = async () => {
@@ -110,8 +114,10 @@ export function ReceiveSheet({
         // Fall through to copy on dismiss
       }
     }
-    await handleCopy();
-    showToast("Payment details copied to clipboard", "info");
+    const ok = await handleCopy();
+    if (ok) {
+      showToast("Payment details copied to clipboard", "info");
+    }
   };
 
   return (

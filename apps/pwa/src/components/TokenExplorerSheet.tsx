@@ -1409,7 +1409,7 @@ export function TokenExplorerSheet({
 
             <div className="aw-seal-row">
               <span>Home Domain (stellar.toml)</span>
-              {displayDomain ? (
+              {displayDomain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(displayDomain) ? (
                 <button
                   type="button"
                   className="aw-mini-chip"
@@ -1418,6 +1418,8 @@ export function TokenExplorerSheet({
                 >
                   <code>{displayDomain} ↗</code>
                 </button>
+              ) : displayDomain ? (
+                <code>{displayDomain}</code>
               ) : (
                 <code>Not declared on issuer</code>
               )}

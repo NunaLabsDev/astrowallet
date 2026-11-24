@@ -664,6 +664,17 @@ export function tgCloudStorageRemove(key: string): Promise<boolean> {
 export function openExternalUrl(url: string): void {
   const trimmed = url.trim();
   if (!trimmed) return;
+  try {
+    const parsed = new URL(trimmed);
+    const isLocalHttp =
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1");
+    if (parsed.protocol !== "https:" && !isLocalHttp) {
+      return;
+    }
+  } catch {
+    return;
+  }
   const wa = getTelegramWebApp();
   if (wa?.openLink) {
     try {

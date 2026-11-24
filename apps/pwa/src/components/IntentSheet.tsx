@@ -22,12 +22,13 @@ import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
 import { requiresHighValueReauth } from "./flow-validators.js";
 import { HighValueReauthGate } from "./HighValueReauthGate.js";
+import {
+  clearCachedClaimSecret,
+  parseIntentRouteFromLocation,
+  type ActiveIntentRoute,
+} from "./deep-link-routes.js";
 
-export interface ActiveIntentRoute {
-  intentId: string;
-  sig: string;
-  claimSecretHex?: string | undefined;
-}
+export { parseIntentRouteFromLocation, type ActiveIntentRoute };
 
 interface RemoteIntentResponse {
   intentId: string;
@@ -80,33 +81,6 @@ interface RemoteIntentResponse {
   };
   txHash?: string | undefined;
   expiresAt: number;
-}
-
-let cachedClaimSecret: { pathKey: string; secretHex: string } | null = null;
-
-export function parseIntentRouteFromLocation(): ActiveIntentRoute | null {
-  if (typeof window === "undefined") return null;
-  const match = window.location.pathname.match(/^\/intent\/([A-Za-z0-9_-]+)$/);
-  if (!match?.[1]) return null;
-  const sig = new URLSearchParams(window.location.search).get("sig") ?? "";
-  if (!sig) return null;
-
-  const pathKey = `${window.location.pathname}${window.location.search}`;
-  const hashMatch = window.location.hash.match(/^#k=([0-9a-fA-F]{64})(?:&.*)?$/);
-  let claimSecretHex: string | undefined;
-  if (hashMatch?.[1]) {
-    claimSecretHex = hashMatch[1].toLowerCase();
-    cachedClaimSecret = { pathKey, secretHex: claimSecretHex };
-    window.history.replaceState({}, "", pathKey);
-  } else if (cachedClaimSecret?.pathKey === pathKey) {
-    claimSecretHex = cachedClaimSecret.secretHex;
-  }
-
-  return {
-    intentId: match[1],
-    sig,
-    ...(claimSecretHex ? { claimSecretHex } : {}),
-  };
 }
 
 export function IntentSheet({
@@ -689,7 +663,7 @@ export function IntentSheet({
         payerAddress: activeAccount.address,
       });
 
-      cachedClaimSecret = null;
+      clearCachedClaimSecret();
       setCompletedMsg(
         `Claimed ${intent.payload.amount ?? ""} ${intent.payload.assetCode ?? "XLM"} into ${activeAccount.label} (${res.hash.slice(0, 8)}…${res.hash.slice(-8)}).`,
       );
@@ -706,7 +680,7 @@ export function IntentSheet({
       return;
     }
     const isExpired =
-      Math.floor(Date.now() / 1000) >= (intent.payload.escrowExpiresAt ?? intent.expiresAt);
+      Math.floor(Date.now() / 1000) > (intent.payload.escrowExpiresAt ?? intent.expiresAt);
     setBusy(true);
     setError(null);
     try {
@@ -729,7 +703,7 @@ export function IntentSheet({
         payerAddress: activeAccount.address,
       });
 
-      cachedClaimSecret = null;
+      clearCachedClaimSecret();
       setCompletedMsg(
         `${isExpired ? "Refunded expired escrow" : "Cancelled escrow"} (${res.hash.slice(0, 8)}…${res.hash.slice(-8)}). Telegram chat card updated live!`,
       );
@@ -777,7 +751,9 @@ export function IntentSheet({
     setBusy(true);
     setError(null);
     try {
-      const res = await signAndSubmitRawXdrWithShield(intent.payload.unsignedXdr, true, {
+      const allowWarningFlag =
+        destScanReport?.verdict === "warning" ? warningAcknowledged : false;
+      const res = await signAndSubmitRawXdrWithShield(intent.payload.unsignedXdr, allowWarningFlag, {
         intentId: route.intentId,
         sig: route.sig,
       });
@@ -1233,7 +1209,7 @@ export function IntentSheet({
                     >
                       {busy
                         ? "Processing Escrow Reclaim..."
-                        : Math.floor(Date.now() / 1000) >= (intent.payload.escrowExpiresAt ?? intent.expiresAt)
+                        : Math.floor(Date.now() / 1000) > (intent.payload.escrowExpiresAt ?? intent.expiresAt)
                           ? "Reclaim Expired Escrow"
                           : "Cancel & Reclaim Escrow"}
                     </button>

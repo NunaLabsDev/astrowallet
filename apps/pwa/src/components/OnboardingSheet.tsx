@@ -639,13 +639,14 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
               <button
                 type="button"
                 className="aw-btn-secondary"
+                disabled={checkingCloudBackup}
                 onClick={() => {
                   setDismissedCloudRestore(false);
                   void refreshCloudBackup();
                 }}
               >
                 <IconRefresh size={14} />
-                <span>Retry Loading Telegram Backup</span>
+                <span>{checkingCloudBackup ? "Checking Backup…" : "Retry Loading Telegram Backup"}</span>
               </button>
             </div>
           )}
@@ -655,6 +656,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
               type="button"
               className="aw-btn-gold"
               style={{ width: "100%" }}
+              disabled={checkingCloudBackup}
               onClick={() => {
                 triggerTelegramHaptic("selection");
                 setDismissedCloudRestore(false);
@@ -667,7 +669,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
               }}
             >
               <IconLock size={15} />
-              <span>Restore Your Existing Telegram Backup</span>
+              <span>{checkingCloudBackup ? "Checking Backup…" : "Restore Your Existing Telegram Backup"}</span>
             </button>
           )}
 

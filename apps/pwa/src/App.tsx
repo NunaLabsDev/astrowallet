@@ -34,7 +34,6 @@ function formatAssetBalance(raw: string): string {
   }
   return num.toFixed(7).replace(/\.?0+$/, "");
 }
-import { AccountSwitcher } from "./components/AccountSwitcher.js";
 import { partitionWalletBalances } from "./components/asset-classification.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
 import { AstroWalletLogo } from "./components/AstroWalletLogo.js";
@@ -75,19 +74,13 @@ import type { SelectedTokenTarget } from "./components/TokenExplorerSheet.js";
 import { TokenBadge } from "./components/TokenBadge.js";
 import { classifyTokenTrust } from "./components/token-catalog.js";
 import {
-  ConnectRequestSheet,
   parseConnectRouteFromLocation,
-  type ActiveConnectRoute,
-} from "./components/ConnectRequestSheet.js";
-import {
-  IntentSheet,
   parseIntentRouteFromLocation,
+  type ActiveConnectRoute,
   type ActiveIntentRoute,
-} from "./components/IntentSheet.js";
+} from "./components/deep-link-routes.js";
 import { ModalDrawer } from "./components/ModalDrawer.js";
-import { OnboardingSheet } from "./components/OnboardingSheet.js";
 import { formatSeedBackupFilename } from "./components/onboarding-helpers.js";
-import { UnlockSheet } from "./components/UnlockSheet.js";
 import { loadPwaEnv } from "./config/env.js";
 import { TelegramProvider, useTelegram } from "./state/telegram-context.js";
 import { WalletProvider, useWallet } from "./state/wallet-context.js";
@@ -97,6 +90,22 @@ import {
   triggerTelegramHaptic,
   useTelegramBackButton,
 } from "./telegram/webapp.js";
+
+const AccountSwitcher = lazy(() =>
+  import("./components/AccountSwitcher.js").then((m) => ({ default: m.AccountSwitcher })),
+);
+const ConnectRequestSheet = lazy(() =>
+  import("./components/ConnectRequestSheet.js").then((m) => ({ default: m.ConnectRequestSheet })),
+);
+const IntentSheet = lazy(() =>
+  import("./components/IntentSheet.js").then((m) => ({ default: m.IntentSheet })),
+);
+const OnboardingSheet = lazy(() =>
+  import("./components/OnboardingSheet.js").then((m) => ({ default: m.OnboardingSheet })),
+);
+const UnlockSheet = lazy(() =>
+  import("./components/UnlockSheet.js").then((m) => ({ default: m.UnlockSheet })),
+);
 
 const ClassicToolsSheet = lazy(() =>
   import("./components/ClassicToolsSheet.js").then((m) => ({ default: m.ClassicToolsSheet })),
@@ -868,16 +877,28 @@ function WalletShell({
     }
   };
 
-  const handleQuickClaimFirst = async () => {
-    const first = claimableBalances[0];
-    if (!first) return;
+  const handleQuickClaimById = async (balanceId: string) => {
     setActionBusy(true);
     try {
-      await claimBalanceById(first.id);
+      await claimBalanceById(balanceId);
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to claim balance", "error");
     } finally {
       setActionBusy(false);
+    }
+  };
+
+  const handleQuickClaimFirst = async () => {
+    const first = claimableBalances[0];
+    if (!first) return;
+    await handleQuickClaimById(first.id);
+  };
+
+  const handleFundActiveTestnet = async () => {
+    try {
+      await fundActiveTestnetAccount();
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : "Friendbot funding failed", "error");
     }
   };
 
@@ -1495,11 +1516,15 @@ function WalletShell({
             )}
 
             {intentRoute && (
-              <IntentSheet route={intentRoute} onDismiss={onClearIntent} />
+              <Suspense fallback={<section className="glass-sheet" style={{ textAlign: "center", padding: 24 }}>Opening signed request…</section>}>
+                <IntentSheet route={intentRoute} onDismiss={onClearIntent} />
+              </Suspense>
             )}
 
             {connectRoute && (
-              <ConnectRequestSheet route={connectRoute} onDismiss={onClearConnect} />
+              <Suspense fallback={<section className="glass-sheet" style={{ textAlign: "center", padding: 24 }}>Opening AstroConnect request…</section>}>
+                <ConnectRequestSheet route={connectRoute} onDismiss={onClearConnect} />
+              </Suspense>
             )}
 
             {vaultStatus === "loading" && !isExpressModeActive && (
@@ -1510,19 +1535,27 @@ function WalletShell({
 
             {vaultStatus === "uninitialized" && (
               <div className="aw-center-stage">
-                <OnboardingSheet onRegisterBackHandler={registerOnboardingBack} />
+                <Suspense fallback={<section className="glass-sheet" style={{ textAlign: "center", padding: 24 }}>Preparing AstroWallet setup…</section>}>
+                  <OnboardingSheet onRegisterBackHandler={registerOnboardingBack} />
+                </Suspense>
               </div>
             )}
 
             {vaultStatus === "locked" && !isExpressModeActive && (
               <div className="aw-center-stage">
-                <UnlockSheet />
+                <Suspense fallback={<section className="glass-sheet" style={{ textAlign: "center", padding: 24 }}>Preparing secure unlock…</section>}>
+                  <UnlockSheet />
+                </Suspense>
               </div>
             )}
 
             {vaultStatus === "unlocked" && activeAccount && !isExpressModeActive && (
               <>
-                {activeTab !== "accounts" && <AccountSwitcher />}
+                {activeTab !== "accounts" && (
+                  <Suspense fallback={null}>
+                    <AccountSwitcher />
+                  </Suspense>
+                )}
 
                 {cloudPullPinNeeded && cloudBackupJson && (
                   <form
@@ -1668,7 +1701,7 @@ function WalletShell({
                             className="aw-btn-gold"
                             style={{ width: "100%" }}
                             disabled={loadingChain}
-                            onClick={() => void fundActiveTestnetAccount()}
+                            onClick={() => void handleFundActiveTestnet()}
                           >
                             <IconZap size={16} />
                             <span>
@@ -1697,7 +1730,7 @@ function WalletShell({
                             disabled={actionBusy}
                             onClick={() => void handleQuickClaimFirst()}
                           >
-                            Claim First
+                            {actionBusy ? "Claiming…" : "Claim First"}
                           </button>
                         </div>
                       )}
@@ -1718,7 +1751,7 @@ function WalletShell({
                             disabled={actionBusy}
                             onClick={() => void handleQuickReclaim()}
                           >
-                            Reclaim XLM
+                            {actionBusy ? "Reclaiming…" : "Reclaim XLM"}
                           </button>
                         </div>
                       )}
@@ -2394,10 +2427,10 @@ function WalletShell({
                                     type="button"
                                     className="aw-btn-gold"
                                     disabled={loadingChain}
-                                    onClick={() => void fundActiveTestnetAccount()}
+                                    onClick={() => void handleFundActiveTestnet()}
                                   >
                                     <IconZap size={15} />
-                                    <span>Fund 10,000 XLM</span>
+                                    <span>{loadingChain ? "Funding…" : "Fund 10,000 XLM"}</span>
                                   </button>
                                 )}
                             </div>
@@ -2578,9 +2611,9 @@ function WalletShell({
                                 type="button"
                                 className="aw-mini-chip"
                                 disabled={actionBusy}
-                                onClick={() => void claimBalanceById(cb.id)}
+                                onClick={() => void handleQuickClaimById(cb.id)}
                               >
-                                Claim
+                                {actionBusy ? "Claiming…" : "Claim"}
                               </button>
                             </div>
                           ))
@@ -3921,7 +3954,7 @@ function MiniAppGate({
   onSwitchNetwork?: ((next: StellarNetwork) => void) | undefined;
   canSwitchNetwork?: boolean | undefined;
 }) {
-  const { allowed, authStatus, authError, tgUser, refreshTelegramAuth } = useTelegram();
+  const { allowed, authStatus, authError, tgUser, sessionToken, refreshTelegramAuth } = useTelegram();
 
   if (!allowed) {
     return (
@@ -3935,7 +3968,12 @@ function MiniAppGate({
   }
 
   return (
-    <WalletProvider key={tgUser?.id ?? "dev"} storageScopeId={tgUser?.id} config={config}>
+    <WalletProvider
+      key={tgUser?.id ?? "dev"}
+      storageScopeId={tgUser?.id}
+      sessionToken={sessionToken}
+      config={config}
+    >
       <RoutedExperience
         onSwitchNetwork={onSwitchNetwork}
         canSwitchNetwork={canSwitchNetwork}

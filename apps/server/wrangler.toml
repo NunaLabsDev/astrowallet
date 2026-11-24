@@ -84,6 +84,9 @@ class_name = "ChainWatcherDO"
 name = "CHANNEL_POOL"
 class_name = "ChannelPoolDO"
 
+[env.testnet.triggers]
+crons = ["0 */6 * * *"]
+
 [[env.testnet.services]]
 binding = "ASTRODEX"
 service = "astrodex-server"
@@ -134,6 +137,9 @@ class_name = "ChainWatcherDO"
 [[env.mainnet.durable_objects.bindings]]
 name = "CHANNEL_POOL"
 class_name = "ChannelPoolDO"
+
+[env.mainnet.triggers]
+crons = ["0 */6 * * *"]
 
 [[env.mainnet.services]]
 binding = "ASTRODEX"

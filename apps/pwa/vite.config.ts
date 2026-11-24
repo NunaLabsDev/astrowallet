@@ -34,15 +34,21 @@ function cspConnectSrcPlugin(env: Record<string, string | undefined>): Plugin {
   return {
     name: "astrowallet-csp-connect-src",
     closeBundle() {
-      const origins = collectConfiguredConnectOrigins(env);
-      if (origins.length === 0) return;
+      const configuredOrigins = collectConfiguredConnectOrigins(env);
+      if (configuredOrigins.length === 0) return;
       const distHeaders = path.resolve(process.cwd(), "dist/_headers");
       if (!existsSync(distHeaders)) return;
       const raw = readFileSync(distHeaders, "utf8");
-      const updated = raw.replace(
-        "connect-src 'self' https:;",
-        `connect-src 'self' ${origins.join(" ")};`,
-      );
+      const updated = raw.replace(/connect-src\s+'self'([^;]*);/, (_match, existing: string) => {
+        const merged = new Set(
+          existing
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+            .concat(configuredOrigins),
+        );
+        return `connect-src 'self' ${Array.from(merged).join(" ")};`;
+      });
       writeFileSync(distHeaders, updated, "utf8");
     },
   };
@@ -104,6 +110,9 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         output: {
           manualChunks(id) {
+            if (id.includes("preload-helper")) {
+              return "vite-preload";
+            }
             if (id.includes("/node_modules/react/") || id.includes("/node_modules/react-dom/")) {
               return "vendor-react";
             }

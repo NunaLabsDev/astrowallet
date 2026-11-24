@@ -259,7 +259,7 @@ export function NftDetailSheet({
               <span>Send NFT</span>
             </button>
           )}
-          {meta?.homeDomain && (
+          {meta?.homeDomain && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(meta.homeDomain) && (
             <a
               href={`https://${meta.homeDomain}`}
               target="_blank"

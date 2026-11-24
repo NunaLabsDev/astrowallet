@@ -1,5 +1,4 @@
 import {
-  ClassicAddressSchema,
   ConnectAccountSummarySchema,
   ConnectAppMetadataSchema,
   ConnectAuthPayloadSchema,
@@ -94,7 +93,7 @@ const CompleteConnectRequestBodySchema = z.object({
   sig: z.string().regex(/^[a-f0-9]{32}$/i),
   status: z.enum(["approved", "rejected"]),
   reason: z.string().trim().max(280).optional(),
-  address: ClassicAddressSchema.optional(),
+  address: z.string().regex(/^[GC][A-Z2-7]{55}$/).optional(),
   accounts: z.array(ConnectAccountSummarySchema).max(10).optional(),
   signatureBase64: z.string().trim().min(16).max(256).optional(),
   signedXdr: z.string().trim().min(16).max(49_152).optional(),

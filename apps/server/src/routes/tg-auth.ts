@@ -21,6 +21,7 @@ import {
   verifyConnectAccountSubmissions,
 } from "./connect-verifier.js";
 import { computeMonthlyUserHash, utcDayString } from "./metrics.js";
+import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
 
 const TgAuthBodySchema = z.object({
   initData: z.string().trim().min(1).max(8192),
@@ -110,6 +111,18 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
     const config = c.get("config");
     const repo = c.get("repo");
 
+    const limit = await checkRateLimit({
+      repository: repo,
+      cache: c.env.CACHE,
+      scope: "tg_auth",
+      clientKey: clientKeyFromHeaders(c.req.raw.headers),
+      limitPerMin: Math.max(300, config.proxyRateLimitPerMin * 5),
+    });
+    if (!limit.allowed) {
+      c.header("Retry-After", String(limit.retryAfterSeconds));
+      return c.json({ error: "Telegram auth rate limit exceeded" }, 429);
+    }
+
     let body: z.infer<typeof TgAuthBodySchema>;
     try {
       body = TgAuthBodySchema.parse(await c.req.json());
@@ -128,6 +141,17 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
     }
 
     const tgUser = verified.data.user;
+    const userAuthLimit = await checkRateLimit({
+      repository: repo,
+      cache: c.env.CACHE,
+      scope: "tg_auth_user",
+      clientKey: tgUser.id,
+      limitPerMin: 15,
+    });
+    if (!userAuthLimit.allowed) {
+      c.header("Retry-After", String(userAuthLimit.retryAfterSeconds));
+      return c.json({ error: "Telegram user auth rate limit exceeded" }, 429);
+    }
     await repo.upsertTelegramUser({
       telegramUserId: tgUser.id,
       usernameLower: tgUser.usernameLower,

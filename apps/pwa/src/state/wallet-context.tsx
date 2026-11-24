@@ -433,12 +433,16 @@ function resolveTonDerivationIndex(
 export function WalletProvider({
   config,
   storageScopeId,
+  sessionToken,
   children,
 }: {
   config: PwaConfig;
   storageScopeId?: string | undefined;
+  sessionToken?: string | null | undefined;
   children: ReactNode;
 }) {
+  const sessionTokenRef = useRef<string | null>(sessionToken ?? null);
+  sessionTokenRef.current = sessionToken ?? null;
   const cleanScopeId = storageScopeId?.trim() || undefined;
   const securePinKey = cleanScopeId ? `${TG_SECURE_PIN_KEY}:${cleanScopeId}` : TG_SECURE_PIN_KEY;
   const sessionLeaseKey = cleanScopeId
@@ -2286,6 +2290,7 @@ export function WalletProvider({
           reportTelemetryEvent({
             apiBaseUrl: config.apiBaseUrl,
             network: config.network,
+            sessionToken: sessionTokenRef.current,
             eventType: "tx_sent",
             txHash: result.hash,
             assetCode: params.assetCode,
@@ -2371,6 +2376,7 @@ export function WalletProvider({
           reportTelemetryEvent({
             apiBaseUrl: config.apiBaseUrl,
             network: config.network,
+            sessionToken: sessionTokenRef.current,
             eventType: "trustline_added",
             txHash: result.hash,
             assetCode,
@@ -2753,22 +2759,44 @@ export function WalletProvider({
         });
         const body = (await res.json().catch(() => ({}))) as {
           error?: string;
+          mode?: string;
+          sponsorSignedXdr?: string;
           hash?: string;
           status?: string;
         };
         if (!res.ok) {
           throw new Error(body.error ?? `Sponsored activation failed (${res.status})`);
         }
+        let finalHash = body.hash;
+        if (body.sponsorSignedXdr) {
+          const cosignedXdr = signTransactionXdrEnvelope(
+            body.sponsorSignedXdr,
+            config.networkPassphrase,
+            keypair,
+          );
+          const submitted = await sorobanDevClient.submitRawSignedXdr(cosignedXdr, {
+            sourceKeypair: keypair,
+          });
+          finalHash = submitted.hash;
+        }
         await refreshChainState();
         showToast("Account activated on Stellar via sponsored bootstrap.", "success");
         return {
-          hash: body.hash,
+          hash: finalHash,
           address,
-          status: body.status ?? "submitted",
+          status: finalHash ? "confirmed" : (body.status ?? "submitted"),
         };
       });
     },
-    [config.apiBaseUrl, config.network, withActiveKeypair, refreshChainState, showToast],
+    [
+      config.apiBaseUrl,
+      config.network,
+      config.networkPassphrase,
+      withActiveKeypair,
+      sorobanDevClient,
+      refreshChainState,
+      showToast,
+    ],
   );
 
   const signConnectChallenge = useCallback(

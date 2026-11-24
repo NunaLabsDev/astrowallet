@@ -474,6 +474,9 @@ export async function quoteLayerZeroOftBridge(input: {
   }
 
   return withBridgeRpcFailover(input.rpcUrls, async (server) => {
+    const isSimError = (err: unknown): boolean =>
+      err instanceof Error && err.message.startsWith("Soroban simulation failed");
+
     const [pausedRaw, peerRaw] = await Promise.all([
       simulateReadCall({
         server,
@@ -481,14 +484,20 @@ export async function quoteLayerZeroOftBridge(input: {
         networkPassphrase: input.networkPassphrase,
         method: "is_paused",
         args: [],
-      }).catch(() => false),
+      }).catch((err) => {
+        if (isSimError(err)) return false;
+        throw err;
+      }),
       simulateReadCall({
         server,
         contractId: input.oftContractId,
         networkPassphrase: input.networkPassphrase,
         method: "peer",
         args: [nativeToScVal(input.dstEid, { type: "u32" })],
-      }).catch(() => undefined),
+      }).catch((err) => {
+        if (isSimError(err)) return undefined;
+        throw err;
+      }),
     ]);
 
     if (pausedRaw === true) {

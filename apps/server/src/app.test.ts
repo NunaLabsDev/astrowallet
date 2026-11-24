@@ -3395,6 +3395,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         if (url === "https://extstellar.moneygram.com/.well-known/stellar.toml") {
           return new Response(
             [
+              `SIGNING_KEY="${anchorSigner.publicKey()}"`,
               'WEB_AUTH_ENDPOINT="https://extstellar.moneygram.com/stellaradapterservice/auth"',
               'TRANSFER_SERVER_SEP0024="https://extstellar.moneygram.com/sep24"',
             ].join("\n"),

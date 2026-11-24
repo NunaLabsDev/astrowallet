@@ -224,9 +224,18 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       if (/^\d+$/.test(decoded.feeStroops) && BigInt(decoded.feeStroops) > maxFeeAllowed) {
         return c.json({ error: "Transaction fee exceeds relay ceiling" }, 403);
       }
-      estimatedFeeStroops = /^\d+$/.test(decoded.feeStroops)
-        ? decoded.feeStroops
-        : config.relayMaxFeeStroops;
+      const parsedInnerFee = /^\d+$/.test(decoded.feeStroops)
+        ? BigInt(decoded.feeStroops)
+        : maxFeeAllowed;
+      const hasSorobanOp = decoded.operations.some((op) => Boolean(op.soroban));
+      const minAccountingFloor = BigInt(
+        Math.max(hasSorobanOp ? 100_000 : 100, decoded.operations.length * 100),
+      );
+      const boundedFloor =
+        minAccountingFloor > maxFeeAllowed ? maxFeeAllowed : minAccountingFloor;
+      estimatedFeeStroops = (
+        parsedInnerFee >= boundedFloor ? parsedInnerFee : boundedFloor
+      ).toString();
 
       for (const op of decoded.operations) {
         if (op.soroban) {
@@ -257,21 +266,13 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         );
       }
 
-      if (intentAuthRecord && repo) {
-        if (intentAuthRecord.actionType === "claim" && config.claimEscrowContractId) {
-          const hasEscrowOp = decoded.operations.some(
-            (op) => op.soroban?.contractId === config.claimEscrowContractId,
-          );
-          if (!hasEscrowOp) {
-            return c.json({ error: "Relay payload does not invoke ClaimEscrow contract" }, 403);
-          }
+      if (intentAuthRecord?.actionType === "claim" && config.claimEscrowContractId) {
+        const hasEscrowOp = decoded.operations.some(
+          (op) => op.soroban?.contractId === config.claimEscrowContractId,
+        );
+        if (!hasEscrowOp) {
+          return c.json({ error: "Relay payload does not invoke ClaimEscrow contract" }, 403);
         }
-        const stageKey = `relay-intent:${intentAuthRecord.intentId}:${intentAuthRecord.status}`;
-        const claimed = await repo.claimAlertDedupKey(stageKey);
-        if (!claimed) {
-          return c.json({ error: "Intent relay authorization already consumed" }, 409);
-        }
-        claimedStageKey = stageKey;
       }
     } else {
       let hostFn;
@@ -287,6 +288,22 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       ) {
         return c.json({ error: "Contract is not on the relay allowlist" }, 403);
       }
+      if (
+        intentAuthRecord?.actionType === "claim" &&
+        config.claimEscrowContractId &&
+        hostFn.contractId !== config.claimEscrowContractId
+      ) {
+        return c.json({ error: "Relay payload does not invoke ClaimEscrow contract" }, 403);
+      }
+    }
+
+    if (intentAuthRecord && repo) {
+      const stageKey = `relay-intent:${intentAuthRecord.intentId}:${intentAuthRecord.status}`;
+      const claimed = await repo.claimAlertDedupKey(stageKey);
+      if (!claimed) {
+        return c.json({ error: "Intent relay authorization already consumed" }, 409);
+      }
+      claimedStageKey = stageKey;
     }
 
     if (repo) {

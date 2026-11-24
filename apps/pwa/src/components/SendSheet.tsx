@@ -361,11 +361,16 @@ export function SendSheet({
         );
         const rec = (await res.json()) as {
           found?: boolean;
-          defaultAddress?: string;
-          addresses?: Array<{ address: string }>;
+          primaryAddress?: string;
+          activeAddress?: string;
+          accounts?: Array<{ address: string; isDefault?: boolean }>;
           error?: string;
         };
-        const resolvedAddr = rec.defaultAddress ?? rec.addresses?.[0]?.address;
+        const resolvedAddr =
+          rec.activeAddress ??
+          rec.primaryAddress ??
+          rec.accounts?.find((a) => a.isDefault)?.address ??
+          rec.accounts?.[0]?.address;
         if (!res.ok || !resolvedAddr) {
           throw new Error(rec.error ?? `No public AstroID address found for ${clean}`);
         }

@@ -56,9 +56,27 @@ function normalizeCollectibleImageUrl(raw: string | undefined): string | undefin
   if (
     /^data:image\/(svg\+xml|png|jpeg|webp);(?:utf8|charset=utf-8|base64),/i.test(trimmed)
   ) {
-    // Strip any embedded <script tags inside SVG data URIs defensively before rendering in <img>
-    if (/data:image\/svg\+xml/i.test(trimmed) && /<script[\s>]/i.test(trimmed)) {
-      return undefined;
+    // Strip/reject script tags & inline event handlers inside SVG data URIs (raw or base64)
+    if (/data:image\/svg\+xml/i.test(trimmed)) {
+      let decodedSvg = trimmed;
+      const b64Marker = ";base64,";
+      const idx = trimmed.toLowerCase().indexOf(b64Marker);
+      if (idx !== -1) {
+        try {
+          decodedSvg = decodeBase64ToUtf8(trimmed.slice(idx + b64Marker.length));
+        } catch {
+          return undefined;
+        }
+      } else {
+        try {
+          decodedSvg = decodeURIComponent(trimmed);
+        } catch {
+          decodedSvg = trimmed;
+        }
+      }
+      if (/<script[\s>]|on[a-z]+\s*=|javascript:/i.test(decodedSvg)) {
+        return undefined;
+      }
     }
     return trimmed;
   }

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   decodeAuthEntryXdr,
+  scanTransactionEnvelopeXdr,
   type DecodedAuthEntrySummary,
 } from "@astrowallet/security-shield";
 import type {
@@ -20,11 +21,12 @@ import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
 import { requiresHighValueReauth } from "./flow-validators.js";
 import { HighValueReauthGate } from "./HighValueReauthGate.js";
+import {
+  parseConnectRouteFromLocation,
+  type ActiveConnectRoute,
+} from "./deep-link-routes.js";
 
-export interface ActiveConnectRoute {
-  requestId: string;
-  sig: string;
-}
+export { parseConnectRouteFromLocation, type ActiveConnectRoute };
 
 interface RemoteConnectRequest {
   requestId: string;
@@ -51,18 +53,6 @@ interface RemoteConnectRequest {
   };
   expiresAt: number;
   returnUrl: string;
-}
-
-export function parseConnectRouteFromLocation(): ActiveConnectRoute | null {
-  if (typeof window === "undefined") return null;
-  const match = window.location.pathname.match(/^\/connect\/([A-Za-z0-9_-]+)$/);
-  if (!match?.[1]) return null;
-  const sig = new URLSearchParams(window.location.search).get("sig") ?? "";
-  if (!sig) return null;
-  return {
-    requestId: match[1],
-    sig,
-  };
 }
 
 function trustTierLabel(tier: ConnectAppTrustTier): {
@@ -265,8 +255,17 @@ export function ConnectRequestSheet({
           }),
         });
         if (!res.ok) {
-          if (!cancelled && config.network === "mainnet") {
-            setError("Mainnet pre-sign Scan & Shield check unavailable. Verify transaction carefully.");
+          if (!cancelled) {
+            try {
+              const localScan = scanTransactionEnvelopeXdr(targetXdr, {
+                networkPassphrase: config.networkPassphrase,
+              });
+              setScanReport(localScan.report);
+            } catch {
+              if (config.network === "mainnet") {
+                setError("Mainnet pre-sign Scan & Shield check unavailable. Verify transaction carefully.");
+              }
+            }
           }
           return;
         }
@@ -275,7 +274,16 @@ export function ConnectRequestSheet({
           setScanReport(data.report);
         }
       } catch {
-        // Local client-side Scan & Shield still runs inside signRawXdrWithShield
+        if (!cancelled) {
+          try {
+            const localScan = scanTransactionEnvelopeXdr(targetXdr, {
+              networkPassphrase: config.networkPassphrase,
+            });
+            setScanReport(localScan.report);
+          } catch {
+            // Let signRawXdrWithShield block invalid XDR at approval time
+          }
+        }
       } finally {
         if (!cancelled) setScanningXdr(false);
       }
@@ -407,9 +415,11 @@ export function ConnectRequestSheet({
         if (scanReport?.verdict === "warning" && !warningAcknowledged) {
           throw new Error("Acknowledge the Scan & Shield warning before signing.");
         }
+        const allowWarningFlag =
+          scanReport?.verdict === "warning" ? warningAcknowledged : false;
         const shouldSubmit = request.payload.submit !== false;
         if (shouldSubmit) {
-          const res = await signAndSubmitRawXdrWithShield(unsignedXdr, true);
+          const res = await signAndSubmitRawXdrWithShield(unsignedXdr, allowWarningFlag);
           returnUrl = await submitCompletion({
             status: "approved",
             address: activeAccount.address,
@@ -423,7 +433,7 @@ export function ConnectRequestSheet({
             `Transaction confirmed on Stellar (${res.hash.slice(0, 8)}…${res.hash.slice(-8)}).`,
           );
         } else {
-          const res = await signRawXdrWithShield(unsignedXdr, true);
+          const res = await signRawXdrWithShield(unsignedXdr, allowWarningFlag);
           returnUrl = await submitCompletion({
             status: "approved",
             address: activeAccount.address,

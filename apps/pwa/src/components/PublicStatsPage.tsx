@@ -200,6 +200,9 @@ export function PublicStatsPage() {
         fetch(`${apiBase}/v1/metrics/public`, { headers: { "X-Astro-Network": "mainnet" } }),
         fetch(`${apiBase}/v1/metrics/public`, { headers: { "X-Astro-Network": "testnet" } }),
       ]);
+      if (!mainRes.ok && !testRes.ok) {
+        throw new Error(`Telemetry API returned HTTP ${mainRes.status}/${testRes.status}`);
+      }
       const mainJson = mainRes.ok ? ((await mainRes.json()) as WalletMetricsPayload) : null;
       const testJson = testRes.ok ? ((await testRes.json()) as WalletMetricsPayload) : null;
       setMainnetData(mainJson);
@@ -257,43 +260,43 @@ export function PublicStatsPage() {
   }, [scope, dexMainnetData, dexTestnetData]);
 
   const summary = useMemo(() => {
-    const sum = (pick: (m: WalletMetricsPayload["metrics"]) => number) =>
-      activeSources.reduce((acc, s) => acc + pick(s.metrics), 0);
+    const sum = (pick: (m: WalletMetricsPayload["metrics"]) => number | undefined) =>
+      activeSources.reduce((acc, s) => acc + (s.metrics ? (pick(s.metrics) ?? 0) : 0), 0);
 
     const platforms: Record<string, number> = {};
     const events: Record<string, number> = {};
     for (const s of activeSources) {
-      for (const [k, v] of Object.entries(s.metrics.platforms)) {
+      for (const [k, v] of Object.entries(s.metrics?.platforms ?? {})) {
         platforms[k] = (platforms[k] ?? 0) + v;
       }
-      for (const [k, v] of Object.entries(s.metrics.eventBreakdown)) {
+      for (const [k, v] of Object.entries(s.metrics?.eventBreakdown ?? {})) {
         events[k] = (events[k] ?? 0) + v;
       }
     }
 
     const txs: Array<VerifiedTxEntry & { network: "mainnet" | "testnet"; source: string }> = [];
     for (const s of activeSources) {
-      for (const tx of s.metrics.recentVerifiedTxs) {
+      for (const tx of s.metrics?.recentVerifiedTxs ?? []) {
         txs.push({ ...tx, network: s.network, source: "AstroWallet" });
       }
     }
     let dexVerifiedTxTotal = 0;
     for (const dex of activeDexSources) {
-      dexVerifiedTxTotal += dex.metrics.verifiedTxCount ?? 0;
-      for (const tx of dex.metrics.recentVerifiedTxs) {
+      dexVerifiedTxTotal += dex.metrics?.verifiedTxCount ?? 0;
+      for (const tx of dex.metrics?.recentVerifiedTxs ?? []) {
         txs.push({ ...tx, network: dex.network, source: "AstroDex" });
       }
-      for (const [k, v] of Object.entries(dex.metrics.eventBreakdown)) {
+      for (const [k, v] of Object.entries(dex.metrics?.eventBreakdown ?? {})) {
         events[`dex:${k}`] = (events[`dex:${k}`] ?? 0) + v;
       }
     }
     txs.sort((a, b) => b.createdAt - a.createdAt);
 
     return {
-      registeredUsers: Math.max(0, ...activeSources.map((s) => s.metrics.totalRegisteredUsers)),
-      linkedWallets: Math.max(0, ...activeSources.map((s) => s.metrics.totalLinkedWallets)),
-      classicWallets: Math.max(0, ...activeSources.map((s) => s.metrics.classicWallets)),
-      smartWallets: Math.max(0, ...activeSources.map((s) => s.metrics.smartWallets)),
+      registeredUsers: Math.max(0, ...activeSources.map((s) => s.metrics?.totalRegisteredUsers ?? 0)),
+      linkedWallets: Math.max(0, ...activeSources.map((s) => s.metrics?.totalLinkedWallets ?? 0)),
+      classicWallets: Math.max(0, ...activeSources.map((s) => s.metrics?.classicWallets ?? 0)),
+      smartWallets: Math.max(0, ...activeSources.map((s) => s.metrics?.smartWallets ?? 0)),
       dau: sum((m) => m.dau),
       wau: sum((m) => m.wau),
       mau: sum((m) => m.mau),
@@ -301,8 +304,8 @@ export function PublicStatsPage() {
       connectApprovals: sum((m) => m.approvedConnectRequests),
       vaultBackups: sum((m) => m.encryptedVaultBackups),
       dailySeries: mergeDailySeries([
-        ...activeSources.map((s) => s.metrics.dailySeries),
-        ...activeDexSources.map((dex) => dex.metrics.dailySeries),
+        ...activeSources.map((s) => s.metrics?.dailySeries ?? []),
+        ...activeDexSources.map((dex) => dex.metrics?.dailySeries ?? []),
       ]),
       platforms: Object.entries(platforms).sort((a, b) => b[1] - a[1]),
       events: Object.entries(events).sort((a, b) => b[1] - a[1]),
@@ -381,10 +384,20 @@ export function PublicStatsPage() {
               <button type="button" className="aw-btn-secondary" onClick={() => void loadAll()} disabled={loading}>
                 {loading ? "Refreshing…" : "Refresh"}
               </button>
-              <button type="button" className="aw-btn-secondary" onClick={handleExportCsv}>
+              <button
+                type="button"
+                className="aw-btn-secondary"
+                onClick={handleExportCsv}
+                disabled={loading || (!mainnetData && !testnetData)}
+              >
                 Export CSV
               </button>
-              <button type="button" className="aw-btn-gold" onClick={handleExportJson}>
+              <button
+                type="button"
+                className="aw-btn-gold"
+                onClick={handleExportJson}
+                disabled={loading || (!mainnetData && !testnetData)}
+              >
                 Export JSON
               </button>
             </div>

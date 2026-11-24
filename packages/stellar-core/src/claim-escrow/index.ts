@@ -1,5 +1,4 @@
 import type {
-  ClassicAddress,
   ContractAddress,
   StellarAddress,
 } from "@astrowallet/domain";
@@ -113,16 +112,26 @@ export function signClaimEscrowPayload(
   }
 }
 
+function assertValidEscrowContract(escrowContractId: string): void {
+  if (!StrKey.isValidContract(escrowContractId)) {
+    throw new Error("Invalid ClaimEscrow contract ID");
+  }
+}
+
 export function buildCreateClaimOperation(input: {
   escrowContractId: ContractAddress;
   claimIdHex: string;
-  senderAddress: ClassicAddress;
+  senderAddress: StellarAddress;
   tokenContractId: ContractAddress;
   amountStroops: bigint;
   claimPubkeyHex: string;
   expiresAtUnix: number;
   cancellable?: boolean | undefined;
 }): xdr.Operation {
+  assertValidEscrowContract(input.escrowContractId);
+  if (!StrKey.isValidContract(input.tokenContractId)) {
+    throw new Error("Invalid token SAC contract ID");
+  }
   if (input.amountStroops <= 0n) {
     throw new Error("Claim escrow amount must be positive");
   }
@@ -150,6 +159,7 @@ export function buildClaimOperation(input: {
   recipientAddress: StellarAddress;
   signatureHex: string;
 }): xdr.Operation {
+  assertValidEscrowContract(input.escrowContractId);
   const claimId = hexToBytes(input.claimIdHex, 32);
   const signature = hexToBytes(input.signatureHex, 64);
 
@@ -168,6 +178,7 @@ export function buildCancelClaimOperation(input: {
   escrowContractId: ContractAddress;
   claimIdHex: string;
 }): xdr.Operation {
+  assertValidEscrowContract(input.escrowContractId);
   const claimId = hexToBytes(input.claimIdHex, 32);
   return Operation.invokeContractFunction({
     contract: input.escrowContractId,
@@ -180,6 +191,7 @@ export function buildRefundExpiredOperation(input: {
   escrowContractId: ContractAddress;
   claimIdHex: string;
 }): xdr.Operation {
+  assertValidEscrowContract(input.escrowContractId);
   const claimId = hexToBytes(input.claimIdHex, 32);
   return Operation.invokeContractFunction({
     contract: input.escrowContractId,
@@ -193,6 +205,7 @@ export function buildRefundExpiredToOperation(input: {
   claimIdHex: string;
   recipientAddress: StellarAddress;
 }): xdr.Operation {
+  assertValidEscrowContract(input.escrowContractId);
   const claimId = hexToBytes(input.claimIdHex, 32);
   return Operation.invokeContractFunction({
     contract: input.escrowContractId,
@@ -208,6 +221,7 @@ export function buildExtendClaimTtlOperation(input: {
   escrowContractId: ContractAddress;
   claimIdHex: string;
 }): xdr.Operation {
+  assertValidEscrowContract(input.escrowContractId);
   const claimId = hexToBytes(input.claimIdHex, 32);
   return Operation.invokeContractFunction({
     contract: input.escrowContractId,

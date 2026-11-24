@@ -9,7 +9,14 @@ import {
   stroops7ToDecimal,
   type ParsedSwapAsset,
 } from "@astrowallet/defi";
-import type { ClassicAddress, SwapQuote } from "@astrowallet/domain";
+import {
+  computeMaxSpendableStroops7,
+  formatStroops7Trimmed,
+  normalizeDecimalAmountInput,
+  parsePositiveDecimalToStroops7,
+  type ClassicAddress,
+  type SwapQuote,
+} from "@astrowallet/domain";
 import type { VerifiedAssetEntry } from "@astrowallet/security-shield";
 import {
   fetchTokenOnChainDetails,
@@ -219,12 +226,15 @@ export function SwapSheet({
   const heldIdentifiers = useMemo(() => {
     const balances = accountState?.balances ?? [];
     if (balances.length === 0) {
-      return [{ id: "XLM", label: "XLM", balance: "0" }];
+      return [{ id: "XLM", label: "XLM", balance: "0", spendableBalance: "0" }];
     }
     return balances.map((b) => ({
       id: tokenSwapIdentifier(b.assetCode, b.assetIssuer),
       label: b.assetCode,
       balance: b.balance,
+      spendableBalance: formatStroops7Trimmed(
+        computeMaxSpendableStroops7(b.balance, b.sellingLiabilities ?? "0", "0"),
+      ),
     }));
   }, [accountState?.balances]);
 
@@ -448,31 +458,40 @@ export function SwapSheet({
   }, [quote, slippageBps]);
 
   const fetchLiveQuote = useCallback(async () => {
-    const cleanAmount = amount.trim();
-    if (!resolvedFrom || !resolvedTo || !cleanAmount) {
+    const cleanAmount = normalizeDecimalAmountInput(amount, 7);
+    if (!resolvedFrom || !resolvedTo || !amount.trim()) {
+      quoteSeqRef.current += 1;
       setQuote(null);
       setQuoting(false);
       return;
     }
-    if (!/^\d+(\.\d{1,7})?$/.test(cleanAmount) || Number(cleanAmount) <= 0) {
+    if (!cleanAmount || parsePositiveDecimalToStroops7(cleanAmount) === null) {
+      quoteSeqRef.current += 1;
       setQuote(null);
+      setQuoting(false);
       setError("Enter a valid positive swap amount (up to 7 decimals).");
       return;
     }
     if (resolvedFrom.toUpperCase() === resolvedTo.toUpperCase()) {
+      quoteSeqRef.current += 1;
       setQuote(null);
+      setQuoting(false);
       setError("Source and destination assets must be different.");
       return;
     }
     if (!fromParsed || !toParsed) {
+      quoteSeqRef.current += 1;
       setQuote(null);
+      setQuoting(false);
       return;
     }
     if (
       (fromParsed.code !== "XLM" && !fromParsed.issuer) ||
       (toParsed.code !== "XLM" && !toParsed.issuer)
     ) {
+      quoteSeqRef.current += 1;
       setQuote(null);
+      setQuoting(false);
       setError(
         `Enter full CODE:G... issuer for ${toParsed.issuer ? fromParsed.code : toParsed.code} or pick from Official / Liquid tokens below.`,
       );
@@ -523,11 +542,14 @@ export function SwapSheet({
     slippageBps,
     config.apiBaseUrl,
     config.horizonUrls,
+    config.network,
     activeAccount?.address,
   ]);
 
   // Automatic debounced live quote whenever pair, amount, or slippage changes
   useEffect(() => {
+    quoteSeqRef.current += 1;
+    setQuote(null);
     setTxHash(null);
     const timer = window.setTimeout(() => {
       void fetchLiveQuote();
@@ -550,11 +572,16 @@ export function SwapSheet({
   const applyFromPercentage = (ratio: number) => {
     if (!fromHolding) return;
     const isNative = fromHolding.id === "XLM";
-    const avail = isNative
-      ? Math.max(0, Number(accountState?.spendableXlm ?? fromHolding.balance) - 0.002)
-      : Number(fromHolding.balance);
-    const computed = Math.max(0, avail * ratio);
-    setAmount((Math.floor(computed * 10_000_000) / 10_000_000).toFixed(7).replace(/\.?0+$/, "") || "0");
+    const availStroops = isNative
+      ? computeMaxSpendableStroops7(
+          accountState?.spendableXlm ?? fromHolding.balance,
+          "0",
+          missingDestTrustline && isClassic ? "0.502" : "0.002",
+        )
+      : computeMaxSpendableStroops7(fromHolding.spendableBalance, "0", "0");
+    const bps = BigInt(Math.round(ratio * 10_000));
+    const targetStroops = (availStroops * bps) / 10_000n;
+    setAmount(formatStroops7Trimmed(targetStroops));
     setQuote(null);
   };
 
@@ -568,7 +595,7 @@ export function SwapSheet({
     const reauthCheck = requiresHighValueReauth({
       amount: quote.inputAmount,
       assetCode: fromParsed?.code ?? "XLM",
-      spendableBalance: Number(fromHolding?.balance ?? 0),
+      spendableBalance: fromHolding?.spendableBalance ?? fromHolding?.balance ?? "0",
       thresholdXlm: config.highValueReauthXlm,
       network: config.network,
     });
@@ -619,7 +646,7 @@ export function SwapSheet({
           return;
         } catch (err) {
           const msg = err instanceof Error ? err.message : "";
-          if (/malicious|Scan & Shield|blocked/i.test(msg)) {
+          if (/malicious|Scan & Shield|blocked|timed out|confirmation|already|ledger/i.test(msg)) {
             throw err;
           }
           if (!isClassic) {
@@ -628,7 +655,7 @@ export function SwapSheet({
                 "Soroban swap transaction expired or failed; Horizon Path fallback requires a Classic G... account.",
             );
           }
-          // Graceful fallback to Horizon SDEX/AMM path payment if Soroswap XDR simulation expired
+          // Graceful fallback to Horizon SDEX/AMM path payment only if Soroswap XDR simulation expired pre-broadcast
           setSwapPhase("Routing via Horizon fallback...");
         }
       }
@@ -776,7 +803,7 @@ export function SwapSheet({
               </label>
               {fromHolding && (
                 <span style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }} className="tabular-nums">
-                  Avail: {Number(fromHolding.balance).toFixed(2)}
+                  Avail: {fromHolding.spendableBalance}
                 </span>
               )}
             </div>
@@ -1083,11 +1110,12 @@ export function SwapSheet({
               className="aw-btn-primary"
               disabled={
                 executing ||
+                quoting ||
                 hasScamSpoof ||
                 (requiresHighValueReauth({
                   amount: quote.inputAmount,
                   assetCode: fromParsed?.code ?? "XLM",
-                  spendableBalance: Number(fromHolding?.balance ?? 0),
+                  spendableBalance: fromHolding?.spendableBalance ?? fromHolding?.balance ?? "0",
                   thresholdXlm: config.highValueReauthXlm,
                   network: config.network,
                 }).required &&

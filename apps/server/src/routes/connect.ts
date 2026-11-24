@@ -1,4 +1,5 @@
 import {
+  ClassicAddressSchema,
   ConnectAccountSummarySchema,
   ConnectAppMetadataSchema,
   ConnectAuthPayloadSchema,
@@ -25,7 +26,14 @@ import {
   verifyConnectSignature,
 } from "@astrowallet/tg-protocol";
 import type { KVNamespace } from "@cloudflare/workers-types";
-import { FeeBumpTransaction, Keypair, TransactionBuilder, xdr } from "@stellar/stellar-sdk";
+import {
+  Address,
+  FeeBumpTransaction,
+  Keypair,
+  TransactionBuilder,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk";
 import { Hono } from "hono";
 import { constantTimeEqual, sha256Hex } from "../lib/crypto-utils.js";
 import { z } from "zod";
@@ -524,6 +532,12 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
           400,
         );
       }
+      if (!ClassicAddressSchema.safeParse(body.address).success) {
+        return c.json(
+          { error: "Classic G... signer address is required for sign_auth_entry" },
+          400,
+        );
+      }
       const kp = Keypair.fromPublicKey(body.address);
       let preimage: xdr.HashIdPreimage | null = null;
       try {
@@ -565,6 +579,60 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
           ) {
             return c.json(
               { error: "signedAuthEntry invocation does not match original entry" },
+              400,
+            );
+          }
+          if (signedEntry.credentials.type !== "sorobanCredentialsAddress") {
+            return c.json(
+              { error: "signedAuthEntry must contain sorobanCredentialsAddress credentials" },
+              400,
+            );
+          }
+          const addrCreds = signedEntry.credentials.address;
+          const credAddress = Address.fromScAddress(addrCreds.address).toString();
+          if (credAddress !== body.address) {
+            return c.json(
+              { error: "signedAuthEntry credential address does not match signer address" },
+              400,
+            );
+          }
+          const networkId = new Uint8Array(
+            await crypto.subtle.digest(
+              "SHA-256",
+              new TextEncoder().encode(config.networkPassphrase),
+            ),
+          );
+          const authPreimage = xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+            new xdr.HashIdPreimageSorobanAuthorization({
+              networkId: Buffer.from(networkId),
+              nonce: addrCreds.nonce,
+              signatureExpirationLedger: addrCreds.signatureExpirationLedger,
+              invocation: signedEntry.rootInvocation,
+            }),
+          );
+          const digest = new Uint8Array(
+            await crypto.subtle.digest("SHA-256", new Uint8Array(authPreimage.toXDR())),
+          );
+          const rawSigs = scValToNative(addrCreds.signature) as unknown;
+          const sigEntries = Array.isArray(rawSigs) ? rawSigs : [];
+          const expectedPub = Buffer.from(kp.rawPublicKey());
+          const verified = sigEntries.some((item) => {
+            if (!item || typeof item !== "object") return false;
+            const rec = item as { public_key?: unknown; signature?: unknown };
+            if (!(rec.public_key instanceof Uint8Array) || !(rec.signature instanceof Uint8Array)) {
+              return false;
+            }
+            if (
+              rec.public_key.length !== expectedPub.length ||
+              !Buffer.from(rec.public_key).equals(expectedPub)
+            ) {
+              return false;
+            }
+            return kp.verify(digest as unknown as Buffer, Buffer.from(rec.signature));
+          });
+          if (!verified) {
+            return c.json(
+              { error: "Invalid Ed25519 signature inside SorobanAuthorizationEntry credentials" },
               400,
             );
           }

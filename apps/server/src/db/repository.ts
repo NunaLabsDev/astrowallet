@@ -115,13 +115,18 @@ export interface ServerRepository {
     },
   ): Promise<void>;
   markIntentConfirmed(intentId: string, txHash?: string): Promise<SignedIntent | null>;
-  markIntentStatus(intentId: string, status: IntentStatus): Promise<SignedIntent | null>;
+  markIntentStatus(
+    intentId: string,
+    status: IntentStatus,
+    expectedStatus?: IntentStatus | readonly IntentStatus[],
+  ): Promise<SignedIntent | null>;
 
   createClaimLink(claim: ClaimLink): Promise<ClaimLink>;
   getClaimLink(claimId: string): Promise<ClaimLink | null>;
   markClaimLinkStatus(
     claimId: string,
     status: ClaimLink["status"],
+    expectedStatus?: ClaimLink["status"],
   ): Promise<ClaimLink | null>;
 
   /** True when `txHash` is already bound to any intent or split payment (anti-replay). */
@@ -131,6 +136,7 @@ export interface ServerRepository {
     payerAddress?: string | undefined;
     txHash: string;
     amount: string;
+    maxParticipants?: number | undefined;
   }): Promise<{ paidCount: number }>;
   countSplitPayments(intentId: string): Promise<number>;
   listSplitPaymentTxHashes(intentId: string): Promise<readonly string[]>;
@@ -563,14 +569,14 @@ export function createD1Repository(db: D1Database): ServerRepository {
         .first<{ id: string }>();
       if (!match) return false;
 
-      await db
-        .prepare("UPDATE linked_addresses SET is_default = 0 WHERE telegram_user_id = ?")
-        .bind(telegramUserId)
-        .run();
-      await db
-        .prepare("UPDATE linked_addresses SET is_default = 1 WHERE id = ?")
-        .bind(match.id)
-        .run();
+      await db.batch([
+        db
+          .prepare("UPDATE linked_addresses SET is_default = 0 WHERE telegram_user_id = ?")
+          .bind(telegramUserId),
+        db
+          .prepare("UPDATE linked_addresses SET is_default = 1 WHERE id = ?")
+          .bind(match.id),
+      ]);
       return true;
     },
 
@@ -720,7 +726,7 @@ export function createD1Repository(db: D1Database): ServerRepository {
     },
 
     async markIntentConfirmed(intentId, txHash) {
-      await db
+      const res = await db
         .prepare(
           `UPDATE signed_intents
            SET status = 'confirmed',
@@ -729,14 +735,32 @@ export function createD1Repository(db: D1Database): ServerRepository {
         )
         .bind(txHash ? txHash.toLowerCase() : null, intentId)
         .run();
+      if ((res.meta?.changes ?? 0) === 0) return null;
       return this.getSignedIntent(intentId);
     },
 
-    async markIntentStatus(intentId, status) {
-      await db
-        .prepare("UPDATE signed_intents SET status = ? WHERE intent_id = ?")
-        .bind(status, intentId)
-        .run();
+    async markIntentStatus(intentId, status, expectedStatus) {
+      let res;
+      if (Array.isArray(expectedStatus) && expectedStatus.length > 0) {
+        const placeholders = expectedStatus.map(() => "?").join(", ");
+        res = await db
+          .prepare(
+            `UPDATE signed_intents SET status = ? WHERE intent_id = ? AND status IN (${placeholders})`,
+          )
+          .bind(status, intentId, ...expectedStatus)
+          .run();
+      } else if (typeof expectedStatus === "string") {
+        res = await db
+          .prepare("UPDATE signed_intents SET status = ? WHERE intent_id = ? AND status = ?")
+          .bind(status, intentId, expectedStatus)
+          .run();
+      } else {
+        res = await db
+          .prepare("UPDATE signed_intents SET status = ? WHERE intent_id = ?")
+          .bind(status, intentId)
+          .run();
+      }
+      if ((res.meta?.changes ?? 0) === 0) return null;
       return this.getSignedIntent(intentId);
     },
 
@@ -773,11 +797,17 @@ export function createD1Repository(db: D1Database): ServerRepository {
       return row ? mapClaimRow(row) : null;
     },
 
-    async markClaimLinkStatus(claimId, status) {
-      await db
-        .prepare("UPDATE claim_links SET status = ? WHERE claim_id = ?")
-        .bind(status, claimId)
-        .run();
+    async markClaimLinkStatus(claimId, status, expectedStatus) {
+      const res = expectedStatus
+        ? await db
+            .prepare("UPDATE claim_links SET status = ? WHERE claim_id = ? AND status = ?")
+            .bind(status, claimId, expectedStatus)
+            .run()
+        : await db
+            .prepare("UPDATE claim_links SET status = ? WHERE claim_id = ?")
+            .bind(status, claimId)
+            .run();
+      if ((res.meta?.changes ?? 0) === 0) return null;
       return this.getClaimLink(claimId);
     },
 
@@ -795,22 +825,42 @@ export function createD1Repository(db: D1Database): ServerRepository {
       return Boolean(payRow);
     },
 
-    async recordSplitPayment({ intentId, payerAddress, txHash, amount }) {
+    async recordSplitPayment({ intentId, payerAddress, txHash, amount, maxParticipants }) {
       const now = Math.floor(Date.now() / 1000);
-      await db
+      const normHash = txHash.toLowerCase();
+      const cap = typeof maxParticipants === "number" ? maxParticipants : null;
+      const res = await db
         .prepare(
           `INSERT INTO intent_payments (id, intent_id, payer_address, tx_hash, amount, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`,
+           SELECT ?, ?, ?, ?, ?, ?
+           WHERE EXISTS (
+             SELECT 1 FROM signed_intents
+             WHERE intent_id = ? AND status IN ('pending', 'signed')
+           )
+             AND NOT EXISTS (
+               SELECT 1 FROM signed_intents WHERE tx_hash = ?
+             )
+             AND (? IS NULL OR (
+               SELECT COUNT(*) FROM intent_payments WHERE intent_id = ?
+             ) < ?)`,
         )
         .bind(
-          `${intentId}:${txHash.slice(0, 16)}`,
+          `${intentId}:${normHash.slice(0, 16)}`,
           intentId,
           payerAddress ?? null,
-          txHash.toLowerCase(),
+          normHash,
           amount,
           now,
+          intentId,
+          normHash,
+          cap,
+          intentId,
+          cap ?? 0,
         )
         .run();
+      if ((res.meta?.changes ?? 0) === 0) {
+        throw new Error("Intent is no longer open or split participant cap reached");
+      }
       return { paidCount: await this.countSplitPayments(intentId) };
     },
 
@@ -937,6 +987,7 @@ export function createD1Repository(db: D1Database): ServerRepository {
     },
 
     async purgeExpiredRecords(nowSec) {
+      const cutoffDayUtc = new Date((nowSec - 60 * 86_400) * 1000).toISOString().slice(0, 10);
       await db.batch([
         db
           .prepare(
@@ -957,6 +1008,7 @@ export function createD1Repository(db: D1Database): ServerRepository {
             "DELETE FROM processed_alerts WHERE created_at < ? AND dedup_key NOT LIKE 'bootstrap:%'",
           )
           .bind(nowSec - 30 * 86_400),
+        db.prepare("DELETE FROM daily_user_activity WHERE day_utc < ?").bind(cutoffDayUtc),
       ]);
     },
 

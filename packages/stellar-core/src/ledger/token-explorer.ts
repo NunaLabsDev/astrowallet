@@ -243,6 +243,26 @@ function extractDomainFromTomlHref(href?: string): string | undefined {
   }
 }
 
+function isSafePublicHttpsTomlUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "https:" || parsed.port) return false;
+    const host = parsed.hostname.toLowerCase();
+    if (!/^[a-z0-9.-]+\.[a-z]{2,}$/i.test(host)) return false;
+    if (host === "localhost") return false;
+    if (
+      [".local", ".internal", ".localhost", ".arpa", ".home", ".lan", ".corp", ".test", ".invalid"].some(
+        (suffix) => host.endsWith(suffix),
+      )
+    ) {
+      return false;
+    }
+    return !/^\d+\.\d+\.\d+\.\d+$/.test(host);
+  } catch {
+    return false;
+  }
+}
+
 function cleanHttpsUrl(raw?: string): string | undefined {
   const trimmed = raw?.trim();
   if (!trimmed) return undefined;
@@ -477,11 +497,10 @@ export async function fetchAssetStellarTomlMeta(input: {
         tomlText = await res.text();
       }
     } catch {
-      // Fall through to direct HTTPS stellar.toml lookup
+      // Proxy failed; do not bypass CSP with direct browser fetch when apiBaseUrl is configured
+      tomlText = null;
     }
-  }
-
-  if (tomlText === null) {
+  } else {
     try {
       const res = await fetchFn(`https://${domain}/.well-known/stellar.toml`, {
         headers: { Accept: "text/plain" },
@@ -507,23 +526,30 @@ export async function fetchAssetStellarTomlMeta(input: {
 
   if (parsed?.linkedTomlUrl && !parsed.image) {
     try {
-      const linkedRes = await fetchFn(parsed.linkedTomlUrl, {
-        headers: { Accept: "text/plain" },
-      });
-      if (linkedRes.ok) {
-        const linkedText = await linkedRes.text();
-        const linkedMeta =
-          parseStellarTomlForAsset(linkedText, input.assetCode, input.assetIssuer) ??
-          parseLinkedCurrencyTomlFields(linkedText);
-        return {
-          ...parsed,
-          name: parsed.name ?? linkedMeta.name,
-          desc: parsed.desc ?? linkedMeta.desc,
-          image: parsed.image ?? linkedMeta.image,
-          conditions: parsed.conditions ?? linkedMeta.conditions,
-          isAssetAnchored: parsed.isAssetAnchored ?? linkedMeta.isAssetAnchored,
-          anchorAsset: parsed.anchorAsset ?? linkedMeta.anchorAsset,
-        };
+      const linkedTargetUrl = input.apiBaseUrl
+        ? `${input.apiBaseUrl.replace(/\/+$/, "")}/v1/proxy/stellar-toml?url=${encodeURIComponent(parsed.linkedTomlUrl)}`
+        : isSafePublicHttpsTomlUrl(parsed.linkedTomlUrl)
+          ? parsed.linkedTomlUrl
+          : null;
+      if (linkedTargetUrl) {
+        const linkedRes = await fetchFn(linkedTargetUrl, {
+          headers: { Accept: "text/plain" },
+        });
+        if (linkedRes.ok) {
+          const linkedText = await linkedRes.text();
+          const linkedMeta =
+            parseStellarTomlForAsset(linkedText, input.assetCode, input.assetIssuer) ??
+            parseLinkedCurrencyTomlFields(linkedText);
+          return {
+            ...parsed,
+            name: parsed.name ?? linkedMeta.name,
+            desc: parsed.desc ?? linkedMeta.desc,
+            image: parsed.image ?? linkedMeta.image,
+            conditions: parsed.conditions ?? linkedMeta.conditions,
+            isAssetAnchored: parsed.isAssetAnchored ?? linkedMeta.isAssetAnchored,
+            anchorAsset: parsed.anchorAsset ?? linkedMeta.anchorAsset,
+          };
+        }
       }
     } catch {
       // Non-fatal if linked currency TOML is unreachable
@@ -588,7 +614,8 @@ export async function fetchHeldAssetsTomlMetadata(input: {
   const resolveHomeDomain = (issuer: ClassicAddress, known?: string): Promise<string | undefined> => {
     if (known) return Promise.resolve(known);
     const now = Date.now();
-    const cached = useCache ? issuerHomeDomainCache.get(issuer) : undefined;
+    const cacheKey = `${input.horizonUrls[0] ?? ""}:${issuer}`;
+    const cached = useCache ? issuerHomeDomainCache.get(cacheKey) : undefined;
     if (cached && cached.expiresAt > now) {
       return Promise.resolve(cached.domain ?? undefined);
     }
@@ -602,7 +629,7 @@ export async function fetchHeldAssetsTomlMetadata(input: {
       .then((acc) => {
         const domain = acc?.home_domain?.trim() || undefined;
         if (useCache) {
-          issuerHomeDomainCache.set(issuer, {
+          issuerHomeDomainCache.set(cacheKey, {
             expiresAt: Date.now() + STELLAR_TOML_CACHE_TTL_MS,
             domain: domain ?? null,
           });

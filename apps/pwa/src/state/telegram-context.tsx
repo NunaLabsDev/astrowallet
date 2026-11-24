@@ -172,12 +172,18 @@ export function TelegramProvider({
     return () => window.clearTimeout(timer);
   }, [sessionToken, sessionExpiresAt, refreshSessionToken]);
 
+  const authSeqRef = useRef(0);
+  const authAbortRef = useRef<AbortController | null>(null);
+  const backupSeqRef = useRef(0);
+  const linkedRefreshSeqRef = useRef(0);
+
   const loadCloudBackupWithToken = useCallback(
     async (
       token: string | null,
       serverHintHasBackup: boolean,
       targetNetwork: string = networkRef.current,
     ): Promise<string | null> => {
+      const seq = ++backupSeqRef.current;
       setCheckingCloudBackup(true);
       setCloudBackupError(null);
       try {
@@ -248,6 +254,9 @@ export function TelegramProvider({
           fetchServer,
           fetchTgCloud,
         ]);
+        if (seq !== backupSeqRef.current || targetNetwork !== networkRef.current) {
+          return null;
+        }
         const serverCandidate = serverResult.kind === "found" ? serverResult : null;
         const winner =
           serverCandidate && tgCandidate
@@ -295,13 +304,20 @@ export function TelegramProvider({
         setCloudBackupError(null);
         return compact;
       } finally {
-        setCheckingCloudBackup(false);
+        if (seq === backupSeqRef.current) {
+          setCheckingCloudBackup(false);
+        }
       }
     },
     [config.apiBaseUrl],
   );
 
   const authenticate = useCallback(async () => {
+    const seq = ++authSeqRef.current;
+    authAbortRef.current?.abort();
+    const controller = new AbortController();
+    authAbortRef.current = controller;
+
     const wa = initTelegramMiniApp();
     const inside = Boolean(wa && typeof wa.initData === "string" && wa.initData.trim().length > 0);
     setInTelegram(inside);
@@ -330,9 +346,17 @@ export function TelegramProvider({
 
     setAuthStatus("checking");
     setAuthError(null);
+    const targetNetwork = config.network;
     try {
       const base = config.apiBaseUrl.replace(/\/+$/, "");
-      const targetNetwork = config.network;
+      const timeoutSignal =
+        typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+          ? AbortSignal.timeout(8_000)
+          : undefined;
+      const combinedSignal =
+        timeoutSignal && typeof AbortSignal.any === "function"
+          ? AbortSignal.any([controller.signal, timeoutSignal])
+          : controller.signal;
       const res = await fetch(`${base}/v1/tg/auth`, {
         method: "POST",
         headers: {
@@ -340,11 +364,9 @@ export function TelegramProvider({
           "X-Astro-Network": targetNetwork,
         },
         body: JSON.stringify({ initData: wa.initData }),
-        ...(typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
-          ? { signal: AbortSignal.timeout(8_000) }
-          : {}),
+        signal: combinedSignal,
       });
-      if (targetNetwork !== networkRef.current) return;
+      if (seq !== authSeqRef.current || targetNetwork !== networkRef.current) return;
       const body = (await res.json()) as {
         error?: string;
         sessionToken?: string;
@@ -355,6 +377,7 @@ export function TelegramProvider({
         hasEncryptedBackup?: boolean;
         backupUpdatedAt?: number;
       };
+      if (seq !== authSeqRef.current || targetNetwork !== networkRef.current) return;
       if (!res.ok || !body.sessionToken || !body.user) {
         throw new Error(body.error ?? `Telegram Mini App verification failed (${res.status})`);
       }
@@ -376,8 +399,10 @@ export function TelegramProvider({
       void loadCloudBackupWithToken(
         body.sessionToken,
         Boolean(body.hasEncryptedBackup),
+        targetNetwork,
       );
     } catch (err) {
+      if (seq !== authSeqRef.current || targetNetwork !== networkRef.current) return;
       sessionTokenRef.current = null;
       sessionExpiresAtRef.current = null;
       setSessionToken(null);
@@ -391,25 +416,37 @@ export function TelegramProvider({
 
   useEffect(() => {
     void authenticate();
+    return () => {
+      authAbortRef.current?.abort();
+    };
   }, [authenticate]);
 
   const refreshLinkedAccounts = useCallback(async () => {
+    const seq = ++linkedRefreshSeqRef.current;
+    const targetNetwork = networkRef.current;
     const activeToken = await ensureFreshSessionToken();
-    if (!activeToken) return;
+    if (!activeToken || seq !== linkedRefreshSeqRef.current || targetNetwork !== networkRef.current) {
+      return;
+    }
     try {
       const base = config.apiBaseUrl.replace(/\/+$/, "");
       const res = await fetch(`${base}/v1/tg/me`, {
         headers: {
           Authorization: `Bearer ${activeToken}`,
-          "X-Astro-Network": networkRef.current,
+          "X-Astro-Network": targetNetwork,
         },
       });
-      if (!res.ok) return;
+      if (!res.ok || seq !== linkedRefreshSeqRef.current || targetNetwork !== networkRef.current) {
+        return;
+      }
       const body = (await res.json()) as {
         linkedAccounts?: TelegramUserBinding[];
         hasEncryptedBackup?: boolean;
         backupUpdatedAt?: number;
       };
+      if (seq !== linkedRefreshSeqRef.current || targetNetwork !== networkRef.current) {
+        return;
+      }
       if (Array.isArray(body.linkedAccounts)) {
         setLinkedAccounts(body.linkedAccounts);
       }

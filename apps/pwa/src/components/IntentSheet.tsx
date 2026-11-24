@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   calculateMinReceivedStroops7,
   createHorizonPathSwapAdapter,
   parseSwapAssetIdentifier,
   stroops7ToDecimal,
 } from "@astrowallet/defi";
-import type {
-  ClassicAddress,
-  ContractAddress,
-  ScanReport,
-  StellarAddress,
+import {
+  computeMaxSpendableStroops7,
+  formatStroops7Trimmed,
+  parsePositiveDecimalToStroops7,
+  type ClassicAddress,
+  type ContractAddress,
+  type ScanReport,
+  type StellarAddress,
 } from "@astrowallet/domain";
 import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
@@ -115,6 +118,7 @@ export function IntentSheet({
   const [intent, setIntent] = useState<RemoteIntentResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const actionSubmittingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [completedMsg, setCompletedMsg] = useState<string | null>(null);
   const [selectedIndices, setSelectedIndices] = useState<number[]>([0]);
@@ -152,24 +156,34 @@ export function IntentSheet({
     if (!accountState) return null;
     if (!accountState.funded) return "0";
     if (isNativeIntentAsset) {
-      return accountState.spendableXlm;
+      return formatStroops7Trimmed(
+        computeMaxSpendableStroops7(accountState.spendableXlm, "0", "0.001"),
+      );
     }
     const match = accountState.balances.find(
       (b) =>
         b.assetCode.toUpperCase() === intentAssetCode &&
         (!intentAssetIssuer || b.assetIssuer === intentAssetIssuer),
     );
-    return match?.balance ?? "0";
+    if (!match) return "0";
+    return formatStroops7Trimmed(
+      computeMaxSpendableStroops7(match.balance, match.sellingLiabilities ?? "0", "0"),
+    );
   }, [accountState, isNativeIntentAsset, intentAssetCode, intentAssetIssuer]);
 
-  const intentAmountNum = Number(intent?.payload.amount ?? "0");
+  const intentAmountStroops = intent?.payload.amount
+    ? parsePositiveDecimalToStroops7(intent.payload.amount)
+    : null;
+  const availableStroops =
+    availableBalanceStr !== null ? parsePositiveDecimalToStroops7(availableBalanceStr) : null;
   const availableNum = availableBalanceStr !== null ? Number(availableBalanceStr) : null;
   const hasInsufficientFunds = Boolean(
     accountState &&
-      Number.isFinite(intentAmountNum) &&
-      intentAmountNum > 0 &&
-      availableNum !== null &&
-      (!accountState.funded || intentAmountNum > availableNum + 1e-8),
+      intent?.payload.amount &&
+      (!accountState.funded ||
+        intentAmountStroops === null ||
+        availableStroops === null ||
+        intentAmountStroops > availableStroops),
   );
 
   const handleFriendbotActivate = async () => {
@@ -260,6 +274,8 @@ export function IntentSheet({
 
   useEffect(() => {
     let cancelled = false;
+    setIntent(null);
+    setDestScanReport(null);
     async function fetchIntent() {
       setLoading(true);
       setError(null);
@@ -320,6 +336,7 @@ export function IntentSheet({
     }
 
     let cancelled = false;
+    setDestScanReport(null);
     async function runPreSignScan(targetValue: string) {
       setScanningIntent(true);
       try {
@@ -393,6 +410,7 @@ export function IntentSheet({
   };
 
   const handleConfirmConnect = async () => {
+    if (actionSubmittingRef.current) return;
     if (!intent?.payload.message) {
       setError("Connect challenge message is missing from intent");
       return;
@@ -402,6 +420,7 @@ export function IntentSheet({
       setError("Enter the 6-character confirmation code shown in Telegram DM.");
       return;
     }
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -442,11 +461,13 @@ export function IntentSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to complete /connect");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleConfirmPayment = async () => {
+    if (actionSubmittingRef.current) return;
     if (!intent?.payload.destination || !intent.payload.amount) {
       setError("Payment intent is missing destination or amount");
       return;
@@ -477,6 +498,7 @@ export function IntentSheet({
       );
       return;
     }
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -505,12 +527,13 @@ export function IntentSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Payment execution failed");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleConfirmSwap = async () => {
-    if (!intent) return;
+    if (!intent || actionSubmittingRef.current) return;
     if (destScanReport?.verdict === "malicious") {
       setError(
         `Scan & Shield blocked swap: ${destScanReport.findings[0]?.title ?? "malicious contract"}`,
@@ -521,6 +544,7 @@ export function IntentSheet({
       setError("Acknowledge the Scan & Shield warning before signing this swap.");
       return;
     }
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -572,6 +596,7 @@ export function IntentSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Swap execution failed");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
@@ -581,6 +606,7 @@ export function IntentSheet({
     config.claimEscrowContractId) as ContractAddress | undefined;
 
   const handleFundClaimEscrow = async () => {
+    if (actionSubmittingRef.current) return;
     if (!intent || !activeAccount || !intent.claimId || !resolvedEscrowContract || !intent.payload.amount) {
       setError("Claim escrow configuration or claimId is missing");
       return;
@@ -595,6 +621,7 @@ export function IntentSheet({
       );
       return;
     }
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -623,11 +650,13 @@ export function IntentSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Escrow funding failed");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleClaimFromEscrow = async () => {
+    if (actionSubmittingRef.current) return;
     if (!intent || !activeAccount || !intent.claimId || !resolvedEscrowContract) {
       setError("Claim escrow configuration or claimId is missing");
       return;
@@ -641,6 +670,7 @@ export function IntentSheet({
       setError("Valid 64-char claim secret key (#k=) is required to unlock escrow");
       return;
     }
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -670,17 +700,20 @@ export function IntentSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Claim execution failed");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleReclaimClaimLink = async () => {
+    if (actionSubmittingRef.current) return;
     if (!intent || !activeAccount || !intent.claimId || !resolvedEscrowContract) {
       setError("Claim escrow configuration or claimId is missing");
       return;
     }
     const isExpired =
       Math.floor(Date.now() / 1000) > (intent.payload.escrowExpiresAt ?? intent.expiresAt);
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -710,11 +743,14 @@ export function IntentSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Escrow reclaim failed");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleConfirmReclaimReserve = async () => {
+    if (actionSubmittingRef.current) return;
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -729,11 +765,13 @@ export function IntentSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Reserve reclaim failed");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleConfirmSignXdr = async () => {
+    if (actionSubmittingRef.current) return;
     if (!intent?.payload.unsignedXdr) {
       setError("Signed XDR intent is missing unsignedXdr payload");
       return;
@@ -748,6 +786,7 @@ export function IntentSheet({
       setError("Acknowledge the Scan & Shield warning before signing this transaction.");
       return;
     }
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -767,6 +806,7 @@ export function IntentSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Transaction execution failed");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
@@ -1294,6 +1334,7 @@ export function IntentSheet({
                 className="aw-btn-primary"
                 disabled={
                   busy ||
+                  scanningIntent ||
                   destScanReport?.verdict === "malicious" ||
                   (destScanReport?.verdict === "warning" && !warningAcknowledged) ||
                   (reauthGate.required && !reauthVerified)
@@ -1415,6 +1456,7 @@ export function IntentSheet({
                 className="aw-btn-primary"
                 disabled={
                   busy ||
+                  scanningIntent ||
                   !intent.payload.unsignedXdr ||
                   destScanReport?.verdict === "malicious" ||
                   (destScanReport?.verdict === "warning" && !warningAcknowledged) ||
@@ -1546,6 +1588,7 @@ export function IntentSheet({
                 className="aw-btn-primary"
                 disabled={
                   busy ||
+                  scanningIntent ||
                   isAccountUnfunded ||
                   hasInsufficientFunds ||
                   destScanReport?.verdict === "malicious" ||

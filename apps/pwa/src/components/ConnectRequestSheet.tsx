@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   decodeAuthEntryXdr,
   scanTransactionEnvelopeXdr,
@@ -99,6 +99,7 @@ export function ConnectRequestSheet({
   const [showRawAuthEntry, setShowRawAuthEntry] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const actionSubmittingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [completedMsg, setCompletedMsg] = useState<string | null>(null);
   const [completedStatus, setCompletedStatus] = useState<"approved" | "rejected" | null>(null);
@@ -126,6 +127,8 @@ export function ConnectRequestSheet({
 
   useEffect(() => {
     let cancelled = false;
+    setRequest(null);
+    setScanReport(null);
     async function loadRequest() {
       setLoading(true);
       setError(null);
@@ -336,11 +339,12 @@ export function ConnectRequestSheet({
   };
 
   const handleApprove = async () => {
-    if (!request) return;
+    if (!request || actionSubmittingRef.current) return;
     if (vaultStatus !== "unlocked" || !activeAccount) {
       setError("Unlock or create your AstroWallet vault below before approving.");
       return;
     }
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -449,12 +453,14 @@ export function ConnectRequestSheet({
       triggerTelegramHaptic("error");
       setError(err instanceof Error ? err.message : "Request approval failed");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleReject = async () => {
-    if (!request) return;
+    if (!request || actionSubmittingRef.current) return;
+    actionSubmittingRef.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -469,6 +475,7 @@ export function ConnectRequestSheet({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to reject request");
     } finally {
+      actionSubmittingRef.current = false;
       setBusy(false);
     }
   };

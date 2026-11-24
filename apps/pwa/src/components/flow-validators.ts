@@ -1,3 +1,9 @@
+import {
+  formatStroops7Trimmed,
+  normalizeDecimalAmountInput,
+  parsePositiveDecimalToStroops7,
+} from "@astrowallet/domain";
+
 export type StellarMemoKind = "text" | "id" | "hash" | "return" | "none";
 
 const MAX_UINT64 = 18_446_744_073_709_551_615n;
@@ -45,23 +51,32 @@ export function validateStellarMemoInput(
  */
 export function validateTransferAmount(
   amountRaw: string,
-  maxSpendable: number,
+  maxSpendable: number | string,
   opts: { assetCode?: string | undefined; funded?: boolean | undefined } = {},
 ): string | null {
-  const clean = amountRaw.trim();
-  if (!/^\d+(\.\d{1,7})?$/.test(clean) || Number(clean) <= 0) {
+  const normalized = normalizeDecimalAmountInput(amountRaw, 7);
+  const amountStroops = normalized ? parsePositiveDecimalToStroops7(normalized) : null;
+  if (!normalized || amountStroops === null) {
     return "Enter a valid positive amount (up to 7 decimals).";
   }
   if (opts.funded === false) {
     return "This account is not activated on the ledger yet. Fund it first before sending.";
   }
-  const numeric = Number(clean);
-  if (Number.isFinite(maxSpendable) && numeric > maxSpendable + 1e-8) {
+  let maxStroops: bigint | null = null;
+  if (typeof maxSpendable === "string") {
+    const cleanMax = maxSpendable.trim();
+    if (/^\d+(?:\.\d+)?$/.test(cleanMax)) {
+      const [w = "0", f = ""] = cleanMax.split(".");
+      maxStroops = BigInt(w) * 10_000_000n + BigInt(f.slice(0, 7).padEnd(7, "0"));
+    }
+  } else if (Number.isFinite(maxSpendable)) {
+    const fixed = Math.max(0, maxSpendable).toFixed(7);
+    const [w = "0", f = ""] = fixed.split(".");
+    maxStroops = BigInt(w) * 10_000_000n + BigInt(f.slice(0, 7).padEnd(7, "0"));
+  }
+  if (maxStroops !== null && amountStroops > maxStroops) {
     const label = opts.assetCode ?? "balance";
-    const formattedAvail =
-      Math.max(0, Math.floor(maxSpendable * 10_000_000) / 10_000_000)
-        .toFixed(7)
-        .replace(/\.?0+$/, "") || "0";
+    const formattedAvail = formatStroops7Trimmed(maxStroops > 0n ? maxStroops : 0n);
     return `Insufficient spendable ${label} (${formattedAvail} available).`;
   }
   return null;
@@ -99,14 +114,16 @@ const STABLECOIN_CODES = new Set([
 export function requiresHighValueReauth(params: {
   amount?: string | undefined;
   assetCode?: string | undefined;
-  spendableBalance?: number | undefined;
+  spendableBalance?: number | string | undefined;
   thresholdXlm?: number | undefined;
   network: "testnet" | "mainnet";
   hasWarningVerdict?: boolean | undefined;
 }): { required: boolean; reason?: string } {
   const thresholdXlm = params.thresholdXlm && params.thresholdXlm > 0 ? params.thresholdXlm : 250;
   const code = (params.assetCode ?? "XLM").toUpperCase();
-  const numericAmount = params.amount ? Number(params.amount) : 0;
+  const normalizedAmount = params.amount ? normalizeDecimalAmountInput(params.amount, 7) : null;
+  const numericAmount = normalizedAmount ? Number(normalizedAmount) : 0;
+  const amountStroops = normalizedAmount ? parsePositiveDecimalToStroops7(normalizedAmount) : null;
 
   if (params.network === "mainnet" && params.hasWarningVerdict) {
     return {
@@ -115,24 +132,29 @@ export function requiresHighValueReauth(params: {
     };
   }
 
-  if (Number.isFinite(numericAmount) && numericAmount > 0) {
-    if (code === "XLM" && numericAmount >= thresholdXlm) {
+  if (amountStroops !== null && amountStroops > 0n) {
+    if (code === "XLM" && amountStroops >= BigInt(Math.round(thresholdXlm)) * 10_000_000n) {
       return {
         required: true,
         reason: `High-value transfer (>= ${thresholdXlm} XLM threshold).`,
       };
     }
-    if (STABLECOIN_CODES.has(code) && numericAmount >= 100) {
+    if (STABLECOIN_CODES.has(code) && amountStroops >= 100n * 10_000_000n) {
       return {
         required: true,
         reason: `High-value ${code} transfer (>= 100 ${code} threshold).`,
       };
     }
+    const spendableNum =
+      typeof params.spendableBalance === "string"
+        ? Number(params.spendableBalance)
+        : params.spendableBalance;
     if (
-      typeof params.spendableBalance === "number" &&
-      Number.isFinite(params.spendableBalance) &&
-      params.spendableBalance >= 50 &&
-      numericAmount >= params.spendableBalance * 0.5
+      typeof spendableNum === "number" &&
+      Number.isFinite(spendableNum) &&
+      spendableNum >= 50 &&
+      Number.isFinite(numericAmount) &&
+      numericAmount >= spendableNum * 0.5
     ) {
       return {
         required: true,

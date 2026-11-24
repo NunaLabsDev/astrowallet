@@ -2,14 +2,17 @@ import { Asset } from "@stellar/stellar-sdk";
 export * from "./pro-bridge.js";
 export * from "./ramps.js";
 export * from "./sep40.js";
-import type {
-  ContractAddress,
-  RampPort,
-  RampQuoteRequest,
-  SwapPort,
-  SwapQuote,
-  SwapQuoteRequest,
-  YieldPort,
+import {
+  formatStroops7Trimmed,
+  normalizeDecimalAmountInput,
+  parsePositiveDecimalToStroops7,
+  type ContractAddress,
+  type RampPort,
+  type RampQuoteRequest,
+  type SwapPort,
+  type SwapQuote,
+  type SwapQuoteRequest,
+  type YieldPort,
 } from "@astrowallet/domain";
 
 export interface ParsedSwapAsset {
@@ -78,62 +81,80 @@ function setHorizonAssetQueryParams(
   params.set(`${prefix}_asset_issuer`, parsed.issuer);
 }
 
+function parseBidPriceFraction(bid: HorizonOrderbookBid): { num: bigint; den: bigint } | null {
+  const rN = bid.price_r?.n;
+  const rD = bid.price_r?.d;
+  if (
+    typeof rN === "number" &&
+    typeof rD === "number" &&
+    Number.isSafeInteger(rN) &&
+    Number.isSafeInteger(rD) &&
+    rN > 0 &&
+    rD > 0
+  ) {
+    return { num: BigInt(rN), den: BigInt(rD) };
+  }
+  const raw = (bid.price ?? "").trim();
+  if (!/^\d+(?:\.\d+)?$/.test(raw)) return null;
+  const [w = "0", f = ""] = raw.split(".");
+  const den = 10n ** BigInt(f.length);
+  const num = BigInt(w) * den + (f ? BigInt(f) : 0n);
+  return num > 0n ? { num, den } : null;
+}
+
 function computeOrderbookStrictSendOutput(
   inputAmountDecimal: string,
   bids: readonly HorizonOrderbookBid[],
 ): { expectedOutputAmount: string; priceImpactPct: string } | null {
-  const inputNum = Number(inputAmountDecimal);
-  if (!Number.isFinite(inputNum) || inputNum <= 0 || bids.length === 0) {
+  const inputStroops = parsePositiveDecimalToStroops7(inputAmountDecimal);
+  if (!inputStroops || bids.length === 0) {
     return null;
   }
 
-  let remainingBase = inputNum;
-  let totalCounterOut = 0;
-  let topPrice: number | null = null;
+  let remainingBaseStroops = inputStroops;
+  let totalCounterOutStroops = 0n;
+  let topPrice: { num: bigint; den: bigint } | null = null;
 
   for (const bid of bids) {
-    const rN = bid.price_r?.n;
-    const rD = bid.price_r?.d;
-    const price =
-      typeof rN === "number" && typeof rD === "number" && rD > 0 && rN > 0
-        ? rN / rD
-        : Number(bid.price ?? "0");
-    const counterAvail = Number(bid.amount ?? "0");
-    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(counterAvail) || counterAvail <= 0) {
+    const price = parseBidPriceFraction(bid);
+    const counterAvailStroops = parsePositiveDecimalToStroops7(bid.amount ?? "");
+    if (!price || !counterAvailStroops) {
       continue;
     }
     if (topPrice === null) {
       topPrice = price;
     }
-    const maxBaseConsumable = counterAvail / price;
-    const takeBase = Math.min(remainingBase, maxBaseConsumable);
-    const gainCounter =
-      takeBase >= maxBaseConsumable ? counterAvail : takeBase * price;
-    totalCounterOut += gainCounter;
-    remainingBase -= takeBase;
-    if (remainingBase <= 1e-8) {
-      remainingBase = 0;
+    const maxBaseConsumableStroops = (counterAvailStroops * price.den) / price.num;
+    if (maxBaseConsumableStroops <= 0n) {
+      continue;
+    }
+    if (remainingBaseStroops <= maxBaseConsumableStroops) {
+      const gainCounter = (remainingBaseStroops * price.num) / price.den;
+      totalCounterOutStroops += gainCounter;
+      remainingBaseStroops = 0n;
       break;
     }
+    totalCounterOutStroops += counterAvailStroops;
+    remainingBaseStroops -= maxBaseConsumableStroops;
   }
 
-  if (remainingBase > 1e-7 || totalCounterOut <= 0) {
+  if (remainingBaseStroops > 0n || totalCounterOutStroops <= 0n) {
     return null;
   }
 
-  const stroopsOut = BigInt(Math.floor(totalCounterOut * 10_000_000));
-  if (stroopsOut <= 0n) {
-    return null;
+  let impactPct = "N/A";
+  if (topPrice) {
+    const rawImpactBps =
+      10_000n -
+      (totalCounterOutStroops * topPrice.den * 10_000n) / (inputStroops * topPrice.num);
+    const clampedBps = rawImpactBps > 0n ? rawImpactBps : 0n;
+    const wholePct = clampedBps / 100n;
+    const fracPct = (clampedBps % 100n).toString().padStart(2, "0");
+    impactPct = `${wholePct.toString()}.${fracPct}`;
   }
-
-  const effectivePrice = totalCounterOut / inputNum;
-  const impactPct =
-    topPrice && topPrice > 0
-      ? Math.max(0, ((topPrice - effectivePrice) / topPrice) * 100).toFixed(2)
-      : "N/A";
 
   return {
-    expectedOutputAmount: stroops7ToDecimal(stroopsOut),
+    expectedOutputAmount: stroops7ToDecimal(totalCounterOutStroops),
     priceImpactPct: impactPct,
   };
 }
@@ -268,14 +289,12 @@ export function createHorizonPathSwapAdapter(input: {
  * Converts a Stellar decimal string (up to 7 decimals) into exact 7-decimal stroops BigInt.
  */
 export function decimalToStroops7(amount: string): bigint {
-  const cleaned = amount.trim();
-  if (!/^\d+(?:\.\d{1,7})?$/.test(cleaned)) {
+  const normalized = normalizeDecimalAmountInput(amount, 7);
+  if (!normalized) {
     throw new Error("Amount must be a positive decimal with up to 7 fractional digits");
   }
-  const [wholePart, fracPart = ""] = cleaned.split(".");
-  const stroops =
-    BigInt(wholePart ?? "0") * STROOPS_PER_UNIT + BigInt(fracPart.padEnd(7, "0"));
-  if (stroops <= 0n) {
+  const stroops = parsePositiveDecimalToStroops7(normalized);
+  if (stroops === null) {
     throw new Error("Amount must be greater than zero");
   }
   return stroops;
@@ -286,9 +305,7 @@ export function decimalToStroops7(amount: string): bigint {
  */
 export function stroops7ToDecimal(stroops: bigint | string): string {
   const value = typeof stroops === "bigint" ? stroops : BigInt(stroops.trim());
-  const whole = value / STROOPS_PER_UNIT;
-  const frac = (value % STROOPS_PER_UNIT).toString().padStart(7, "0").replace(/0+$/, "");
-  return frac ? `${whole.toString()}.${frac}` : whole.toString();
+  return formatStroops7Trimmed(value);
 }
 
 /**
@@ -638,11 +655,32 @@ export function parseSoroswapQuoteOutput(data: {
   amountOut?: string | number | undefined;
   expectedOutputAmount?: string | undefined;
 }): string | null {
-  if (data.expectedOutputAmount && /^\d+(?:\.\d+)?$/.test(data.expectedOutputAmount)) {
-    return data.expectedOutputAmount;
+  if (typeof data.expectedOutputAmount === "string") {
+    const trimmed = data.expectedOutputAmount.trim();
+    if (/^\d+(?:\.\d+)?$/.test(trimmed)) {
+      const [w = "0", f = ""] = trimmed.split(".");
+      const truncated = f.length > 0 ? `${w}.${f.slice(0, 7)}` : w;
+      const stroops = parsePositiveDecimalToStroops7(truncated);
+      if (stroops !== null) {
+        return stroops7ToDecimal(stroops);
+      }
+    }
   }
-  if (data.amountOut !== undefined && /^\d+$/.test(String(data.amountOut))) {
-    return stroops7ToDecimal(BigInt(String(data.amountOut)));
+  if (data.amountOut !== undefined) {
+    let rawInt: bigint | null = null;
+    if (typeof data.amountOut === "string" && /^\d+$/.test(data.amountOut.trim())) {
+      rawInt = BigInt(data.amountOut.trim());
+    } else if (
+      typeof data.amountOut === "number" &&
+      Number.isFinite(data.amountOut) &&
+      Number.isInteger(data.amountOut) &&
+      data.amountOut > 0
+    ) {
+      rawInt = BigInt(data.amountOut.toLocaleString("fullwide", { useGrouping: false }));
+    }
+    if (rawInt !== null && rawInt > 0n) {
+      return stroops7ToDecimal(rawInt);
+    }
   }
   return null;
 }

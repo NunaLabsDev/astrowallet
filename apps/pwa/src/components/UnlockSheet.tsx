@@ -2,7 +2,6 @@ import { useEffect, useState, type FormEvent } from "react";
 import {
   clearPinLockoutState,
   getPinLockoutState,
-  recordFailedPinAttempt,
 } from "@astrowallet/stellar-core";
 import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
@@ -65,12 +64,11 @@ export function UnlockSheet() {
     setError(null);
     try {
       await unlockWithPin(pin);
-      await clearPinLockoutState(storageScopeId);
       setPin("");
       setCooldownUntilMs(0);
       setRemainingSec(0);
     } catch (err) {
-      const nextState = await recordFailedPinAttempt(Date.now(), storageScopeId);
+      const nextState = await getPinLockoutState(storageScopeId);
       if (nextState.lockedUntilMs > Date.now()) {
         const sec = Math.max(1, Math.ceil((nextState.lockedUntilMs - Date.now()) / 1000));
         setCooldownUntilMs(nextState.lockedUntilMs);
@@ -78,7 +76,11 @@ export function UnlockSheet() {
         setError(`Too many failed PIN attempts. Wait ${sec}s before retrying.`);
       } else {
         const baseMsg = err instanceof Error ? err.message : "Invalid PIN or passphrase";
-        setError(`${baseMsg} (${nextState.failedAttempts}/5 attempts before lockout)`);
+        setError(
+          nextState.failedAttempts > 0
+            ? `${baseMsg} (${nextState.failedAttempts}/5 attempts before lockout)`
+            : baseMsg,
+        );
       }
     } finally {
       setBusy(false);

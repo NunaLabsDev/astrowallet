@@ -1,4 +1,9 @@
-import type { TonAccountSummary, TonAddress, TonNetwork } from "@astrowallet/domain";
+import {
+  normalizeDecimalAmountInput,
+  type TonAccountSummary,
+  type TonAddress,
+  type TonNetwork,
+} from "@astrowallet/domain";
 import { hmac } from "@noble/hashes/hmac.js";
 import { sha512 } from "@noble/hashes/sha2.js";
 import { mnemonicToSeedSync, validateMnemonic } from "@scure/bip39";
@@ -46,11 +51,11 @@ function toHex(bytes: Uint8Array): string {
  * Validates and converts a decimal TON amount string into exact bigint nanoton (9 decimals).
  */
 export function parseTonToNano(amountTon: string): bigint {
-  const trimmed = amountTon.trim();
-  if (!/^\d+(?:\.\d{1,9})?$/.test(trimmed)) {
+  const normalized = normalizeDecimalAmountInput(amountTon, 9);
+  if (!normalized) {
     throw new Error("TON amount must be a positive decimal with at most 9 decimal places");
   }
-  const [whole = "0", frac = ""] = trimmed.split(".");
+  const [whole = "0", frac = ""] = normalized.split(".");
   const nano = BigInt(whole) * NANO_PER_TON + BigInt(frac.padEnd(9, "0"));
   if (nano <= 0n) {
     throw new Error("TON amount must be greater than zero");

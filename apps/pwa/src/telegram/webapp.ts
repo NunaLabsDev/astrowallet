@@ -104,6 +104,7 @@ export interface TelegramWebAppInstance {
   showScanQrPopup?(params: { text?: string }, callback?: (text: string) => boolean | void): void;
   closeScanQrPopup?(): void;
   onEvent?(eventType: string, cb: () => void): void;
+  offEvent?(eventType: string, cb: () => void): void;
   BackButton?: TelegramBackButton;
   HapticFeedback?: TelegramHapticFeedback;
   BiometricManager?: TelegramBiometricManager;
@@ -138,6 +139,9 @@ export function shouldAllowMiniAppAccess(input: {
   }
   return input.authStatus === "verified";
 }
+
+let registeredInsetsSync: (() => void) | null = null;
+let registeredInsetsWa: TelegramWebAppInstance | null = null;
 
 export function initTelegramMiniApp(): TelegramWebAppInstance | null {
   const wa = getTelegramWebApp();
@@ -190,9 +194,18 @@ export function initTelegramMiniApp(): TelegramWebAppInstance | null {
       }
     };
     syncInsets();
-    wa.onEvent?.("viewportChanged", syncInsets);
-    wa.onEvent?.("safeAreaChanged", syncInsets);
-    wa.onEvent?.("contentSafeAreaChanged", syncInsets);
+    if (registeredInsetsWa !== wa || !registeredInsetsSync) {
+      if (registeredInsetsWa && registeredInsetsSync) {
+        registeredInsetsWa.offEvent?.("viewportChanged", registeredInsetsSync);
+        registeredInsetsWa.offEvent?.("safeAreaChanged", registeredInsetsSync);
+        registeredInsetsWa.offEvent?.("contentSafeAreaChanged", registeredInsetsSync);
+      }
+      wa.onEvent?.("viewportChanged", syncInsets);
+      wa.onEvent?.("safeAreaChanged", syncInsets);
+      wa.onEvent?.("contentSafeAreaChanged", syncInsets);
+      registeredInsetsWa = wa;
+      registeredInsetsSync = syncInsets;
+    }
   } catch {
     // Non-fatal in partially mocked WebViews
   }

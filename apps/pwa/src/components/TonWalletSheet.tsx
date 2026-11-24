@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   formatNanoTon,
   isValidTonAddress,
@@ -38,6 +38,7 @@ export function TonWalletSheet({
   const [comment, setComment] = useState("");
   const [reviewPending, setReviewPending] = useState<PendingTonReview | null>(null);
   const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
   const [copied, setCopied] = useState(false);
   const [copiedHash, setCopiedHash] = useState(false);
   const [showQr, setShowQr] = useState(false);
@@ -100,14 +101,16 @@ export function TonWalletSheet({
     }
   };
 
+  const tonDerivationIndex = activeIndex >= 1000 ? 0 : activeIndex;
+
   const applyTonPercentage = (ratio: number) => {
     if (!tonState) return;
     const bal = BigInt(tonState.balanceNano);
-    const reserve = ratio === 1 ? 20_000_000n : 0n;
+    const reserve = 20_000_000n;
     const spendable = bal > reserve ? bal - reserve : 0n;
     const target =
       ratio === 1 ? spendable : (spendable * BigInt(Math.round(ratio * 100))) / 100n;
-    setAmountTon(formatNanoTon(target));
+    setAmountTon(target > 0n ? formatNanoTon(target) : "0");
   };
 
   const handlePrepareReview = (e: FormEvent) => {
@@ -146,7 +149,8 @@ export function TonWalletSheet({
   };
 
   const handleConfirmSend = async () => {
-    if (!reviewPending) return;
+    if (!reviewPending || submittingRef.current) return;
+    submittingRef.current = true;
     setBusy(true);
     setErrorMsg(null);
     try {
@@ -164,6 +168,7 @@ export function TonWalletSheet({
       triggerTelegramHaptic("error");
       setErrorMsg(err instanceof Error ? err.message : "TON transfer failed");
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };
@@ -183,7 +188,7 @@ export function TonWalletSheet({
           <div className="aw-balance-meta">
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
               <span className="glass-pill glass-pill--trust">TON {tonAccount.version.toUpperCase()}</span>
-              <span className="glass-pill">m/44&apos;/607&apos;/{activeIndex}&apos;</span>
+              <span className="glass-pill">m/44&apos;/607&apos;/{tonDerivationIndex}&apos;</span>
               <button
                 type="button"
                 className="aw-chip-btn"
@@ -497,7 +502,7 @@ export function TonWalletSheet({
         </div>
         <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", lineHeight: 1.5 }}>
           Your Stellar (<code>m/44&apos;/148&apos;/{activeIndex}&apos;</code>) and TON (
-          <code>m/44&apos;/607&apos;/{activeIndex}&apos;</code>) wallets are derived from the same
+          <code>m/44&apos;/607&apos;/{tonDerivationIndex}&apos;</code>) wallets are derived from the same
           recovery phrase so switching accounts updates both together, while operating on two
           separate L1 blockchains (<code>{config.network.toUpperCase()}</code> /{" "}
           <code>{config.tonNetwork.toUpperCase()}</code>).

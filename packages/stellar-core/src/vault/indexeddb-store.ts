@@ -147,8 +147,15 @@ export async function deleteEncryptedVault(scopeId?: string): Promise<void> {
   await idbDelete(scopedKey(PRIMARY_VAULT_KEY, scopeId));
   await idbDelete(scopedKey(BIOMETRIC_WRAP_KEY, scopeId));
   await idbDelete(scopedKey(PIN_LOCKOUT_KEY, scopeId));
-  if (!scopeId?.trim()) {
+  const cleanScope = scopeId?.trim();
+  if (!cleanScope) {
     await idbDelete(LEGACY_VAULT_CLAIMED_BY_KEY);
+  } else {
+    const claimedBy = await idbGet<string>(LEGACY_VAULT_CLAIMED_BY_KEY);
+    if (claimedBy === cleanScope) {
+      await idbDelete(PRIMARY_VAULT_KEY);
+      await idbDelete(LEGACY_VAULT_CLAIMED_BY_KEY);
+    }
   }
 }
 

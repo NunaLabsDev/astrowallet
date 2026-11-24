@@ -37,8 +37,10 @@ import {
   deriveStellarAccount,
   disableFingerprintUnlock,
   encryptVaultPayload,
+  enqueueAccountTx as enqueueSharedAccountTx,
   enrollFingerprintUnlock,
   fetchHeldAssetsTomlMetadata,
+  getPinLockoutState,
   isFingerprintSupported,
   loadBiometricRecord,
   loadContacts,
@@ -46,6 +48,7 @@ import {
   parseAgVaultBackup,
   parseExternalSecretAccount,
   publicKeyToRawHex,
+  recordFailedPinAttempt,
   saveContacts,
   saveEncryptedVault,
   serializeAgVaultBackup,
@@ -104,6 +107,13 @@ import {
   type StoredTonConnectSession,
 } from "./ton-connect-store.js";
 import { readCachedEntry, writeCachedEntry } from "./market-cache.js";
+import { clearCachedClaimSecret } from "../components/deep-link-routes.js";
+
+function stripImportedSecrets(
+  accounts: readonly VaultAccountMetadata[],
+): VaultAccountMetadata[] {
+  return accounts.map(({ importedSecret: _omitted, ...rest }) => rest);
+}
 
 const EXPRESS_SESSION_TTL_KEY = "aw_express_session_ttl_min";
 const DEFAULT_EXPRESS_SESSION_MINUTES = 15;
@@ -243,7 +253,7 @@ export interface WalletContextValue {
   ): Promise<{ envelopeJson: string }>;
   restoreAgVaultJson(rawJson: string, pinOrPassphrase: string): Promise<void>;
   syncFromNewerCloudBackup(rawJson: string): Promise<{
-    status: "synced" | "push_merged" | "pin_required" | "up_to_date";
+    status: "synced" | "push_merged" | "pin_required" | "up_to_date" | "wallet_mismatch";
     envelopeJson?: string | undefined;
     accountCount?: number | undefined;
   }>;
@@ -453,8 +463,13 @@ export function WalletProvider({
     readExpressSessionMinutes,
   );
 
+  const inMemoryLeaseRef = useRef<{ pin: string; expiresAt: number } | null>(null);
+  const expressSessionMinutesRef = useRef(expressSessionMinutes);
+  expressSessionMinutesRef.current = expressSessionMinutes;
+
   const setExpressSessionMinutes = useCallback((minutes: 0 | 15 | 30 | 60) => {
     setExpressSessionMinutesState(minutes);
+    expressSessionMinutesRef.current = minutes;
     try {
       if (typeof window !== "undefined") {
         window.localStorage.setItem(EXPRESS_SESSION_TTL_KEY, String(minutes));
@@ -463,6 +478,7 @@ export function WalletProvider({
       // Ignore storage errors
     }
     if (minutes === 0) {
+      inMemoryLeaseRef.current = null;
       try {
         if (typeof window !== "undefined") {
           window.sessionStorage.removeItem(sessionLeaseKey);
@@ -473,8 +489,6 @@ export function WalletProvider({
       void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
     }
   }, [sessionLeaseKey]);
-
-  const inMemoryLeaseRef = useRef<{ pin: string; expiresAt: number } | null>(null);
 
   const saveSessionLease = useCallback(
     async (pinOrPassphrase: string) => {
@@ -699,6 +713,14 @@ export function WalletProvider({
   tonConnectSessionsRef.current = tonConnectSessions;
   const chainFetchSeqRef = useRef(0);
   const tonFetchSeqRef = useRef(0);
+  const vaultGenerationRef = useRef(0);
+  const vaultMutexRef = useRef<Promise<unknown>>(Promise.resolve());
+  const withVaultMutex = useCallback(async <T,>(fn: () => Promise<T>): Promise<T> => {
+    const prev = vaultMutexRef.current;
+    const next = prev.catch(() => undefined).then(fn);
+    vaultMutexRef.current = next;
+    return next;
+  }, []);
 
   const getTonClient = useCallback(async () => {
     const { createTonClient } = await loadTonCore();
@@ -732,6 +754,12 @@ export function WalletProvider({
     () => accounts.find((a) => a.derivationIndex === activeIndex) ?? accounts[0] ?? null,
     [accounts, activeIndex],
   );
+  const activeAddressRef = useRef<string | null>(null);
+  activeAddressRef.current = activeAccount?.address ?? null;
+  const networkRef = useRef(config.network);
+  networkRef.current = config.network;
+  const stellarClientRef = useRef(stellarClient);
+  stellarClientRef.current = stellarClient;
 
   const [tonAccount, setTonAccount] = useState<TonAccountSummary | null>(null);
 
@@ -772,10 +800,15 @@ export function WalletProvider({
 
   useEffect(() => {
     let cancelled = false;
+    const startGen = vaultGenerationRef.current;
     async function init() {
+      let vaultReadError = false;
       const [vaultEnvelope, fpSupported, tgBio, bioRecord, tgPin, storedContacts, storedTcSessions] =
         await Promise.all([
-          loadEncryptedVault(cleanScopeId).catch(() => null),
+          loadEncryptedVault(cleanScopeId).catch(() => {
+            vaultReadError = true;
+            return null;
+          }),
           isFingerprintSupported().catch(() => false),
           isTelegramBiometricAvailable().catch(() => false),
           loadBiometricRecord(cleanScopeId).catch(() => null),
@@ -783,7 +816,7 @@ export function WalletProvider({
           loadContacts(cleanScopeId).catch(() => []),
           loadTonConnectSessions(cleanScopeId).catch(() => []),
         ]);
-      if (cancelled) return;
+      if (cancelled || startGen !== vaultGenerationRef.current) return;
       const bmSaved = Boolean(getTelegramWebApp()?.BiometricManager?.isBiometricTokenSaved);
       setTelegramBioAvailable(tgBio);
       setFingerprintSupported(fpSupported || tgBio);
@@ -791,24 +824,29 @@ export function WalletProvider({
       setContacts(storedContacts);
       setTonConnectSessions(storedTcSessions);
       setLocalVaultUpdatedAt(vaultEnvelope?.updatedAt ?? null);
+      if (vaultReadError) {
+        setChainError("Unable to read encrypted vault from IndexedDB. Reload or restore from backup.");
+        setVaultStatus("locked");
+        return;
+      }
       if (!vaultEnvelope) {
         setVaultStatus("uninitialized");
         return;
       }
       const lease = await loadValidSessionLease();
-      if (lease && !cancelled) {
+      if (lease && !cancelled && startGen === vaultGenerationRef.current) {
         try {
           const decrypted = await decryptVaultPayload(vaultEnvelope, lease.pin, {
             deriveKeyFn: deriveKeyInWorker,
           });
-          if (!cancelled) {
+          if (!cancelled && startGen === vaultGenerationRef.current) {
             sessionVault.set(decrypted.mnemonic);
             for (const acc of decrypted.accounts) {
               if (acc.importedSecret) {
                 sessionVault.setImportedSecret(acc.address, acc.importedSecret);
               }
             }
-            setAccountMetaList(decrypted.accounts);
+            setAccountMetaList(stripImportedSecrets(decrypted.accounts));
             setActiveIndex(decrypted.accounts[0]?.index ?? 0);
             setVaultStatus("unlocked");
             return;
@@ -817,7 +855,7 @@ export function WalletProvider({
           clearSessionLease();
         }
       }
-      if (!cancelled) {
+      if (!cancelled && startGen === vaultGenerationRef.current) {
         setVaultStatus("locked");
       }
     }
@@ -917,14 +955,22 @@ export function WalletProvider({
   ]);
 
   const refreshChainState = useCallback(async () => {
-    if (!activeAccount) return;
+    const targetAddress = activeAddressRef.current;
+    const targetNetwork = networkRef.current;
+    const client = stellarClientRef.current;
+    if (!targetAddress) return;
     const seq = ++chainFetchSeqRef.current;
-    const targetAddress = activeAccount.address;
     setLoadingChain(true);
     setChainError(null);
     try {
-      const state = await stellarClient.fetchAccountState(targetAddress);
-      if (seq !== chainFetchSeqRef.current) return;
+      const state = await client.fetchAccountState(targetAddress);
+      if (
+        seq !== chainFetchSeqRef.current ||
+        activeAddressRef.current !== targetAddress ||
+        networkRef.current !== targetNetwork
+      ) {
+        return;
+      }
       if (!state.funded) {
         setRawAccountState(state);
         setRecentPayments([]);
@@ -934,40 +980,54 @@ export function WalletProvider({
         return;
       }
       const [payments, trades, claimables, offers] = await Promise.all([
-        stellarClient.fetchRecentPayments(targetAddress, 25),
-        stellarClient.fetchRecentTrades(targetAddress, 20),
-        stellarClient.fetchClaimableBalances(targetAddress, 20),
-        stellarClient.fetchOpenOffers(targetAddress, 20),
+        client.fetchRecentPayments(targetAddress, 25),
+        client.fetchRecentTrades(targetAddress, 20),
+        client.fetchClaimableBalances(targetAddress, 20),
+        client.fetchOpenOffers(targetAddress, 20),
       ]);
-      if (seq !== chainFetchSeqRef.current) return;
+      if (
+        seq !== chainFetchSeqRef.current ||
+        activeAddressRef.current !== targetAddress ||
+        networkRef.current !== targetNetwork
+      ) {
+        return;
+      }
       setRawAccountState(state);
       setRecentPayments(payments);
       setRecentTrades(trades);
       setClaimableBalances(claimables);
       setOpenOffers(offers);
     } catch (err) {
-      if (seq !== chainFetchSeqRef.current) return;
+      if (
+        seq !== chainFetchSeqRef.current ||
+        activeAddressRef.current !== targetAddress ||
+        networkRef.current !== targetNetwork
+      ) {
+        return;
+      }
       setChainError(err instanceof Error ? err.message : "Failed to load Stellar Horizon state");
     } finally {
       if (seq === chainFetchSeqRef.current) {
         setLoadingChain(false);
       }
     }
-  }, [activeAccount, stellarClient]);
+  }, []);
 
   useEffect(() => {
+    chainFetchSeqRef.current += 1;
+    setRawAccountState(null);
+    setRecentPayments([]);
+    setRecentTrades([]);
+    setClaimableBalances([]);
+    setOpenOffers([]);
+    setTokenMetaMap({});
+    setChainError(null);
     if (vaultStatus === "unlocked" && activeAccount) {
       void refreshChainState();
     } else {
-      chainFetchSeqRef.current += 1;
       setLoadingChain(false);
-      setRawAccountState(null);
-      setRecentPayments([]);
-      setRecentTrades([]);
-      setClaimableBalances([]);
-      setOpenOffers([]);
     }
-  }, [vaultStatus, activeAccount, refreshChainState]);
+  }, [vaultStatus, activeAccount, config.network, refreshChainState]);
 
   const withActiveKeypair = useCallback(
     async <T,>(
@@ -1002,6 +1062,7 @@ export function WalletProvider({
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
     const handleUnload = () => {
+      vaultGenerationRef.current += 1;
       sessionVault.clear();
     };
     window.addEventListener("pagehide", handleUnload);
@@ -1009,12 +1070,19 @@ export function WalletProvider({
     return () => {
       window.removeEventListener("pagehide", handleUnload);
       window.removeEventListener("beforeunload", handleUnload);
-      sessionVault.clear();
+      handleUnload();
     };
   }, []);
 
+  const tonAccountRef = useRef<TonAccountSummary | null>(null);
+  tonAccountRef.current = tonAccount;
+  const tonNetworkRef = useRef(config.tonNetwork);
+  tonNetworkRef.current = config.tonNetwork;
+
   const refreshTonState = useCallback(async () => {
-    if (!tonAccount || config.tonRpcUrls.length === 0) {
+    const targetTon = tonAccountRef.current;
+    const targetTonNet = tonNetworkRef.current;
+    if (!targetTon || config.tonRpcUrls.length === 0) {
       tonFetchSeqRef.current += 1;
       setTonState(null);
       setLoadingTonChain(false);
@@ -1025,29 +1093,42 @@ export function WalletProvider({
     setTonChainError(null);
     try {
       const tonClient = await getTonClient();
-      const state = await tonClient.getAccountState(tonAccount.friendlyAddress);
-      if (seq !== tonFetchSeqRef.current) return;
+      const state = await tonClient.getAccountState(targetTon.friendlyAddress);
+      if (
+        seq !== tonFetchSeqRef.current ||
+        tonAccountRef.current?.friendlyAddress !== targetTon.friendlyAddress ||
+        tonNetworkRef.current !== targetTonNet
+      ) {
+        return;
+      }
       setTonState(state);
     } catch (err) {
-      if (seq !== tonFetchSeqRef.current) return;
+      if (
+        seq !== tonFetchSeqRef.current ||
+        tonAccountRef.current?.friendlyAddress !== targetTon.friendlyAddress ||
+        tonNetworkRef.current !== targetTonNet
+      ) {
+        return;
+      }
       setTonChainError(err instanceof Error ? err.message : "Failed to fetch TON account state");
     } finally {
       if (seq === tonFetchSeqRef.current) {
         setLoadingTonChain(false);
       }
     }
-  }, [tonAccount, getTonClient, config.tonRpcUrls.length]);
+  }, [getTonClient, config.tonRpcUrls.length]);
 
   useEffect(() => {
+    tonFetchSeqRef.current += 1;
+    setTonState(null);
+    setTonChainError(null);
+    setPendingTonConnectTx(null);
     if (vaultStatus === "unlocked" && tonAccount && config.tonRpcUrls.length > 0) {
       void refreshTonState();
     } else {
-      tonFetchSeqRef.current += 1;
       setLoadingTonChain(false);
-      setTonState(null);
-      setTonChainError(null);
     }
-  }, [vaultStatus, tonAccount, config.tonRpcUrls.length, refreshTonState]);
+  }, [vaultStatus, tonAccount, config.tonNetwork, config.tonRpcUrls.length, refreshTonState]);
 
   const sendTonPayment = useCallback(
     async (params: {
@@ -1099,6 +1180,7 @@ export function WalletProvider({
         throw new Error("VITE_TON_BRIDGE_URL is not configured");
       }
 
+      const startGen = vaultGenerationRef.current;
       const {
         TonConnectCryptoSession,
         buildTonConnectSuccessEvent,
@@ -1113,7 +1195,11 @@ export function WalletProvider({
       let dappUrl = manifestOrigin.origin;
 
       try {
-        const manifestRes = await fetch(parsed.manifestUrl, { signal: AbortSignal.timeout(4000) });
+        const proxyManifestUrl = `${config.apiBaseUrl.replace(/\/+$/, "")}/v1/proxy/ton-manifest?url=${encodeURIComponent(parsed.manifestUrl)}`;
+        const manifestRes = await fetch(proxyManifestUrl, {
+          headers: { "X-Astro-Network": config.network },
+          signal: AbortSignal.timeout(4000),
+        });
         if (manifestRes.ok) {
           const m = (await manifestRes.json()) as { name?: unknown; url?: unknown };
           if (typeof m.name === "string" && m.name.trim()) {
@@ -1124,7 +1210,11 @@ export function WalletProvider({
           }
         }
       } catch {
-        // Fallback cleanly to manifest hostname when manifest lacks CORS headers
+        // Fallback cleanly to manifest hostname when manifest proxy is unreachable
+      }
+
+      if (startGen !== vaultGenerationRef.current || !sessionVault.has()) {
+        throw new Error("Vault locked before TON Connect pairing completed");
       }
 
       const cryptoSess = new TonConnectCryptoSession();
@@ -1174,6 +1264,10 @@ export function WalletProvider({
         payloadBase64: sealed,
       });
 
+      if (startGen !== vaultGenerationRef.current || !sessionVault.has()) {
+        throw new Error("Vault locked during TON Connect pairing");
+      }
+
       const stored: StoredTonConnectSession = {
         ...(cleanScopeId ? { scopeId: cleanScopeId } : {}),
         walletClientId: cryptoSess.clientId,
@@ -1200,6 +1294,8 @@ export function WalletProvider({
       tonAccount,
       activeAccount,
       activeIndex,
+      config.apiBaseUrl,
+      config.network,
       config.tonBridgeUrl,
       config.tonNetwork,
       cleanScopeId,
@@ -1254,6 +1350,7 @@ export function WalletProvider({
           TonConnectCryptoSession,
           buildSignedTonTransfer,
           deriveTonAccount,
+          enqueueTonAccountTx,
           sendTonConnectBridgeMessage,
         } = await loadTonCore();
         const cryptoSess = new TonConnectCryptoSession(sessRecord.walletSecretHex);
@@ -1288,20 +1385,22 @@ export function WalletProvider({
             "v4r2",
           );
           try {
-            const chainState = await tonClient.getAccountState(derived.friendlyAddress);
-            const boc = buildSignedTonTransfer({
-              account: derived,
-              seqno: chainState.seqno,
-              validUntil: req.validUntil,
-              messages: req.messages.map((m) => ({
-                destination: m.address,
-                amountNano: m.amountNano,
-                payloadCellBase64: m.payload,
-                stateInitBase64: m.stateInit,
-              })),
+            return await enqueueTonAccountTx(derived.rawAddress, async () => {
+              const chainState = await tonClient.getAccountState(derived.friendlyAddress);
+              const boc = buildSignedTonTransfer({
+                account: derived,
+                seqno: chainState.seqno,
+                validUntil: req.validUntil,
+                messages: req.messages.map((m) => ({
+                  destination: m.address,
+                  amountNano: m.amountNano,
+                  payloadCellBase64: m.payload,
+                  stateInitBase64: m.stateInit,
+                })),
+              });
+              await tonClient.broadcastBoc(boc);
+              return boc;
             });
-            await tonClient.broadcastBoc(boc);
-            return boc;
           } finally {
             derived.zeroize();
           }
@@ -1324,6 +1423,8 @@ export function WalletProvider({
     },
     [
       pendingTonConnectTx,
+      config.apiBaseUrl,
+      config.network,
       config.tonBridgeUrl,
       config.tonNetwork,
       activeAccount,
@@ -1459,7 +1560,7 @@ export function WalletProvider({
       const initialAccounts: VaultAccountMetadata[] = [
         {
           index: 0,
-          label: initialLabel.trim() || "Primary",
+          label: (initialLabel.trim() || "Primary").slice(0, 32),
           address: derived0.publicKey,
         },
       ];
@@ -1478,7 +1579,7 @@ export function WalletProvider({
       setLocalVaultUpdatedAt(envelope.updatedAt);
 
       sessionVault.set(payload.mnemonic);
-      setAccountMetaList(initialAccounts);
+      setAccountMetaList(stripImportedSecrets(initialAccounts));
       setActiveIndex(0);
       setVaultStatus("unlocked");
       void saveSessionLease(pinOrPassphrase);
@@ -1490,20 +1591,39 @@ export function WalletProvider({
 
   const unlockWithPin = useCallback(
     async (pinOrPassphrase: string) => {
+      const lockout = await getPinLockoutState(cleanScopeId);
+      if (lockout.lockedUntilMs > Date.now()) {
+        const sec = Math.max(1, Math.ceil((lockout.lockedUntilMs - Date.now()) / 1000));
+        throw new Error(`Too many failed PIN attempts. Wait ${sec}s before retrying.`);
+      }
+      const startGen = vaultGenerationRef.current;
       const envelope = await loadEncryptedVault(cleanScopeId);
       if (!envelope) {
         throw new Error("No local vault found on this device");
       }
-      const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
-        deriveKeyFn: deriveKeyInWorker,
-      });
+      let decrypted;
+      try {
+        decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+          deriveKeyFn: deriveKeyInWorker,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Invalid PIN or passphrase";
+        if (!/Corrupted/i.test(msg)) {
+          await recordFailedPinAttempt(Date.now(), cleanScopeId);
+        }
+        throw err;
+      }
+      await clearPinLockoutState(cleanScopeId);
+      if (startGen !== vaultGenerationRef.current) {
+        return;
+      }
       sessionVault.set(decrypted.mnemonic);
       for (const acc of decrypted.accounts) {
         if (acc.importedSecret) {
           sessionVault.setImportedSecret(acc.address, acc.importedSecret);
         }
       }
-      setAccountMetaList(decrypted.accounts);
+      setAccountMetaList(stripImportedSecrets(decrypted.accounts));
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setLocalVaultUpdatedAt(envelope.updatedAt);
       setVaultStatus("unlocked");
@@ -1580,11 +1700,14 @@ export function WalletProvider({
 
   const restoreAgVaultJson = useCallback(
     async (rawJson: string, pinOrPassphrase: string) => {
+      const startGen = vaultGenerationRef.current;
       const envelope = parseAgVaultBackup(rawJson);
       const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
         deriveKeyFn: deriveKeyInWorker,
       });
+      if (startGen !== vaultGenerationRef.current) return;
       await saveEncryptedVault(envelope, cleanScopeId);
+      if (startGen !== vaultGenerationRef.current) return;
       setLocalVaultUpdatedAt(envelope.updatedAt);
       sessionVault.set(decrypted.mnemonic);
       for (const acc of decrypted.accounts) {
@@ -1592,7 +1715,7 @@ export function WalletProvider({
           sessionVault.setImportedSecret(acc.address, acc.importedSecret);
         }
       }
-      setAccountMetaList(decrypted.accounts);
+      setAccountMetaList(stripImportedSecrets(decrypted.accounts));
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setVaultStatus("unlocked");
       void saveSessionLease(pinOrPassphrase);
@@ -1605,75 +1728,44 @@ export function WalletProvider({
     async (
       rawJson: string,
     ): Promise<{
-      status: "synced" | "push_merged" | "pin_required" | "up_to_date";
+      status: "synced" | "push_merged" | "pin_required" | "up_to_date" | "wallet_mismatch";
       envelopeJson?: string | undefined;
       accountCount?: number | undefined;
-    }> => {
-      let cloudEnvelope;
-      try {
-        cloudEnvelope = parseAgVaultBackup(rawJson);
-      } catch {
-        return { status: "up_to_date" };
-      }
-
-      const localEnvelope = await loadEncryptedVault(cleanScopeId).catch(() => null);
-      if (localEnvelope && localEnvelope.ciphertextB64 === cloudEnvelope.ciphertextB64) {
-        return { status: "up_to_date" };
-      }
-
-      const lease = await loadValidSessionLease();
-      if (!lease) {
-        return { status: "pin_required" };
-      }
-
-      let cloudPayload;
-      try {
-        cloudPayload = await decryptVaultPayload(cloudEnvelope, lease.pin, {
-          deriveKeyFn: deriveKeyInWorker,
-        });
-      } catch {
-        return { status: "pin_required" };
-      }
-
-      if (!localEnvelope) {
-        await saveEncryptedVault(cloudEnvelope, cleanScopeId);
-        setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
-        sessionVault.set(cloudPayload.mnemonic);
-        for (const acc of cloudPayload.accounts) {
-          if (acc.importedSecret) {
-            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
-          }
+    }> =>
+      withVaultMutex(async () => {
+        const startGen = vaultGenerationRef.current;
+        let cloudEnvelope;
+        try {
+          cloudEnvelope = parseAgVaultBackup(rawJson);
+        } catch {
+          return { status: "up_to_date" };
         }
-        setAccountMetaList(cloudPayload.accounts);
-        setVaultStatus("unlocked");
-        showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
-        return { status: "synced", accountCount: cloudPayload.accounts.length };
-      }
 
-      let localPayload;
-      try {
-        localPayload = await decryptVaultPayload(localEnvelope, lease.pin, {
-          deriveKeyFn: deriveKeyInWorker,
-        });
-      } catch {
-        // Local PIN differed from session lease; replace with cloud
-        await saveEncryptedVault(cloudEnvelope, cleanScopeId);
-        setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
-        sessionVault.set(cloudPayload.mnemonic);
-        for (const acc of cloudPayload.accounts) {
-          if (acc.importedSecret) {
-            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
-          }
+        const localEnvelope = await loadEncryptedVault(cleanScopeId).catch(() => null);
+        if (localEnvelope && localEnvelope.ciphertextB64 === cloudEnvelope.ciphertextB64) {
+          return { status: "up_to_date" };
         }
-        setAccountMetaList(cloudPayload.accounts);
-        setVaultStatus("unlocked");
-        showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
-        return { status: "synced", accountCount: cloudPayload.accounts.length };
-      }
 
-      if (localPayload.mnemonic.trim() !== cloudPayload.mnemonic.trim()) {
-        if (cloudEnvelope.updatedAt > localEnvelope.updatedAt) {
+        const lease = await loadValidSessionLease();
+        if (!lease || startGen !== vaultGenerationRef.current) {
+          return { status: "pin_required" };
+        }
+
+        let cloudPayload;
+        try {
+          cloudPayload = await decryptVaultPayload(cloudEnvelope, lease.pin, {
+            deriveKeyFn: deriveKeyInWorker,
+          });
+        } catch {
+          return { status: "pin_required" };
+        }
+        if (startGen !== vaultGenerationRef.current) {
+          return { status: "pin_required" };
+        }
+
+        if (!localEnvelope) {
           await saveEncryptedVault(cloudEnvelope, cleanScopeId);
+          if (startGen !== vaultGenerationRef.current) return { status: "pin_required" };
           setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
           sessionVault.set(cloudPayload.mnemonic);
           for (const acc of cloudPayload.accounts) {
@@ -1681,97 +1773,112 @@ export function WalletProvider({
               sessionVault.setImportedSecret(acc.address, acc.importedSecret);
             }
           }
-          setAccountMetaList(cloudPayload.accounts);
+          setAccountMetaList(stripImportedSecrets(cloudPayload.accounts));
           setVaultStatus("unlocked");
           showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
           return { status: "synced", accountCount: cloudPayload.accounts.length };
         }
-        return {
-          status: "push_merged",
-          envelopeJson: serializeAgVaultBackup(localEnvelope),
-          accountCount: localPayload.accounts.length,
-        };
-      }
 
-      // CRDT account-union merge (never drop accounts from either device)
-      const primaryFirst =
-        localEnvelope.updatedAt >= cloudEnvelope.updatedAt
-          ? localPayload.accounts
-          : cloudPayload.accounts;
-      const secondary =
-        localEnvelope.updatedAt >= cloudEnvelope.updatedAt
-          ? cloudPayload.accounts
-          : localPayload.accounts;
-
-      const byAddress = new Map<string, VaultAccountMetadata>();
-      const usedIndices = new Set<number>();
-      let maxIdx = 999;
-
-      for (const acc of primaryFirst) {
-        byAddress.set(acc.address, acc);
-        usedIndices.add(acc.index);
-        if (acc.index > maxIdx) maxIdx = acc.index;
-      }
-      for (const acc of secondary) {
-        if (byAddress.has(acc.address)) continue;
-        let nextIdx = acc.index;
-        if (usedIndices.has(nextIdx)) {
-          maxIdx += 1;
-          nextIdx = maxIdx;
+        let localPayload;
+        try {
+          localPayload = await decryptVaultPayload(localEnvelope, lease.pin, {
+            deriveKeyFn: deriveKeyInWorker,
+          });
+        } catch {
+          // Local PIN differed or distinct wallet; never overwrite local IndexedDB silently
+          return { status: "wallet_mismatch" };
         }
-        usedIndices.add(nextIdx);
-        byAddress.set(acc.address, { ...acc, index: nextIdx });
-      }
+        if (startGen !== vaultGenerationRef.current) {
+          return { status: "pin_required" };
+        }
 
-      const mergedAccounts = Array.from(byAddress.values()).sort((a, b) => a.index - b.index);
-      const cloudMissingAny = mergedAccounts.length > cloudPayload.accounts.length;
-      const localMissingAny = mergedAccounts.length > localPayload.accounts.length;
+        if (localPayload.mnemonic.trim() !== cloudPayload.mnemonic.trim()) {
+          // Distinct recovery phrases: never silently overwrite either local vault or cloud backup
+          return { status: "wallet_mismatch" };
+        }
 
-      if (cloudMissingAny) {
-        const mergedEnvelope = await encryptVaultPayload(
-          {
-            mnemonic: localPayload.mnemonic,
-            accounts: mergedAccounts,
-            createdAt: Math.min(localPayload.createdAt, cloudPayload.createdAt),
-          },
-          lease.pin,
-          { deriveKeyFn: deriveKeyInWorker },
-        );
-        await saveEncryptedVault(mergedEnvelope, cleanScopeId);
-        setLocalVaultUpdatedAt(mergedEnvelope.updatedAt);
-        sessionVault.set(localPayload.mnemonic);
-        for (const acc of mergedAccounts) {
-          if (acc.importedSecret) {
-            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+        // CRDT account-union merge (never drop accounts from either device)
+        const primaryFirst =
+          localEnvelope.updatedAt >= cloudEnvelope.updatedAt
+            ? localPayload.accounts
+            : cloudPayload.accounts;
+        const secondary =
+          localEnvelope.updatedAt >= cloudEnvelope.updatedAt
+            ? cloudPayload.accounts
+            : localPayload.accounts;
+
+        const byAddress = new Map<string, VaultAccountMetadata>();
+        const usedIndices = new Set<number>();
+        let maxIdx = 999;
+
+        for (const acc of primaryFirst) {
+          byAddress.set(acc.address, acc);
+          usedIndices.add(acc.index);
+          if (acc.index > maxIdx) maxIdx = acc.index;
+        }
+        for (const acc of secondary) {
+          if (byAddress.has(acc.address)) continue;
+          let nextIdx = acc.index;
+          if (usedIndices.has(nextIdx)) {
+            maxIdx += 1;
+            nextIdx = maxIdx;
           }
+          usedIndices.add(nextIdx);
+          byAddress.set(acc.address, { ...acc, index: nextIdx });
         }
-        setAccountMetaList(mergedAccounts);
-        setVaultStatus("unlocked");
-        return {
-          status: "push_merged",
-          envelopeJson: serializeAgVaultBackup(mergedEnvelope),
-          accountCount: mergedAccounts.length,
-        };
-      }
 
-      if (localMissingAny || cloudEnvelope.updatedAt > localEnvelope.updatedAt) {
-        await saveEncryptedVault(cloudEnvelope, cleanScopeId);
-        setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
-        sessionVault.set(cloudPayload.mnemonic);
-        for (const acc of cloudPayload.accounts) {
-          if (acc.importedSecret) {
-            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+        const mergedAccounts = Array.from(byAddress.values()).sort((a, b) => a.index - b.index);
+        const cloudMissingAny = mergedAccounts.length > cloudPayload.accounts.length;
+        const localMissingAny = mergedAccounts.length > localPayload.accounts.length;
+
+        if (cloudMissingAny) {
+          const mergedEnvelope = await encryptVaultPayload(
+            {
+              mnemonic: localPayload.mnemonic,
+              accounts: mergedAccounts,
+              createdAt: Math.min(localPayload.createdAt, cloudPayload.createdAt),
+            },
+            lease.pin,
+            { deriveKeyFn: deriveKeyInWorker },
+          );
+          if (startGen !== vaultGenerationRef.current) return { status: "pin_required" };
+          await saveEncryptedVault(mergedEnvelope, cleanScopeId);
+          if (startGen !== vaultGenerationRef.current) return { status: "pin_required" };
+          setLocalVaultUpdatedAt(mergedEnvelope.updatedAt);
+          sessionVault.set(localPayload.mnemonic);
+          for (const acc of mergedAccounts) {
+            if (acc.importedSecret) {
+              sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+            }
           }
+          setAccountMetaList(stripImportedSecrets(mergedAccounts));
+          setVaultStatus("unlocked");
+          return {
+            status: "push_merged",
+            envelopeJson: serializeAgVaultBackup(mergedEnvelope),
+            accountCount: mergedAccounts.length,
+          };
         }
-        setAccountMetaList(cloudPayload.accounts);
-        setVaultStatus("unlocked");
-        showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
-        return { status: "synced", accountCount: cloudPayload.accounts.length };
-      }
 
-      return { status: "up_to_date" };
-    },
-    [cleanScopeId, loadValidSessionLease, showToast],
+        if (localMissingAny || cloudEnvelope.updatedAt > localEnvelope.updatedAt) {
+          await saveEncryptedVault(cloudEnvelope, cleanScopeId);
+          if (startGen !== vaultGenerationRef.current) return { status: "pin_required" };
+          setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
+          sessionVault.set(cloudPayload.mnemonic);
+          for (const acc of cloudPayload.accounts) {
+            if (acc.importedSecret) {
+              sessionVault.setImportedSecret(acc.address, acc.importedSecret);
+            }
+          }
+          setAccountMetaList(stripImportedSecrets(cloudPayload.accounts));
+          setVaultStatus("unlocked");
+          showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
+          return { status: "synced", accountCount: cloudPayload.accounts.length };
+        }
+
+        return { status: "up_to_date" };
+      }),
+    [cleanScopeId, loadValidSessionLease, showToast, withVaultMutex],
   );
 
   const exportAgVaultJson = useCallback(async () => {
@@ -1783,32 +1890,33 @@ export function WalletProvider({
   }, [cleanScopeId]);
 
   const reEncryptLocalVault = useCallback(
-    async (currentPin: string, newPinOrPassphrase: string): Promise<{ envelopeJson: string }> => {
-      const envelope = await loadEncryptedVault(cleanScopeId);
-      if (!envelope) {
-        throw new Error("No encrypted vault present on this device");
-      }
-      const decrypted = await decryptVaultPayload(envelope, currentPin, {
-        deriveKeyFn: deriveKeyInWorker,
-      });
-      const updatedEnvelope = await encryptVaultPayload(
-        {
-          mnemonic: decrypted.mnemonic,
-          accounts: decrypted.accounts,
-          createdAt: decrypted.createdAt,
-        },
-        newPinOrPassphrase,
-        { deriveKeyFn: deriveKeyInWorker },
-      );
-      await saveEncryptedVault(updatedEnvelope, cleanScopeId);
-      setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
-      clearSessionLease();
-      // Clear any previous biometric PIN wrapper so stale PIN credentials never cause a mismatch
-      await disableFingerprint();
-      showToast("Vault protection updated", "info");
-      return { envelopeJson: serializeAgVaultBackup(updatedEnvelope) };
-    },
-    [cleanScopeId, clearSessionLease, disableFingerprint, showToast],
+    async (currentPin: string, newPinOrPassphrase: string): Promise<{ envelopeJson: string }> =>
+      withVaultMutex(async () => {
+        const envelope = await loadEncryptedVault(cleanScopeId);
+        if (!envelope) {
+          throw new Error("No encrypted vault present on this device");
+        }
+        const decrypted = await decryptVaultPayload(envelope, currentPin, {
+          deriveKeyFn: deriveKeyInWorker,
+        });
+        const updatedEnvelope = await encryptVaultPayload(
+          {
+            mnemonic: decrypted.mnemonic,
+            accounts: decrypted.accounts,
+            createdAt: decrypted.createdAt,
+          },
+          newPinOrPassphrase,
+          { deriveKeyFn: deriveKeyInWorker },
+        );
+        await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+        setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
+        clearSessionLease();
+        // Clear any previous biometric PIN wrapper so stale PIN credentials never cause a mismatch
+        await disableFingerprint();
+        showToast("Vault protection updated", "info");
+        return { envelopeJson: serializeAgVaultBackup(updatedEnvelope) };
+      }),
+    [cleanScopeId, clearSessionLease, disableFingerprint, showToast, withVaultMutex],
   );
 
   const revealMnemonicWithPin = useCallback(
@@ -1827,13 +1935,27 @@ export function WalletProvider({
 
   const verifyPinOrPassphrase = useCallback(
     async (pinOrPassphrase: string): Promise<void> => {
+      const lockout = await getPinLockoutState(cleanScopeId);
+      if (lockout.lockedUntilMs > Date.now()) {
+        const sec = Math.max(1, Math.ceil((lockout.lockedUntilMs - Date.now()) / 1000));
+        throw new Error(`Too many failed PIN attempts. Wait ${sec}s before retrying.`);
+      }
       const envelope = await loadEncryptedVault(cleanScopeId);
       if (!envelope) {
         throw new Error("No encrypted vault stored on this device");
       }
-      await decryptVaultPayload(envelope, pinOrPassphrase, {
-        deriveKeyFn: deriveKeyInWorker,
-      });
+      try {
+        await decryptVaultPayload(envelope, pinOrPassphrase, {
+          deriveKeyFn: deriveKeyInWorker,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : "Invalid PIN or passphrase";
+        if (!/Corrupted/i.test(msg)) {
+          await recordFailedPinAttempt(Date.now(), cleanScopeId);
+        }
+        throw err;
+      }
+      await clearPinLockoutState(cleanScopeId);
     },
     [cleanScopeId],
   );
@@ -1858,137 +1980,11 @@ export function WalletProvider({
   );
 
   const addDerivedAccount = useCallback(
-    async (label: string, pinOrPassphrase: string): Promise<LinkedAccount> => {
-      if (!sessionVault.has()) {
-        throw new Error("Unlock your vault before deriving a new account");
-      }
-      const envelope = await loadEncryptedVault(cleanScopeId);
-      if (!envelope) {
-        throw new Error("Encrypted vault missing from IndexedDB");
-      }
-      const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
-        deriveKeyFn: deriveKeyInWorker,
-      });
-
-      const rawNext =
-        decrypted.accounts
-          .filter((acc) => !acc.importedSecret && acc.index < 1000 && acc.index !== 99)
-          .reduce((max, acc) => Math.max(max, acc.index), -1) + 1;
-      const nextIndex = rawNext === 99 ? 100 : rawNext;
-      const derived = deriveStellarAccount(decrypted.mnemonic, nextIndex);
-      const cleanLabel = label.trim() || `Account #${nextIndex + 1}`;
-      const nextMeta: VaultAccountMetadata = {
-        index: nextIndex,
-        label: cleanLabel,
-        address: derived.publicKey,
-      };
-      derived.zeroize();
-
-      const updatedAccounts = [...decrypted.accounts, nextMeta];
-      const updatedEnvelope = await encryptVaultPayload(
-        {
-          mnemonic: decrypted.mnemonic,
-          accounts: updatedAccounts,
-          createdAt: decrypted.createdAt,
-        },
-        pinOrPassphrase,
-        { deriveKeyFn: deriveKeyInWorker },
-      );
-
-      await saveEncryptedVault(updatedEnvelope, cleanScopeId);
-      setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
-      setAccountMetaList(updatedAccounts);
-      setActiveIndex(nextIndex);
-
-      const linked = toLinkedAccounts([nextMeta])[0];
-      if (!linked) {
-        throw new Error("Failed to construct linked account");
-      }
-      showToast(`Derived ${cleanLabel} (m/44'/148'/${nextIndex}')`);
-      return linked;
-    },
-    [cleanScopeId, showToast],
-  );
-
-  const activateDerivedAccountAtIndex = useCallback(
-    async (index: number, label: string, pinOrPassphrase: string): Promise<LinkedAccount> => {
-      if (!sessionVault.has()) {
-        throw new Error("Unlock your vault before activating a derived key");
-      }
-      if (!Number.isInteger(index) || index < 0 || index > 50) {
-        throw new Error("Derivation index must be between 0 and 50");
-      }
-      const envelope = await loadEncryptedVault(cleanScopeId);
-      if (!envelope) {
-        throw new Error("Encrypted vault missing from IndexedDB");
-      }
-      const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
-        deriveKeyFn: deriveKeyInWorker,
-      });
-      const derived = deriveStellarAccount(decrypted.mnemonic, index);
-      const existingByAddr = decrypted.accounts.find((acc) => acc.address === derived.publicKey);
-      if (existingByAddr) {
-        derived.zeroize();
-        setActiveIndex(existingByAddr.index);
-        const linkedExisting = toLinkedAccounts([existingByAddr])[0];
-        if (!linkedExisting) throw new Error("Failed to resolve existing account");
-        return linkedExisting;
-      }
-
-      const cleanLabel = label.trim() || `Account #${index + 1}`;
-      const nextMeta: VaultAccountMetadata = {
-        index,
-        label: cleanLabel.slice(0, 32),
-        address: derived.publicKey,
-      };
-      derived.zeroize();
-
-      // Migrate any legacy imported external key that previously occupied this seed index to >= 1000
-      let maxImportedIdx = Math.max(
-        999,
-        decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1),
-      );
-      const migratedAccounts = decrypted.accounts.map((acc) => {
-        if (acc.index === index && acc.importedSecret) {
-          maxImportedIdx += 1;
-          return { ...acc, index: maxImportedIdx };
+    async (label: string, pinOrPassphrase: string): Promise<LinkedAccount> =>
+      withVaultMutex(async () => {
+        if (!sessionVault.has()) {
+          throw new Error("Unlock your vault before deriving a new account");
         }
-        return acc;
-      });
-
-      const updatedAccounts = [...migratedAccounts, nextMeta].sort((a, b) => a.index - b.index);
-      const updatedEnvelope = await encryptVaultPayload(
-        {
-          mnemonic: decrypted.mnemonic,
-          accounts: updatedAccounts,
-          createdAt: decrypted.createdAt,
-        },
-        pinOrPassphrase,
-        { deriveKeyFn: deriveKeyInWorker },
-      );
-
-      await saveEncryptedVault(updatedEnvelope, cleanScopeId);
-      setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
-      setAccountMetaList(updatedAccounts);
-      setActiveIndex(index);
-
-      const linked = toLinkedAccounts([nextMeta])[0];
-      if (!linked) {
-        throw new Error("Failed to construct linked account");
-      }
-      showToast(`Activated ${cleanLabel} (m/44'/148'/${index}')`);
-      return linked;
-    },
-    [cleanScopeId, showToast],
-  );
-
-  const importExternalSecretAccount = useCallback(
-    async (secretSeed: string, label: string, pinOrPassphrase: string): Promise<LinkedAccount> => {
-      if (!sessionVault.has()) {
-        throw new Error("Unlock your vault before importing an external key");
-      }
-      const parsed = parseExternalSecretAccount(secretSeed);
-      try {
         const envelope = await loadEncryptedVault(cleanScopeId);
         if (!envelope) {
           throw new Error("Encrypted vault missing from IndexedDB");
@@ -1996,27 +1992,20 @@ export function WalletProvider({
         const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
           deriveKeyFn: deriveKeyInWorker,
         });
-        const duplicate = decrypted.accounts.find((acc) => acc.address === parsed.publicKey);
-        if (duplicate) {
-          setActiveIndex(duplicate.index);
-          const linkedDup = toLinkedAccounts([duplicate])[0];
-          if (!linkedDup) throw new Error("Failed to resolve existing account");
-          showToast(`Account ${duplicate.label} is already in your vault`, "info");
-          return linkedDup;
-        }
 
-        const nextIndex =
-          Math.max(
-            999,
-            decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1),
-          ) + 1;
-        const cleanLabel = label.trim() || `External #${nextIndex + 1}`;
+        const rawNext =
+          decrypted.accounts
+            .filter((acc) => !acc.importedSecret && acc.index < 1000 && acc.index !== 99)
+            .reduce((max, acc) => Math.max(max, acc.index), -1) + 1;
+        const nextIndex = rawNext === 99 ? 100 : rawNext;
+        const derived = deriveStellarAccount(decrypted.mnemonic, nextIndex);
+        const cleanLabel = (label.trim() || `Account #${nextIndex + 1}`).slice(0, 32);
         const nextMeta: VaultAccountMetadata = {
           index: nextIndex,
-          label: cleanLabel.slice(0, 32),
-          address: parsed.publicKey,
-          importedSecret: parsed.secretKey,
+          label: cleanLabel,
+          address: derived.publicKey,
         };
+        derived.zeroize();
 
         const updatedAccounts = [...decrypted.accounts, nextMeta];
         const updatedEnvelope = await encryptVaultPayload(
@@ -2030,22 +2019,158 @@ export function WalletProvider({
         );
 
         await saveEncryptedVault(updatedEnvelope, cleanScopeId);
-        sessionVault.setImportedSecret(parsed.publicKey, parsed.secretKey);
         setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
-        setAccountMetaList(updatedAccounts);
+        setAccountMetaList(stripImportedSecrets(updatedAccounts));
         setActiveIndex(nextIndex);
 
         const linked = toLinkedAccounts([nextMeta])[0];
         if (!linked) {
-          throw new Error("Failed to construct imported account");
+          throw new Error("Failed to construct linked account");
         }
-        showToast(`Imported external account "${cleanLabel}"`);
+        showToast(`Derived ${cleanLabel} (m/44'/148'/${nextIndex}')`);
         return linked;
-      } finally {
-        parsed.zeroize();
-      }
-    },
-    [cleanScopeId, showToast],
+      }),
+    [cleanScopeId, showToast, withVaultMutex],
+  );
+
+  const activateDerivedAccountAtIndex = useCallback(
+    async (index: number, label: string, pinOrPassphrase: string): Promise<LinkedAccount> =>
+      withVaultMutex(async () => {
+        if (!sessionVault.has()) {
+          throw new Error("Unlock your vault before activating a derived key");
+        }
+        if (!Number.isInteger(index) || index < 0 || index > 50) {
+          throw new Error("Derivation index must be between 0 and 50");
+        }
+        const envelope = await loadEncryptedVault(cleanScopeId);
+        if (!envelope) {
+          throw new Error("Encrypted vault missing from IndexedDB");
+        }
+        const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+          deriveKeyFn: deriveKeyInWorker,
+        });
+        const derived = deriveStellarAccount(decrypted.mnemonic, index);
+        const existingByAddr = decrypted.accounts.find((acc) => acc.address === derived.publicKey);
+        if (existingByAddr) {
+          derived.zeroize();
+          setActiveIndex(existingByAddr.index);
+          const linkedExisting = toLinkedAccounts([existingByAddr])[0];
+          if (!linkedExisting) throw new Error("Failed to resolve existing account");
+          return linkedExisting;
+        }
+
+        const cleanLabel = (label.trim() || `Account #${index + 1}`).slice(0, 32);
+        const nextMeta: VaultAccountMetadata = {
+          index,
+          label: cleanLabel,
+          address: derived.publicKey,
+        };
+        derived.zeroize();
+
+        // Migrate any legacy imported external key that previously occupied this seed index to >= 1000
+        let maxImportedIdx = Math.max(
+          999,
+          decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1),
+        );
+        const migratedAccounts = decrypted.accounts.map((acc) => {
+          if (acc.index === index && acc.importedSecret) {
+            maxImportedIdx += 1;
+            return { ...acc, index: maxImportedIdx };
+          }
+          return acc;
+        });
+
+        const updatedAccounts = [...migratedAccounts, nextMeta].sort((a, b) => a.index - b.index);
+        const updatedEnvelope = await encryptVaultPayload(
+          {
+            mnemonic: decrypted.mnemonic,
+            accounts: updatedAccounts,
+            createdAt: decrypted.createdAt,
+          },
+          pinOrPassphrase,
+          { deriveKeyFn: deriveKeyInWorker },
+        );
+
+        await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+        setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
+        setAccountMetaList(stripImportedSecrets(updatedAccounts));
+        setActiveIndex(index);
+
+        const linked = toLinkedAccounts([nextMeta])[0];
+        if (!linked) {
+          throw new Error("Failed to construct linked account");
+        }
+        showToast(`Activated ${cleanLabel} (m/44'/148'/${index}')`);
+        return linked;
+      }),
+    [cleanScopeId, showToast, withVaultMutex],
+  );
+
+  const importExternalSecretAccount = useCallback(
+    async (secretSeed: string, label: string, pinOrPassphrase: string): Promise<LinkedAccount> =>
+      withVaultMutex(async () => {
+        if (!sessionVault.has()) {
+          throw new Error("Unlock your vault before importing an external key");
+        }
+        const parsed = parseExternalSecretAccount(secretSeed);
+        try {
+          const envelope = await loadEncryptedVault(cleanScopeId);
+          if (!envelope) {
+            throw new Error("Encrypted vault missing from IndexedDB");
+          }
+          const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+            deriveKeyFn: deriveKeyInWorker,
+          });
+          const duplicate = decrypted.accounts.find((acc) => acc.address === parsed.publicKey);
+          if (duplicate) {
+            setActiveIndex(duplicate.index);
+            const linkedDup = toLinkedAccounts([duplicate])[0];
+            if (!linkedDup) throw new Error("Failed to resolve existing account");
+            showToast(`Account ${duplicate.label} is already in your vault`, "info");
+            return linkedDup;
+          }
+
+          const nextIndex =
+            Math.max(
+              999,
+              decrypted.accounts.reduce((max, acc) => Math.max(max, acc.index), -1),
+            ) + 1;
+          const cleanLabel = (label.trim() || `External #${nextIndex + 1}`).slice(0, 32);
+          const nextMeta: VaultAccountMetadata = {
+            index: nextIndex,
+            label: cleanLabel,
+            address: parsed.publicKey,
+            importedSecret: parsed.secretKey,
+          };
+
+          const updatedAccounts = [...decrypted.accounts, nextMeta];
+          const updatedEnvelope = await encryptVaultPayload(
+            {
+              mnemonic: decrypted.mnemonic,
+              accounts: updatedAccounts,
+              createdAt: decrypted.createdAt,
+            },
+            pinOrPassphrase,
+            { deriveKeyFn: deriveKeyInWorker },
+          );
+
+          await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+          sessionVault.setImportedSecret(parsed.publicKey, parsed.secretKey);
+          setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
+          setAccountMetaList(stripImportedSecrets(updatedAccounts));
+          setActiveIndex(nextIndex);
+
+          const linked = toLinkedAccounts([nextMeta])[0];
+          if (!linked) {
+            throw new Error("Failed to construct imported account");
+          }
+          showToast(`Imported external account "${cleanLabel}"`);
+          return linked;
+        } finally {
+          parsed.zeroize();
+        }
+      }),
+    [cleanScopeId, showToast, withVaultMutex],
   );
 
   const isImportedAccount = useCallback(
@@ -2054,40 +2179,41 @@ export function WalletProvider({
   );
 
   const renameDerivedAccount = useCallback(
-    async (index: number, newLabel: string, pinOrPassphrase: string) => {
-      const cleaned = newLabel.trim();
-      if (!cleaned) {
-        throw new Error("Account label cannot be empty");
-      }
-      const envelope = await loadEncryptedVault(cleanScopeId);
-      if (!envelope) {
-        throw new Error("Encrypted vault missing from IndexedDB");
-      }
-      const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
-        deriveKeyFn: deriveKeyInWorker,
-      });
-      if (!decrypted.accounts.some((acc) => acc.index === index)) {
-        throw new Error(`Account index ${index} not found in vault`);
-      }
+    async (index: number, newLabel: string, pinOrPassphrase: string) =>
+      withVaultMutex(async () => {
+        const cleaned = newLabel.trim();
+        if (!cleaned) {
+          throw new Error("Account label cannot be empty");
+        }
+        const envelope = await loadEncryptedVault(cleanScopeId);
+        if (!envelope) {
+          throw new Error("Encrypted vault missing from IndexedDB");
+        }
+        const decrypted = await decryptVaultPayload(envelope, pinOrPassphrase, {
+          deriveKeyFn: deriveKeyInWorker,
+        });
+        if (!decrypted.accounts.some((acc) => acc.index === index)) {
+          throw new Error(`Account index ${index} not found in vault`);
+        }
 
-      const updatedAccounts = decrypted.accounts.map((acc) =>
-        acc.index === index ? { ...acc, label: cleaned.slice(0, 32) } : acc,
-      );
-      const updatedEnvelope = await encryptVaultPayload(
-        {
-          mnemonic: decrypted.mnemonic,
-          accounts: updatedAccounts,
-          createdAt: decrypted.createdAt,
-        },
-        pinOrPassphrase,
-        { deriveKeyFn: deriveKeyInWorker },
-      );
-      await saveEncryptedVault(updatedEnvelope, cleanScopeId);
-      setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
-      setAccountMetaList(updatedAccounts);
-      showToast(`Renamed account to "${cleaned}"`);
-    },
-    [cleanScopeId, showToast],
+        const updatedAccounts = decrypted.accounts.map((acc) =>
+          acc.index === index ? { ...acc, label: cleaned.slice(0, 32) } : acc,
+        );
+        const updatedEnvelope = await encryptVaultPayload(
+          {
+            mnemonic: decrypted.mnemonic,
+            accounts: updatedAccounts,
+            createdAt: decrypted.createdAt,
+          },
+          pinOrPassphrase,
+          { deriveKeyFn: deriveKeyInWorker },
+        );
+        await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+        setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
+        setAccountMetaList(stripImportedSecrets(updatedAccounts));
+        showToast(`Renamed account to "${cleaned}"`);
+      }),
+    [cleanScopeId, showToast, withVaultMutex],
   );
 
   const saveContact = useCallback(
@@ -2125,11 +2251,14 @@ export function WalletProvider({
   );
 
   const lockVault = useCallback(() => {
+    vaultGenerationRef.current += 1;
     chainFetchSeqRef.current += 1;
     tonFetchSeqRef.current += 1;
     setPendingTonConnectTx(null);
     sessionVault.clear();
+    clearCachedClaimSecret();
     clearSessionLease();
+    setAccountMetaList([]);
     setRawAccountState(null);
     setTonState(null);
     setRecentPayments([]);
@@ -2174,6 +2303,10 @@ export function WalletProvider({
     let hiddenAt: number | null = null;
     const onVisibilityChange = () => {
       if (document.hidden) {
+        if (expressSessionMinutesRef.current === 0) {
+          lockVault();
+          return;
+        }
         hiddenAt = Date.now();
       } else if (hiddenAt !== null) {
         const elapsed = Date.now() - hiddenAt;
@@ -2201,10 +2334,12 @@ export function WalletProvider({
   }, [vaultStatus, lockVault, showToast, loadValidSessionLease, saveSessionLease]);
 
   const wipeLocalVault = useCallback(async () => {
+    vaultGenerationRef.current += 1;
     chainFetchSeqRef.current += 1;
     tonFetchSeqRef.current += 1;
     setPendingTonConnectTx(null);
     clearSessionLease();
+    clearCachedClaimSecret();
     await updateTelegramBiometricToken("").catch(() => false);
     await tgSecureStorageRemove(securePinKey).catch(() => false);
     await clearAllTonConnectSessions(cleanScopeId).catch(() => undefined);
@@ -2223,26 +2358,32 @@ export function WalletProvider({
     setFingerprintEnrolled(false);
     setVaultStatus("uninitialized");
     showToast("Local vault wiped from this device", "info");
-  }, [securePinKey, cleanScopeId, showToast]);
+  }, [securePinKey, cleanScopeId, clearSessionLease, showToast]);
 
   const fundActiveTestnetAccount = useCallback(async () => {
     if (!activeAccount) {
       throw new Error("No active account selected");
     }
+    const targetAddr = activeAccount.address;
+    const targetNet = config.network;
     setLoadingChain(true);
     setChainError(null);
     try {
-      await stellarClient.fundWithFriendbot(activeAccount.address);
+      await stellarClient.fundWithFriendbot(targetAddr);
       await refreshChainState();
       showToast("Funded 10,000 Testnet XLM via Friendbot");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Friendbot funding failed";
-      setChainError(msg);
+      if (activeAddressRef.current === targetAddr && networkRef.current === targetNet) {
+        const msg = err instanceof Error ? err.message : "Friendbot funding failed";
+        setChainError(msg);
+      }
       throw err;
     } finally {
-      setLoadingChain(false);
+      if (activeAddressRef.current === targetAddr && networkRef.current === targetNet) {
+        setLoadingChain(false);
+      }
     }
-  }, [activeAccount, stellarClient, refreshChainState, showToast]);
+  }, [activeAccount, config.network, stellarClient, refreshChainState, showToast]);
 
   const fundAnyTestnetAddress = useCallback(
     async (address: ClassicAddress) => {
@@ -2255,21 +2396,9 @@ export function WalletProvider({
     [stellarClient, activeAccount, refreshChainState, showToast],
   );
 
-  const accountTxQueueRef = useRef<Map<string, Promise<unknown>>>(new Map());
-
   const enqueueAccountTx = useCallback(
-    async <T,>(accountKey: string, task: () => Promise<T>): Promise<T> => {
-      const prev = accountTxQueueRef.current.get(accountKey) ?? Promise.resolve();
-      const next = prev.catch(() => undefined).then(task);
-      accountTxQueueRef.current.set(accountKey, next);
-      try {
-        return await next;
-      } finally {
-        if (accountTxQueueRef.current.get(accountKey) === next) {
-          accountTxQueueRef.current.delete(accountKey);
-        }
-      }
-    },
+    <T,>(accountKey: string, task: () => Promise<T>): Promise<T> =>
+      enqueueSharedAccountTx(accountKey, task),
     [],
   );
 
@@ -2735,64 +2864,67 @@ export function WalletProvider({
         throw new Error("Open AstroWallet inside Telegram to claim sponsored activation.");
       }
       const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
-      return withActiveKeypair(async (keypair) => {
-        const address = keypair.publicKey() as ClassicAddress;
-        const timestamp = Math.floor(Date.now() / 1000);
-        const nonceBytes = new Uint8Array(12);
-        crypto.getRandomValues(nonceBytes);
-        const nonce = Array.from(nonceBytes, (b) => b.toString(16).padStart(2, "0")).join("");
-        const challengeMsg = `astrowallet-bootstrap:v1:${config.network}:${address}:${timestamp}:${nonce}`;
-        const signatureBase64 = signChallengeMessage(keypair, challengeMsg);
-        const res = await fetch(`${apiBase}/v1/relay/bootstrap`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Astro-Network": config.network,
-            Authorization: `Bearer ${sessionToken}`,
-          },
-          body: JSON.stringify({
-            address,
-            timestamp,
-            nonce,
-            signatureBase64,
-          }),
-        });
-        const body = (await res.json().catch(() => ({}))) as {
-          error?: string;
-          mode?: string;
-          sponsorSignedXdr?: string;
-          hash?: string;
-          status?: string;
-        };
-        if (!res.ok) {
-          throw new Error(body.error ?? `Sponsored activation failed (${res.status})`);
-        }
-        let finalHash = body.hash;
-        if (body.sponsorSignedXdr) {
-          const cosignedXdr = signTransactionXdrEnvelope(
-            body.sponsorSignedXdr,
-            config.networkPassphrase,
-            keypair,
-          );
-          const submitted = await sorobanDevClient.submitRawSignedXdr(cosignedXdr, {
-            sourceKeypair: keypair,
+      return withActiveKeypair(async (keypair) =>
+        enqueueAccountTx(keypair.publicKey(), async () => {
+          const address = keypair.publicKey() as ClassicAddress;
+          const timestamp = Math.floor(Date.now() / 1000);
+          const nonceBytes = new Uint8Array(12);
+          crypto.getRandomValues(nonceBytes);
+          const nonce = Array.from(nonceBytes, (b) => b.toString(16).padStart(2, "0")).join("");
+          const challengeMsg = `astrowallet-bootstrap:v1:${config.network}:${address}:${timestamp}:${nonce}`;
+          const signatureBase64 = signChallengeMessage(keypair, challengeMsg);
+          const res = await fetch(`${apiBase}/v1/relay/bootstrap`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Astro-Network": config.network,
+              Authorization: `Bearer ${sessionToken}`,
+            },
+            body: JSON.stringify({
+              address,
+              timestamp,
+              nonce,
+              signatureBase64,
+            }),
           });
-          finalHash = submitted.hash;
-        }
-        await refreshChainState();
-        showToast("Account activated on Stellar via sponsored bootstrap.", "success");
-        return {
-          hash: finalHash,
-          address,
-          status: finalHash ? "confirmed" : (body.status ?? "submitted"),
-        };
-      });
+          const body = (await res.json().catch(() => ({}))) as {
+            error?: string;
+            mode?: string;
+            sponsorSignedXdr?: string;
+            hash?: string;
+            status?: string;
+          };
+          if (!res.ok) {
+            throw new Error(body.error ?? `Sponsored activation failed (${res.status})`);
+          }
+          let finalHash = body.hash;
+          if (body.sponsorSignedXdr) {
+            const cosignedXdr = signTransactionXdrEnvelope(
+              body.sponsorSignedXdr,
+              config.networkPassphrase,
+              keypair,
+            );
+            const submitted = await sorobanDevClient.submitRawSignedXdr(cosignedXdr, {
+              sourceKeypair: keypair,
+            });
+            finalHash = submitted.hash;
+          }
+          await refreshChainState();
+          showToast("Account activated on Stellar via sponsored bootstrap.", "success");
+          return {
+            hash: finalHash,
+            address,
+            status: finalHash ? "confirmed" : (body.status ?? "submitted"),
+          };
+        }),
+      );
     },
     [
       config.apiBaseUrl,
       config.network,
       config.networkPassphrase,
       withActiveKeypair,
+      enqueueAccountTx,
       sorobanDevClient,
       refreshChainState,
       showToast,

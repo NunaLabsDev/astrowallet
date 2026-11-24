@@ -22,6 +22,6 @@
     "@scure/bip39": "^2.4.0",
     "@stellar/stellar-sdk": "^17.4.0",
     "hash-wasm": "^4.13.0",
-    "zod": "^3.25.0"
+    "zod": "^4.6.7"
   }
 }

@@ -517,12 +517,15 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
       return c.json({ error: verification.error }, verification.status);
     }
 
+    const confirmed = await repo.markIntentConfirmed(intent.intentId);
+    if (!confirmed) {
+      return c.json({ error: "Connect intent already confirmed" }, 409);
+    }
     const linked = await repo.linkVerifiedAddresses({
       telegramUserId: session.claims.telegramUserId,
       usernameLower: session.claims.usernameLower ?? storedPayload.challenge?.usernameLower,
       accounts: verification.verifiedInputs,
     });
-    await repo.markIntentConfirmed(intent.intentId);
     await repo.incrementProductEvent({
       dayUtc: utcDayString(),
       network: config.network,

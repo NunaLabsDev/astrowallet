@@ -1,5 +1,7 @@
 import {
   calculateAccountReserveSummary,
+  normalizeDecimalAmountInput,
+  parsePositiveDecimalToStroops7,
   type AssetBalance,
   type ClassicAddress,
   type ContractAddress,
@@ -375,7 +377,7 @@ class NonRetryableSorobanError extends Error {}
 const DEFAULT_SOROBAN_MAX_RESOURCE_FEE_STROOPS = 5_000_000n;
 const accountSequenceQueues = new Map<string, Promise<unknown>>();
 
-function enqueueAccountTx<T>(accountId: string, fn: () => Promise<T>): Promise<T> {
+export function enqueueAccountTx<T>(accountId: string, fn: () => Promise<T>): Promise<T> {
   const prev = accountSequenceQueues.get(accountId) ?? Promise.resolve();
   const next = prev.then(fn, fn);
   const settled = next.then(
@@ -613,13 +615,17 @@ export function createStellarClient(
         }
       }
 
-      return withRpcFailover(async (server) => {
+      const sentResult = await withRpcFailover(async (server) => {
         const sent = await server.sendTransaction(preparedTx);
         if (sent.status === "ERROR") {
           throw new NonRetryableSorobanError(`Soroban sendTransaction failed (${sent.hash})`);
         }
+        return sent;
+      });
 
-        let polled = await server.getTransaction(sent.hash);
+      // Poll across failover RPC nodes by tx hash without re-broadcasting sendTransaction
+      return withRpcFailover(async (server) => {
+        let polled = await server.getTransaction(sentResult.hash);
         for (
           let i = 0;
           i < 18 && polled.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
@@ -628,22 +634,22 @@ export function createStellarClient(
           if (pollIntervalMs > 0) {
             await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
           }
-          polled = await server.getTransaction(sent.hash);
+          polled = await server.getTransaction(sentResult.hash);
         }
 
         if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
           throw new NonRetryableSorobanError(
-            `Soroban transaction failed on ledger (${sent.hash})`,
+            `Soroban transaction failed on ledger (${sentResult.hash})`,
           );
         }
         if (polled.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
           throw new NonRetryableSorobanError(
-            `Soroban transaction confirmation timed out (${sent.hash})`,
+            `Soroban transaction confirmation timed out (${sentResult.hash})`,
           );
         }
 
         return {
-          hash: sent.hash,
+          hash: sentResult.hash,
           ledger: polled.ledger,
         };
       });
@@ -1075,6 +1081,14 @@ export function createStellarClient(
   async function buildAndSubmitPayment(
     input: BuildAndSubmitPaymentInput,
   ): Promise<{ hash: string; ledger: number }> {
+    const normalizedAmount = normalizeDecimalAmountInput(input.amount, 7);
+    const amountStroops = normalizedAmount
+      ? parsePositiveDecimalToStroops7(normalizedAmount)
+      : null;
+    if (!normalizedAmount || amountStroops === null) {
+      throw new Error("Payment amount must be a positive decimal with up to 7 fractional digits");
+    }
+
     const destAddress = input.destination;
     const isNativeXlm = input.assetCode === "XLM" && !input.assetIssuer;
     let useCreateAccount = false;
@@ -1095,7 +1109,7 @@ export function createStellarClient(
         sacContractId,
         fromAddress: input.sourceKeypair.publicKey() as ClassicAddress,
         toAddress: destAddress,
-        amountStroops: decimalToStroops7(input.amount),
+        amountStroops,
       });
       return submitSorobanOperation(input.sourceKeypair, sacOp, memoInput);
     }
@@ -1108,8 +1122,7 @@ export function createStellarClient(
     } else if (isNativeXlm) {
       const destState = await fetchAccountState(destAddress);
       if (!destState.funded) {
-        const numericAmount = Number(input.amount);
-        if (!Number.isFinite(numericAmount) || numericAmount < 1) {
+        if (amountStroops < 10_000_000n) {
           throw new Error(
             "Destination Classic account is unfunded; initial activation requires at least 1 XLM",
           );
@@ -1125,12 +1138,12 @@ export function createStellarClient(
     const op = useCreateAccount
       ? Operation.createAccount({
           destination: destAddress,
-          startingBalance: input.amount,
+          startingBalance: normalizedAmount,
         })
       : Operation.payment({
           destination: destAddress,
           asset,
-          amount: input.amount,
+          amount: normalizedAmount,
         });
 
     return submitClassicOperations(input.sourceKeypair, [op], memoInput);
@@ -1179,11 +1192,20 @@ export function createStellarClient(
     price: string;
     offerId?: string | undefined;
   }): Promise<{ hash: string; ledger: number }> {
+    const isCancel = Boolean(input.offerId && input.offerId !== "0");
+    const normAmount = normalizeDecimalAmountInput(input.amount, 7);
+    if (!normAmount || (!isCancel && parsePositiveDecimalToStroops7(normAmount) === null)) {
+      throw new Error("Offer amount must be a positive decimal with up to 7 fractional digits");
+    }
+    const normPrice = normalizeDecimalAmountInput(input.price, 7);
+    if (!normPrice || parsePositiveDecimalToStroops7(normPrice) === null) {
+      throw new Error("Offer price must be a positive decimal with up to 7 fractional digits");
+    }
     const op = buildManageSellOfferOperation({
       selling: input.selling,
       buying: input.buying,
-      amount: input.amount,
-      price: input.price,
+      amount: normAmount,
+      price: normPrice,
       offerId: input.offerId,
     });
     return submitClassicOperations(input.sourceKeypair, [op]);
@@ -1198,15 +1220,25 @@ export function createStellarClient(
     destMin: string;
     path?: readonly ClassicAssetInput[] | undefined;
   }): Promise<{ hash: string; ledger: number }> {
+    const normSend = normalizeDecimalAmountInput(input.sendAmount, 7);
+    const normDestMin = normalizeDecimalAmountInput(input.destMin, 7);
+    if (
+      !normSend ||
+      parsePositiveDecimalToStroops7(normSend) === null ||
+      !normDestMin ||
+      parsePositiveDecimalToStroops7(normDestMin) === null
+    ) {
+      throw new Error("Swap amounts must be positive decimals with up to 7 fractional digits");
+    }
     const sendAsset = resolveStellarAsset(input.sendAsset);
     const destAsset = resolveStellarAsset(input.destAsset);
     const path = (input.path ?? []).map((hop) => resolveStellarAsset(hop));
     const op = Operation.pathPaymentStrictSend({
       sendAsset,
-      sendAmount: input.sendAmount,
+      sendAmount: normSend,
       destination: input.destination ?? input.sourceKeypair.publicKey(),
       destAsset,
-      destMin: input.destMin,
+      destMin: normDestMin,
       path,
     });
     return submitClassicOperations(input.sourceKeypair, [op]);

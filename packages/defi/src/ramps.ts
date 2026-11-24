@@ -1,4 +1,6 @@
+import { normalizeDecimalAmountInput } from "@astrowallet/domain";
 import { StrKey } from "@stellar/stellar-sdk";
+import { decimalToStroops7 } from "./index.js";
 import type { RampPort, RampQuoteRequest } from "@astrowallet/domain";
 
 function assertSafeHttpsUrl(rawUrl: string, label: string): URL {
@@ -37,7 +39,13 @@ export function createSep24AnchorRampAdapter(input: {
   return {
     providerName: "moneygram-sep24",
     async createSessionUrl(request: RampQuoteRequest): Promise<{ url: string }> {
-      if (!/^\d+(?:\.\d{1,7})?$/.test(request.amount.trim()) || Number(request.amount) <= 0) {
+      const normalizedAmount = normalizeDecimalAmountInput(request.amount, 7);
+      if (!normalizedAmount) {
+        throw new Error("SEP-24 ramp amount must be positive");
+      }
+      try {
+        decimalToStroops7(normalizedAmount);
+      } catch {
         throw new Error("SEP-24 ramp amount must be positive");
       }
       if (!/^[GC][A-Z2-7]{55}$/.test(request.destinationAddress)) {
@@ -50,7 +58,7 @@ export function createSep24AnchorRampAdapter(input: {
       );
       url.searchParams.set("asset_code", (input.assetCode ?? request.assetCode).trim().toUpperCase());
       url.searchParams.set("account", request.destinationAddress);
-      url.searchParams.set("amount", request.amount.trim());
+      url.searchParams.set("amount", normalizedAmount);
       if (input.webAuthEndpoint?.trim()) {
         url.searchParams.set(
           "web_auth",
@@ -205,19 +213,14 @@ export function computeLayerZeroOftSharedAmount(stellarDecimalAmount: string): {
   stroops7: bigint;
   sharedUnits6: bigint;
   dustStroops: bigint;
+  sendableStroops7: bigint;
   sendableFormatted: string;
 } {
-  const cleaned = stellarDecimalAmount.trim();
-  if (!/^\d+(?:\.\d{1,7})?$/.test(cleaned)) {
-    throw new Error("Amount must be a positive decimal with up to 7 decimal places");
-  }
-  const [wholePart = "0", fracPart = ""] = cleaned.split(".");
-  const frac7 = fracPart.padEnd(7, "0");
-  const stroops7 = BigInt(wholePart) * 10_000_000n + BigInt(frac7);
-  if (stroops7 <= 0n) {
-    throw new Error("Amount must be greater than zero");
-  }
+  const stroops7 = decimalToStroops7(stellarDecimalAmount);
   const sharedUnits6 = stroops7 / 10n;
+  if (sharedUnits6 <= 0n) {
+    throw new Error("Amount must be at least 0.000001 (6-decimal LayerZero OFT minimum)");
+  }
   const dustStroops = stroops7 % 10n;
   const sendableStroops = sharedUnits6 * 10n;
   const whole = sendableStroops / 10_000_000n;
@@ -226,6 +229,7 @@ export function computeLayerZeroOftSharedAmount(stellarDecimalAmount: string): {
     stroops7,
     sharedUnits6,
     dustStroops,
+    sendableStroops7: sendableStroops,
     sendableFormatted: `${whole.toString()}.${frac}`,
   };
 }

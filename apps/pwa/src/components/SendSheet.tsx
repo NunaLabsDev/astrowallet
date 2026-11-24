@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   StellarAddressSchema,
+  computeMaxSpendableStroops7,
+  formatStroops7Trimmed,
+  normalizeDecimalAmountInput,
   type ScanReport,
   type StellarAddress,
 } from "@astrowallet/domain";
@@ -69,12 +72,6 @@ export interface SendSheetProps {
 
 function assetKeyOf(code: string, issuer?: string): string {
   return `${code}:${issuer ?? "native"}`;
-}
-
-function formatTruncatedAmount(num: number): string {
-  if (!Number.isFinite(num) || num <= 0) return "0";
-  const floored = Math.floor(num * 10_000_000) / 10_000_000;
-  return floored.toFixed(7).replace(/\.?0+$/, "");
 }
 
 export function SendSheet({
@@ -174,14 +171,26 @@ export function SendSheet({
   const isSelectedNative =
     selectedBalance.assetCode.toUpperCase() === "XLM" && !selectedBalance.assetIssuer;
 
-  const maxSpendableNumber = useMemo(() => {
+  const maxSpendableStroops = useMemo(() => {
     const isNative = selectedBalance.assetCode === "XLM" && !selectedBalance.assetIssuer;
     if (isNative) {
-      const spendable = Number(accountState?.spendableXlm ?? selectedBalance.balance);
-      return Math.max(0, spendable - 0.001);
+      return computeMaxSpendableStroops7(
+        accountState?.spendableXlm ?? selectedBalance.balance,
+        "0",
+        "0.001",
+      );
     }
-    return Math.max(0, Number(selectedBalance.balance));
+    return computeMaxSpendableStroops7(
+      selectedBalance.balance,
+      selectedBalance.sellingLiabilities ?? "0",
+      "0",
+    );
   }, [selectedBalance, accountState?.spendableXlm]);
+
+  const maxSpendableString = useMemo(
+    () => formatStroops7Trimmed(maxSpendableStroops),
+    [maxSpendableStroops],
+  );
 
   // Live pre-send Scan & Shield check on valid destination strkeys
   useEffect(() => {
@@ -407,7 +416,9 @@ export function SendSheet({
   };
 
   const applyPercentage = (ratio: number) => {
-    setAmount(formatTruncatedAmount(maxSpendableNumber * ratio));
+    const bps = BigInt(Math.round(ratio * 10_000));
+    const targetStroops = (maxSpendableStroops * bps) / 10_000n;
+    setAmount(formatStroops7Trimmed(targetStroops));
   };
 
   const handleSubmit = (e: FormEvent) => {
@@ -436,7 +447,7 @@ export function SendSheet({
 
     const amountError = validateTransferAmount(
       amount,
-      accountState ? maxSpendableNumber : Number.POSITIVE_INFINITY,
+      accountState ? maxSpendableString : Number.POSITIVE_INFINITY,
       {
         assetCode: selectedBalance.assetCode,
         funded: accountState?.funded,
@@ -446,6 +457,7 @@ export function SendSheet({
       setError(amountError);
       return;
     }
+    const normalizedAmount = normalizeDecimalAmountInput(amount, 7) ?? amount.trim();
 
     const memoError = validateStellarMemoInput(memoKind, memoValue);
     if (memoError) {
@@ -482,7 +494,7 @@ export function SendSheet({
     setWarnAck(false);
     setReviewPending({
       destination: parsedDest.data,
-      amount: amount.trim(),
+      amount: normalizedAmount,
       assetCode: selectedBalance.assetCode,
       assetIssuer: selectedBalance.assetIssuer,
       typedMemo,
@@ -701,7 +713,7 @@ export function SendSheet({
             const gate = requiresHighValueReauth({
               amount: reviewPending.amount,
               assetCode: reviewPending.assetCode,
-              spendableBalance: maxSpendableNumber,
+              spendableBalance: maxSpendableString,
               thresholdXlm: config.highValueReauthXlm,
               network: config.network,
               hasWarningVerdict: destShieldReport?.verdict === "warning",
@@ -745,7 +757,7 @@ export function SendSheet({
                 (requiresHighValueReauth({
                   amount: reviewPending.amount,
                   assetCode: reviewPending.assetCode,
-                  spendableBalance: maxSpendableNumber,
+                  spendableBalance: maxSpendableString,
                   thresholdXlm: config.highValueReauthXlm,
                   network: config.network,
                   hasWarningVerdict: destShieldReport?.verdict === "warning",
@@ -960,7 +972,7 @@ export function SendSheet({
                   const key = assetKeyOf(b.assetCode, b.assetIssuer);
                   return (
                     <option key={key} value={key}>
-                      {b.assetCode} ({Number(b.balance).toFixed(2)} avail)
+                      {b.assetCode} ({b.balance.replace(/(\.\d*?[1-9])0+$/, "$1").replace(/\.0+$/, "")} avail)
                     </option>
                   );
                 })}
@@ -982,7 +994,7 @@ export function SendSheet({
                   Amount ({selectedBalance.assetCode})
                 </label>
                 <span style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }}>
-                  Spendable: {formatTruncatedAmount(maxSpendableNumber)}
+                  Spendable: {maxSpendableString}
                 </span>
               </div>
               <input

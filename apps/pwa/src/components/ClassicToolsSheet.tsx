@@ -1,5 +1,11 @@
-import { useMemo, useState, type FormEvent } from "react";
-import { ClassicAddressSchema, MuxedAddressSchema, type ClassicAddress } from "@astrowallet/domain";
+import { useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  ClassicAddressSchema,
+  MuxedAddressSchema,
+  normalizeDecimalAmountInput,
+  parsePositiveDecimalToStroops7,
+  type ClassicAddress,
+} from "@astrowallet/domain";
 import {
   filterSpamClaimableBalances,
   sanitizeMemoPhishing,
@@ -38,6 +44,7 @@ export function ClassicToolsSheet() {
   const [sdexPrice, setSdexPrice] = useState("");
 
   const [busy, setBusy] = useState(false);
+  const submittingRef = useRef(false);
   const [zenithSuccess, setZenithSuccess] = useState(false);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -91,6 +98,8 @@ export function ClassicToolsSheet() {
   };
 
   const handleReclaimReserves = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setBusy(true);
     setErrorMsg(null);
     setStatusMsg(null);
@@ -104,12 +113,14 @@ export function ClassicToolsSheet() {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Reserve reclaim failed");
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleSubmitTrustline = async (e: FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current) return;
     setErrorMsg(null);
     setStatusMsg(null);
     const parsedIssuer = ClassicAddressSchema.safeParse(trustIssuer.trim());
@@ -117,12 +128,22 @@ export function ClassicToolsSheet() {
       setErrorMsg("Enter a valid Classic G... asset issuer address.");
       return;
     }
+    let normalizedLimit: string | undefined;
+    if (trustLimit.trim()) {
+      const norm = normalizeDecimalAmountInput(trustLimit, 7);
+      if (!norm) {
+        setErrorMsg("Trustline limit must be a non-negative decimal (up to 7 decimals).");
+        return;
+      }
+      normalizedLimit = norm;
+    }
+    submittingRef.current = true;
     setBusy(true);
     try {
       const res = await addOrRemoveTrustline(
         trustCode.trim(),
         parsedIssuer.data,
-        trustLimit.trim() || undefined,
+        normalizedLimit,
       );
       setStatusMsg(
         `Trustline updated for ${trustCode.trim()} (tx ${res.hash.slice(0, 8)}…${res.hash.slice(-6)})`,
@@ -130,11 +151,14 @@ export function ClassicToolsSheet() {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "changeTrust failed");
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleClaimBalance = async (balanceId: string) => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setBusy(true);
     setErrorMsg(null);
     setStatusMsg(null);
@@ -146,12 +170,14 @@ export function ClassicToolsSheet() {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Failed to claim balance");
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handlePlaceSdexOffer = async (e: FormEvent) => {
     e.preventDefault();
+    if (submittingRef.current) return;
     setErrorMsg(null);
     setStatusMsg(null);
 
@@ -175,6 +201,19 @@ export function ClassicToolsSheet() {
       parsedBuyIssuer = checkBuy.data;
     }
 
+    const normAmount = normalizeDecimalAmountInput(sdexAmount, 7);
+    const normPrice = normalizeDecimalAmountInput(sdexPrice, 7);
+    if (
+      !normAmount ||
+      parsePositiveDecimalToStroops7(normAmount) === null ||
+      !normPrice ||
+      parsePositiveDecimalToStroops7(normPrice) === null
+    ) {
+      setErrorMsg("Enter valid positive offer amount and price (up to 7 decimals).");
+      return;
+    }
+
+    submittingRef.current = true;
     setBusy(true);
     try {
       const res = await placeSdexOffer({
@@ -182,8 +221,8 @@ export function ClassicToolsSheet() {
         sellingIssuer: parsedSellIssuer,
         buyingCode: buyCode.trim(),
         buyingIssuer: parsedBuyIssuer,
-        amount: sdexAmount.trim(),
-        price: sdexPrice.trim(),
+        amount: normAmount,
+        price: normPrice,
       });
       setStatusMsg(`SDEX offer submitted (${res.hash.slice(0, 8)}…${res.hash.slice(-6)})`);
       setSdexAmount("");
@@ -191,11 +230,14 @@ export function ClassicToolsSheet() {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "SDEX offer submission failed");
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };
 
   const handleCancelOffer = async (offer: (typeof openOffers)[number]) => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     setBusy(true);
     setErrorMsg(null);
     setStatusMsg(null);
@@ -213,6 +255,7 @@ export function ClassicToolsSheet() {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Failed to cancel offer");
     } finally {
+      submittingRef.current = false;
       setBusy(false);
     }
   };

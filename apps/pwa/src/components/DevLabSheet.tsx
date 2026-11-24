@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   ClassicAddressSchema,
   ContractAddressSchema,
@@ -218,12 +218,16 @@ export function DevLabSheet() {
     }
   };
 
+  const devSubmittingRef = useRef(false);
+
   const handleInvokeContract = async () => {
+    if (devSubmittingRef.current) return;
     const parsedId = ContractAddressSchema.safeParse(contractId.trim());
     if (!parsedId.success) {
       setContractError("Enter a valid 56-character Soroban C... Contract ID.");
       return;
     }
+    devSubmittingRef.current = true;
     setContractBusy(true);
     setContractError(null);
     setContractInvokeRes(null);
@@ -237,6 +241,7 @@ export function DevLabSheet() {
     } catch (err) {
       setContractError(err instanceof Error ? err.message : "Soroban write invocation failed");
     } finally {
+      devSubmittingRef.current = false;
       setContractBusy(false);
     }
   };
@@ -308,7 +313,8 @@ export function DevLabSheet() {
   };
 
   const handleSignAndSubmitXdr = async () => {
-    if (!rawXdr.trim()) return;
+    if (!rawXdr.trim() || devSubmittingRef.current) return;
+    devSubmittingRef.current = true;
     setXdrBusy(true);
     setXdrError(null);
     setSubmittedXdrOut(null);
@@ -323,6 +329,7 @@ export function DevLabSheet() {
     } catch (err) {
       setXdrError(err instanceof Error ? err.message : "Submission failed");
     } finally {
+      devSubmittingRef.current = false;
       setXdrBusy(false);
     }
   };
@@ -350,6 +357,8 @@ export function DevLabSheet() {
   };
 
   const handleManageDataSubmit = async (remove: boolean) => {
+    if (devSubmittingRef.current) return;
+    devSubmittingRef.current = true;
     setDataBusy(true);
     try {
       await submitAccountDataEntry(
@@ -359,6 +368,7 @@ export function DevLabSheet() {
     } catch (err) {
       showToast(err instanceof Error ? err.message : "ManageData failed", "error");
     } finally {
+      devSubmittingRef.current = false;
       setDataBusy(false);
     }
   };

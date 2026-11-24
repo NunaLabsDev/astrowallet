@@ -188,9 +188,9 @@ const EncryptedVaultEnvelopeSchema = z.object({
   format: z.literal("AGVAULT"),
   kdf: z.object({
     algorithm: z.literal("argon2id"),
-    memoryKiB: z.number().int().positive(),
-    iterations: z.number().int().positive(),
-    parallelism: z.number().int().positive(),
+    memoryKiB: z.number().int().min(1024).max(524_288),
+    iterations: z.number().int().min(1).max(20),
+    parallelism: z.number().int().min(1).max(8),
     hashLength: z.literal(32),
   }),
   saltB64: z.string().min(16),
@@ -329,7 +329,12 @@ export async function decryptVaultPayload(
   pinOrPassphrase: string,
   options: Omit<KdfRunOptions, "kdfParams"> = {},
 ): Promise<VaultPayload> {
-  const parsed = EncryptedVaultEnvelopeSchema.parse(envelope);
+  let parsed: EncryptedVaultEnvelope;
+  try {
+    parsed = EncryptedVaultEnvelopeSchema.parse(envelope);
+  } catch {
+    throw new Error("Corrupted or unsupported vault envelope");
+  }
   const salt = base64ToBytes(parsed.saltB64);
   const iv = base64ToBytes(parsed.ivB64);
   const ciphertext = base64ToBytes(parsed.ciphertextB64);

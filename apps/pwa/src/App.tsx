@@ -877,13 +877,18 @@ function WalletShell({
     }
   };
 
+  const quickActionBusyRef = useRef(false);
+
   const handleQuickClaimById = async (balanceId: string) => {
+    if (quickActionBusyRef.current) return;
+    quickActionBusyRef.current = true;
     setActionBusy(true);
     try {
       await claimBalanceById(balanceId);
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to claim balance", "error");
     } finally {
+      quickActionBusyRef.current = false;
       setActionBusy(false);
     }
   };
@@ -895,20 +900,27 @@ function WalletShell({
   };
 
   const handleFundActiveTestnet = async () => {
+    if (quickActionBusyRef.current) return;
+    quickActionBusyRef.current = true;
     try {
       await fundActiveTestnetAccount();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Friendbot funding failed", "error");
+    } finally {
+      quickActionBusyRef.current = false;
     }
   };
 
   const handleQuickReclaim = async () => {
+    if (quickActionBusyRef.current) return;
+    quickActionBusyRef.current = true;
     setActionBusy(true);
     try {
       await reclaimZeroBalanceReserves();
     } catch (err) {
       showToast(err instanceof Error ? err.message : "Failed to reclaim reserve", "error");
     } finally {
+      quickActionBusyRef.current = false;
       setActionBusy(false);
     }
   };
@@ -1151,6 +1163,13 @@ function WalletShell({
           }
           return;
         }
+        if (res.status === "wallet_mismatch") {
+          showToast(
+            "Local wallet differs from Telegram Cloud backup; auto-sync skipped to prevent overwrite.",
+            "info",
+          );
+          return;
+        }
         setCloudPullPinNeeded(false);
         if (res.status === "push_merged" && res.envelopeJson && sessionToken) {
           void uploadEncryptedBackup(res.envelopeJson)
@@ -1214,6 +1233,12 @@ function WalletShell({
       const latestCloud = await refreshCloudBackup().catch(() => null);
       if (latestCloud) {
         const merged = await syncFromNewerCloudBackup(latestCloud);
+        if (merged.status === "wallet_mismatch") {
+          setCloudSyncError(
+            "Cloud backup holds a different recovery phrase. Restore from Cloud or wipe/re-export explicitly before overwriting.",
+          );
+          return;
+        }
         if (merged.status === "push_merged" && merged.envelopeJson) {
           await uploadEncryptedBackup(merged.envelopeJson);
           triggerTelegramHaptic("success");

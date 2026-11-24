@@ -99,20 +99,88 @@ export interface AccountReserveCalculationInput {
     assetCode: string;
     assetIssuer?: string | undefined;
     balance: string;
+    buyingLiabilities?: string | undefined;
+    sellingLiabilities?: string | undefined;
   }[] | undefined;
 }
 
 const STROOPS_PER_XLM = 10_000_000n;
 const RESERVE_PER_ENTRY_STROOPS = 5_000_000n;
 
-function parseDecimalToStroops(raw: string): bigint | null {
-  const cleaned = raw.trim();
+/**
+ * Normalizes mobile decimal keyboard inputs (e.g., European/Latin `10,50`, leading zeros `000.5`)
+ * into canonical ASCII decimal strings while rejecting scientific notation, signs, and excess precision.
+ */
+export function normalizeDecimalAmountInput(raw: string, maxDecimals = 7): string | null {
+  let cleaned = raw.trim();
+  if (!cleaned) return null;
+  if (cleaned.includes(",") && !cleaned.includes(".")) {
+    const commaCount = cleaned.split(",").length - 1;
+    if (commaCount !== 1) return null;
+    cleaned = cleaned.replace(",", ".");
+  }
   if (!/^\d+(?:\.\d+)?$/.test(cleaned)) {
     return null;
   }
-  const [wholePart = "0", fracPart = ""] = cleaned.split(".");
-  const frac7 = fracPart.slice(0, 7).padEnd(7, "0");
-  return BigInt(wholePart) * STROOPS_PER_XLM + BigInt(frac7);
+  const [rawWhole = "0", rawFrac = ""] = cleaned.split(".");
+  if (rawFrac.length > maxDecimals) {
+    return null;
+  }
+  const normalizedWhole = rawWhole.replace(/^0+(?=\d)/, "");
+  return rawFrac.length > 0 ? `${normalizedWhole}.${rawFrac}` : normalizedWhole;
+}
+
+/**
+ * Parses a decimal string (up to 7 fractional digits) into exact stroops BigInt, returning `null` if invalid or `<= 0`.
+ */
+export function parsePositiveDecimalToStroops7(raw: string): bigint | null {
+  const normalized = normalizeDecimalAmountInput(raw, 7);
+  if (!normalized) return null;
+  const [wholePart = "0", fracPart = ""] = normalized.split(".");
+  const stroops = BigInt(wholePart) * STROOPS_PER_XLM + BigInt(fracPart.padEnd(7, "0"));
+  return stroops > 0n ? stroops : null;
+}
+
+/**
+ * Formats a signed 7-decimal stroops BigInt into a trimmed decimal string (never loses precision >900M).
+ */
+export function formatStroops7Trimmed(stroops: bigint): string {
+  const sign = stroops < 0n ? "-" : "";
+  const abs = stroops < 0n ? -stroops : stroops;
+  const whole = abs / STROOPS_PER_XLM;
+  const frac = (abs % STROOPS_PER_XLM).toString().padStart(7, "0").replace(/0+$/, "");
+  return frac ? `${sign}${whole.toString()}.${frac}` : `${sign}${whole.toString()}`;
+}
+
+/**
+ * Computes spendable balance stroops after subtracting selling liabilities and optional reserve/fee buffer.
+ */
+export function computeMaxSpendableStroops7(
+  balanceRaw: string,
+  sellingLiabilitiesRaw = "0",
+  extraReserveRaw = "0",
+): bigint {
+  const bal = parseDecimalToStroops(balanceRaw) ?? 0n;
+  const liab = parseDecimalToStroops(sellingLiabilitiesRaw) ?? 0n;
+  const extra = parseDecimalToStroops(extraReserveRaw) ?? 0n;
+  const net = bal - liab - extra;
+  return net > 0n ? net : 0n;
+}
+
+function parseDecimalToStroops(raw: string): bigint | null {
+  const normalized = normalizeDecimalAmountInput(raw, 7);
+  if (!normalized) {
+    // Allow >7 digit Horizon strings to truncate safely when reading ledger balances
+    const cleaned = raw.trim();
+    if (!/^\d+(?:\.\d+)?$/.test(cleaned)) {
+      return null;
+    }
+    const [wholePart = "0", fracPart = ""] = cleaned.split(".");
+    const frac7 = fracPart.slice(0, 7).padEnd(7, "0");
+    return BigInt(wholePart) * STROOPS_PER_XLM + BigInt(frac7);
+  }
+  const [wholePart = "0", fracPart = ""] = normalized.split(".");
+  return BigInt(wholePart) * STROOPS_PER_XLM + BigInt(fracPart.padEnd(7, "0"));
 }
 
 function formatStroops7(stroops: bigint): string {
@@ -152,12 +220,16 @@ export function calculateAccountReserveSummary(
   const reclaimableTrustlines: ZeroBalanceTrustline[] = [];
   for (const item of input.balances ?? []) {
     const parsedBal = parseDecimalToStroops(item.balance);
+    const parsedBuyingLiab = parseDecimalToStroops(item.buyingLiabilities ?? "0") ?? 0n;
+    const parsedSellingLiab = parseDecimalToStroops(item.sellingLiabilities ?? "0") ?? 0n;
     if (
       item.assetCode !== "XLM" &&
       item.assetIssuer &&
       ClassicAddressSchema.safeParse(item.assetIssuer).success &&
       parsedBal !== null &&
-      parsedBal === 0n
+      parsedBal === 0n &&
+      parsedBuyingLiab === 0n &&
+      parsedSellingLiab === 0n
     ) {
       reclaimableTrustlines.push({
         assetCode: item.assetCode,

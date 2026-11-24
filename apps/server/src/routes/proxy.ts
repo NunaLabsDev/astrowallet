@@ -8,6 +8,7 @@ import {
 import {
   ClassicAddressSchema,
   StellarAddressSchema,
+  parsePositiveDecimalToStroops7,
   type ClassicAddress,
   type ServerConfig,
 } from "@astrowallet/domain";
@@ -80,16 +81,20 @@ const BLOCKED_DOMAIN_SUFFIXES = [
   ".invalid",
 ];
 const STELLAR_TOML_MAX_BYTES = 128 * 1024;
+const TON_MANIFEST_MAX_BYTES = 64 * 1024;
+const UPSTREAM_JSON_MAX_BYTES = 128 * 1024;
+
+class UpstreamPayloadTooLargeError extends Error {}
 
 async function readBoundedResponseText(res: Response, maxBytes: number): Promise<string> {
   const declared = Number(res.headers.get("Content-Length") ?? "0");
   if (Number.isFinite(declared) && declared > maxBytes) {
-    throw new Error(`Upstream response exceeds ${maxBytes} bytes limit`);
+    throw new UpstreamPayloadTooLargeError(`Upstream response exceeds ${maxBytes} bytes limit`);
   }
   if (!res.body) {
     const text = await res.text();
     if (new TextEncoder().encode(text).length > maxBytes) {
-      throw new Error(`Upstream response exceeds ${maxBytes} bytes limit`);
+      throw new UpstreamPayloadTooLargeError(`Upstream response exceeds ${maxBytes} bytes limit`);
     }
     return text;
   }
@@ -103,7 +108,7 @@ async function readBoundedResponseText(res: Response, maxBytes: number): Promise
     totalBytes += value.byteLength;
     if (totalBytes > maxBytes) {
       await reader.cancel().catch(() => {});
-      throw new Error(`Upstream response exceeds ${maxBytes} bytes limit`);
+      throw new UpstreamPayloadTooLargeError(`Upstream response exceeds ${maxBytes} bytes limit`);
     }
     chunks.push(value);
   }
@@ -117,14 +122,86 @@ async function readBoundedResponseText(res: Response, maxBytes: number): Promise
 }
 
 export function isSafePublicDomain(domain: string): boolean {
-  if (!SAFE_PUBLIC_DOMAIN_REGEX.test(domain)) return false;
-  if (domain === "localhost") return false;
-  if (BLOCKED_DOMAIN_SUFFIXES.some((suffix) => domain.endsWith(suffix))) return false;
-  const labels = domain.split(".");
+  const clean = domain.trim().toLowerCase();
+  if (!SAFE_PUBLIC_DOMAIN_REGEX.test(clean)) return false;
+  if (clean === "localhost") return false;
+  if (BLOCKED_DOMAIN_SUFFIXES.some((suffix) => clean.endsWith(suffix))) return false;
+  const labels = clean.split(".");
   const tld = labels[labels.length - 1] ?? "";
   // Reject IPv4 literals and all-numeric TLDs
   if (/^\d+$/.test(tld)) return false;
   return true;
+}
+
+function parseSafeHttpsPublicUrl(rawUrl: string): URL | null {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== "https:" || parsed.port) return null;
+    if (!isSafePublicDomain(parsed.hostname)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchSafePublicHttpsText(opts: {
+  initialUrl: string;
+  maxBytes: number;
+  accept: string;
+  userAgent: string;
+  fetchFn: FetchLike;
+  label: string;
+}): Promise<{ ok: true; text: string } | { ok: false; status: 400 | 413 | 502; error: string }> {
+  const parsedInitial = parseSafeHttpsPublicUrl(opts.initialUrl);
+  if (!parsedInitial) {
+    return { ok: false, status: 400, error: `Invalid or unsafe ${opts.label} URL` };
+  }
+
+  let res: Response | null = null;
+  let currentUrl = parsedInitial.toString();
+  try {
+    for (let hop = 0; hop < 3; hop += 1) {
+      const candidate = await opts.fetchFn(currentUrl, {
+        headers: {
+          Accept: opts.accept,
+          "User-Agent": opts.userAgent,
+        },
+        redirect: "manual",
+        signal: AbortSignal.timeout(5000),
+      });
+      if (candidate.status >= 300 && candidate.status < 400) {
+        const location = candidate.headers.get("Location");
+        if (!location) break;
+        const nextUrl = new URL(location, currentUrl);
+        if (
+          nextUrl.protocol !== "https:" ||
+          nextUrl.port ||
+          !isSafePublicDomain(nextUrl.hostname)
+        ) {
+          return { ok: false, status: 502, error: `Unsafe ${opts.label} redirect blocked` };
+        }
+        currentUrl = nextUrl.toString();
+        continue;
+      }
+      res = candidate;
+      break;
+    }
+  } catch {
+    return { ok: false, status: 502, error: `Unable to fetch ${opts.label}` };
+  }
+  if (!res || !res.ok) {
+    return { ok: false, status: 502, error: `Unable to fetch ${opts.label}` };
+  }
+
+  try {
+    const text = await readBoundedResponseText(res, opts.maxBytes);
+    return { ok: true, text };
+  } catch (err) {
+    if (err instanceof UpstreamPayloadTooLargeError) {
+      return { ok: false, status: 413, error: `${opts.label} exceeds size limit` };
+    }
+    return { ok: false, status: 502, error: `Unable to read ${opts.label}` };
+  }
 }
 
 export async function lookupDirectoryTag(
@@ -279,6 +356,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     const path = c.req.path;
     const isReadOnlyMeta =
       path.endsWith("/stellar-toml") ||
+      path.endsWith("/ton-manifest") ||
       path.endsWith("/nft-meta") ||
       path.includes("/market/");
     const limit = await checkRateLimit({
@@ -324,7 +402,8 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       return { ok: false, status: 400, error: "Invalid public issuer domain" };
     }
 
-    const cacheKey = `toml:${domain}`;
+    const cleanDomain = domain.trim().toLowerCase();
+    const cacheKey = `toml:${cleanDomain}`;
     if (cache) {
       const cached = await cache.get(cacheKey);
       if (cached) {
@@ -332,88 +411,109 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       }
     }
 
-    let res: Response | null = null;
-    let currentUrl = `https://${domain}/.well-known/stellar.toml`;
-    try {
-      for (let hop = 0; hop < 3; hop += 1) {
-        const candidate = await fetchFn(currentUrl, {
-          headers: {
-            Accept: "text/plain, */*",
-            "User-Agent": "AstroWallet-SEP1-Scanner/1.0",
-          },
-          redirect: "manual",
-          signal: AbortSignal.timeout(5000),
-        });
-        if (candidate.status >= 300 && candidate.status < 400) {
-          const location = candidate.headers.get("Location");
-          if (!location) break;
-          const nextUrl = new URL(location, currentUrl);
-          if (
-            nextUrl.protocol !== "https:" ||
-            !isSafePublicDomain(nextUrl.hostname.toLowerCase())
-          ) {
-            return { ok: false, status: 502, error: "Unsafe stellar.toml redirect blocked" };
-          }
-          currentUrl = nextUrl.toString();
-          continue;
-        }
-        res = candidate;
-        break;
-      }
-    } catch {
-      return { ok: false, status: 502, error: `Unable to fetch stellar.toml from ${domain}` };
-    }
-    if (!res || !res.ok) {
-      return { ok: false, status: 502, error: `Unable to fetch stellar.toml from ${domain}` };
-    }
-
-    const declaredLength = Number(res.headers.get("Content-Length") ?? "0");
-    if (Number.isFinite(declaredLength) && declaredLength > STELLAR_TOML_MAX_BYTES) {
-      return { ok: false, status: 413, error: "stellar.toml exceeds the 128 KB limit" };
-    }
-
-    let text: string;
-    if (res.body) {
-      const reader = res.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let totalBytes = 0;
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        if (!value) continue;
-        totalBytes += value.byteLength;
-        if (totalBytes > STELLAR_TOML_MAX_BYTES) {
-          await reader.cancel().catch(() => {});
-          return { ok: false, status: 413, error: "stellar.toml exceeds the 128 KB limit" };
-        }
-        chunks.push(value);
-      }
-      const merged = new Uint8Array(totalBytes);
-      let offset = 0;
-      for (const chunk of chunks) {
-        merged.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      text = new TextDecoder().decode(merged);
-    } else {
-      text = await res.text();
-      if (new TextEncoder().encode(text).length > STELLAR_TOML_MAX_BYTES) {
-        return { ok: false, status: 413, error: "stellar.toml exceeds the 128 KB limit" };
-      }
-    }
+    const res = await fetchSafePublicHttpsText({
+      initialUrl: `https://${cleanDomain}/.well-known/stellar.toml`,
+      maxBytes: STELLAR_TOML_MAX_BYTES,
+      accept: "text/plain, */*",
+      userAgent: "AstroWallet-SEP1-Scanner/1.0",
+      fetchFn,
+      label: `stellar.toml from ${cleanDomain}`,
+    });
+    if (!res.ok) return res;
     if (cache) {
-      await cache.put(cacheKey, text, { expirationTtl: 900 });
+      await cache.put(cacheKey, res.text, { expirationTtl: 900 });
     }
-    return { ok: true, text };
+    return res;
   }
 
   router.get("/stellar-toml", async (c) => {
+    const rawUrl = (c.req.query("url") ?? "").trim();
+    if (rawUrl) {
+      const parsed = parseSafeHttpsPublicUrl(rawUrl);
+      if (!parsed) {
+        return c.json({ error: "Invalid or unsafe stellar.toml URL" }, 400);
+      }
+      const cacheKey = `toml-url:${parsed.toString()}`;
+      if (c.env.CACHE) {
+        const cached = await c.env.CACHE.get(cacheKey);
+        if (cached) {
+          return c.text(cached, 200);
+        }
+      }
+      const res = await fetchSafePublicHttpsText({
+        initialUrl: parsed.toString(),
+        maxBytes: STELLAR_TOML_MAX_BYTES,
+        accept: "text/plain, */*",
+        userAgent: "AstroWallet-SEP1-Scanner/1.0",
+        fetchFn,
+        label: "linked stellar.toml",
+      });
+      if (!res.ok) {
+        return c.json({ error: res.error }, res.status);
+      }
+      if (c.env.CACHE) {
+        await c.env.CACHE.put(cacheKey, res.text, { expirationTtl: 900 });
+      }
+      return c.text(res.text, 200);
+    }
+
     const domain = (c.req.query("domain") ?? "").trim().toLowerCase();
     const tomlRes = await fetchSafeStellarToml(domain, c.env.CACHE);
     if (!tomlRes.ok) {
       return c.json({ error: tomlRes.error }, tomlRes.status);
     }
     return c.text(tomlRes.text, 200);
+  });
+
+  router.get("/ton-manifest", async (c) => {
+    const rawUrl = (c.req.query("url") ?? "").trim();
+    const parsed = parseSafeHttpsPublicUrl(rawUrl);
+    if (!parsed) {
+      return c.json({ error: "Invalid or unsafe TON manifest URL" }, 400);
+    }
+    const cacheKey = `ton-manifest:${parsed.toString()}`;
+    if (c.env.CACHE) {
+      const cached = await c.env.CACHE.get(cacheKey);
+      if (cached) {
+        return c.json(JSON.parse(cached));
+      }
+    }
+
+    const res = await fetchSafePublicHttpsText({
+      initialUrl: parsed.toString(),
+      maxBytes: TON_MANIFEST_MAX_BYTES,
+      accept: "application/json, */*",
+      userAgent: "AstroWallet-TONConnect-Manifest/1.0",
+      fetchFn,
+      label: "TON Connect manifest",
+    });
+    if (!res.ok) {
+      return c.json({ error: res.error }, res.status);
+    }
+    let manifestJson: Record<string, unknown>;
+    try {
+      const parsedJson = JSON.parse(res.text) as unknown;
+      if (!parsedJson || typeof parsedJson !== "object" || Array.isArray(parsedJson)) {
+        return c.json({ error: "TON Connect manifest must be a JSON object" }, 502);
+      }
+      const rawObj = parsedJson as Record<string, unknown>;
+      manifestJson = {
+        ...(typeof rawObj.name === "string" ? { name: rawObj.name.trim().slice(0, 64) } : {}),
+        ...(typeof rawObj.url === "string" && rawObj.url.trim().startsWith("https://")
+          ? { url: rawObj.url.trim() }
+          : {}),
+        ...(typeof rawObj.iconUrl === "string" && rawObj.iconUrl.trim().startsWith("https://")
+          ? { iconUrl: rawObj.iconUrl.trim() }
+          : {}),
+      };
+    } catch {
+      return c.json({ error: "Invalid JSON in TON Connect manifest" }, 502);
+    }
+
+    if (c.env.CACHE) {
+      await c.env.CACHE.put(cacheKey, JSON.stringify(manifestJson), { expirationTtl: 600 });
+    }
+    return c.json(manifestJson, 200);
   });
 
   function normalizeIpfsUrl(raw: string): string | undefined {
@@ -624,7 +724,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     } catch {
       return c.json({ error: "Invalid FEDERATION_SERVER URL" }, 502);
     }
-    if (fedUrl.protocol !== "https:" || !isSafePublicDomain(fedUrl.hostname.toLowerCase())) {
+    if (fedUrl.protocol !== "https:" || fedUrl.port || !isSafePublicDomain(fedUrl.hostname)) {
       return c.json({ error: "Unsafe FEDERATION_SERVER URL blocked" }, 502);
     }
     fedUrl.searchParams.set("q", q);
@@ -639,7 +739,8 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       if (!res.ok) {
         return c.json({ error: `Federation lookup failed (${res.status})` }, 502);
       }
-      const data = (await res.json()) as {
+      const dataText = await readBoundedResponseText(res, UPSTREAM_JSON_MAX_BYTES);
+      const data = JSON.parse(dataText) as {
         account_id?: string;
         memo_type?: string;
         memo?: string | number;
@@ -1285,7 +1386,14 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     direction: z.enum(["deposit", "withdraw"]),
     token: z.string().trim().min(10).max(8_192),
     assetCode: z.string().trim().regex(/^[A-Za-z0-9]{1,12}$/),
-    amount: z.string().trim().regex(/^\d+(\.\d{1,7})?$/).optional(),
+    amount: z
+      .string()
+      .trim()
+      .refine(
+        (v) => parsePositiveDecimalToStroops7(v) !== null,
+        "SEP-24 amount must be a positive decimal with up to 7 decimals",
+      )
+      .optional(),
     account: StellarAddressSchema.optional(),
   });
 

@@ -50,7 +50,9 @@ const emptyToUndefined = (val: unknown): unknown => {
 
 const RequiredUrlSchema = (field: string) =>
   z
-    .string({ required_error: `${field} is required` })
+    .string({
+      error: (iss) => (iss.input === undefined ? `${field} is required` : undefined),
+    })
     .trim()
     .min(1, `${field} cannot be empty`)
     .refine(isAllowedUrl, `${field} must be a valid https:// (or localhost http://) URL`);
@@ -127,7 +129,7 @@ function parseContractCsv(field: string) {
       for (const addr of contracts) {
         if (!ContractAddressSchema.safeParse(addr).success) {
           ctx.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: "custom",
             message: `${field} contains invalid Soroban contract address "${addr}"`,
           });
         }
@@ -155,7 +157,7 @@ function parseBotUsernameCsv(field: string) {
       for (const bot of bots) {
         if (!/^[a-z0-9_]{5,32}$/.test(bot)) {
           ctx.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: "custom",
             message: `${field} contains invalid Telegram bot username "${bot}"`,
           });
         }
@@ -193,14 +195,14 @@ function validateNetworkCoherence(
 ) {
   if (network === "mainnet" && /\btest\b/i.test(passphrase)) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: [passphrasePath],
       message: `${passphrasePath} cannot reference a test network when network=mainnet`,
     });
   }
   if (network === "testnet" && /\bpublic\b/i.test(passphrase)) {
     ctx.addIssue({
-      code: z.ZodIssueCode.custom,
+      code: "custom",
       path: [passphrasePath],
       message: `${passphrasePath} cannot reference a public mainnet passphrase when network=testnet`,
     });
@@ -209,7 +211,7 @@ function validateNetworkCoherence(
     for (const u of urls) {
       if (u && u.trim().toLowerCase().startsWith("http://")) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           path: [urlPath],
           message: `Plaintext http:// endpoint "${u}" is strictly forbidden when network=mainnet`,
         });
@@ -237,7 +239,7 @@ function parseUrlCsv(field: string, required: boolean) {
     .superRefine((urls, ctx) => {
       if (required && urls.length === 0) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           message: `${field} must define at least one valid URL`,
         });
         return;
@@ -245,7 +247,7 @@ function parseUrlCsv(field: string, required: boolean) {
       for (const url of urls) {
         if (!isAllowedUrl(url)) {
           ctx.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: "custom",
             message: `${field} contains invalid URL "${url}"`,
           });
         }
@@ -257,7 +259,10 @@ const RawPwaEnvSchema = z
   .object({
     VITE_STELLAR_NETWORK: StellarNetworkSchema,
     VITE_STELLAR_NETWORK_PASSPHRASE: z
-      .string({ required_error: "VITE_STELLAR_NETWORK_PASSPHRASE is required" })
+      .string({
+        error: (iss) =>
+          iss.input === undefined ? "VITE_STELLAR_NETWORK_PASSPHRASE is required" : undefined,
+      })
       .trim()
       .min(1, "VITE_STELLAR_NETWORK_PASSPHRASE cannot be empty"),
     VITE_STELLAR_RPC_URLS: parseUrlCsv("VITE_STELLAR_RPC_URLS", true),
@@ -265,7 +270,9 @@ const RawPwaEnvSchema = z
     VITE_API_BASE_URL: RequiredUrlSchema("VITE_API_BASE_URL"),
     VITE_PWA_ORIGIN: RequiredUrlSchema("VITE_PWA_ORIGIN"),
     VITE_TG_BOT_USERNAME: z
-      .string({ required_error: "VITE_TG_BOT_USERNAME is required" })
+      .string({
+        error: (iss) => (iss.input === undefined ? "VITE_TG_BOT_USERNAME is required" : undefined),
+      })
       .trim()
       .transform((v) => v.replace(/^@/, ""))
       .refine(
@@ -345,14 +352,14 @@ const RawPwaEnvSchema = z
   .superRefine((env, ctx) => {
     if (env.VITE_STELLAR_NETWORK === "mainnet" && env.VITE_FRIENDBOT_URL) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         path: ["VITE_FRIENDBOT_URL"],
         message: "VITE_FRIENDBOT_URL is strictly forbidden when VITE_STELLAR_NETWORK=mainnet",
       });
     }
     if (env.VITE_STELLAR_NETWORK === "mainnet" && env.VITE_ALLOW_DEV_OUTSIDE_TELEGRAM) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         path: ["VITE_ALLOW_DEV_OUTSIDE_TELEGRAM"],
         message:
           "VITE_ALLOW_DEV_OUTSIDE_TELEGRAM=true is strictly forbidden when VITE_STELLAR_NETWORK=mainnet",
@@ -383,28 +390,28 @@ const RawPwaEnvSchema = z
     if (env.VITE_ALT_STELLAR_NETWORK) {
       if (!env.VITE_ALT_STELLAR_NETWORK_PASSPHRASE) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           path: ["VITE_ALT_STELLAR_NETWORK_PASSPHRASE"],
           message: "VITE_ALT_STELLAR_NETWORK_PASSPHRASE is required when VITE_ALT_STELLAR_NETWORK is set",
         });
       }
       if (env.VITE_ALT_STELLAR_RPC_URLS.length === 0) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           path: ["VITE_ALT_STELLAR_RPC_URLS"],
           message: "VITE_ALT_STELLAR_RPC_URLS is required when VITE_ALT_STELLAR_NETWORK is set",
         });
       }
       if (env.VITE_ALT_HORIZON_URLS.length === 0) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           path: ["VITE_ALT_HORIZON_URLS"],
           message: "VITE_ALT_HORIZON_URLS is required when VITE_ALT_STELLAR_NETWORK is set",
         });
       }
       if (env.VITE_ALT_STELLAR_NETWORK === "mainnet" && env.VITE_ALT_FRIENDBOT_URL) {
         ctx.addIssue({
-          code: z.ZodIssueCode.custom,
+          code: "custom",
           path: ["VITE_ALT_FRIENDBOT_URL"],
           message: "VITE_ALT_FRIENDBOT_URL is strictly forbidden when VITE_ALT_STELLAR_NETWORK=mainnet",
         });
@@ -588,7 +595,10 @@ const RawServerEnvSchema = z
   .object({
     STELLAR_NETWORK: StellarNetworkSchema,
     STELLAR_NETWORK_PASSPHRASE: z
-      .string({ required_error: "STELLAR_NETWORK_PASSPHRASE is required" })
+      .string({
+        error: (iss) =>
+          iss.input === undefined ? "STELLAR_NETWORK_PASSPHRASE is required" : undefined,
+      })
       .trim()
       .min(1, "STELLAR_NETWORK_PASSPHRASE cannot be empty"),
     STELLAR_RPC_URLS: parseUrlCsv("STELLAR_RPC_URLS", true),
@@ -645,15 +655,21 @@ const RawServerEnvSchema = z
     ),
     TG_MINI_APP_SHORT_NAME: OptionalShortNameSchema("TG_MINI_APP_SHORT_NAME"),
     TG_BOT_TOKEN: z
-      .string({ required_error: "TG_BOT_TOKEN is required" })
+      .string({
+        error: (iss) => (iss.input === undefined ? "TG_BOT_TOKEN is required" : undefined),
+      })
       .trim()
       .min(1, "TG_BOT_TOKEN cannot be empty"),
     TG_WEBHOOK_SECRET: z
-      .string({ required_error: "TG_WEBHOOK_SECRET is required" })
+      .string({
+        error: (iss) => (iss.input === undefined ? "TG_WEBHOOK_SECRET is required" : undefined),
+      })
       .trim()
       .min(16, "TG_WEBHOOK_SECRET must be at least 16 characters"),
     INTENT_HMAC_SECRET: z
-      .string({ required_error: "INTENT_HMAC_SECRET is required" })
+      .string({
+        error: (iss) => (iss.input === undefined ? "INTENT_HMAC_SECRET is required" : undefined),
+      })
       .trim()
       .min(32, "INTENT_HMAC_SECRET must be at least 32 characters"),
     OZ_CHANNELS_API_KEY: OptionalNonEmptyStringSchema,
@@ -684,7 +700,7 @@ const RawServerEnvSchema = z
         for (const addr of accounts) {
           if (!ClassicAddressSchema.safeParse(addr).success) {
             ctx.addIssue({
-              code: z.ZodIssueCode.custom,
+              code: "custom",
               message: `RELAY_CHANNEL_ACCOUNTS contains invalid Classic address "${addr}"`,
             });
           }
@@ -736,7 +752,7 @@ const RawServerEnvSchema = z
   .superRefine((env, ctx) => {
     if (env.STELLAR_NETWORK === "mainnet" && env.FRIENDBOT_URL) {
       ctx.addIssue({
-        code: z.ZodIssueCode.custom,
+        code: "custom",
         path: ["FRIENDBOT_URL"],
         message: "FRIENDBOT_URL is strictly forbidden when STELLAR_NETWORK=mainnet",
       });

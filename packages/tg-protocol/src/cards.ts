@@ -259,13 +259,13 @@ export interface IncomingAlertCardInput {
   botUsername?: string | undefined;
 }
 
-function formatCompactDecimal(raw: string): string {
+export function formatCompactDecimal(raw: string): string {
   const trimmed = raw.trim();
+  if (!/^-?\d+(?:\.\d+)?$/.test(trimmed)) return trimmed;
   if (!trimmed.includes(".")) return trimmed;
-  const num = Number(trimmed);
-  if (!Number.isFinite(num)) return trimmed;
-  const maxFrac = Math.abs(num) >= 1 ? 4 : 6;
-  return Number(num.toFixed(maxFrac)).toString();
+  const [wholePart = "0", fracPart = ""] = trimmed.split(".");
+  const trimmedFrac = fracPart.slice(0, 7).replace(/0+$/, "");
+  return trimmedFrac ? `${wholePart}.${trimmedFrac}` : wholePart;
 }
 
 export function formatIncomingAlertCard(input: IncomingAlertCardInput): string {

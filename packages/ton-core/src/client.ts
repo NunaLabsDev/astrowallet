@@ -14,6 +14,24 @@ import {
 import { WalletContractV5R1, type WalletContractV4 } from "@ton/ton";
 import { formatNanoTon, parseTonToNano, type DerivedTonAccount } from "./derivation.js";
 
+const tonSeqnoQueues = new Map<string, Promise<unknown>>();
+
+export function enqueueTonAccountTx<T>(address: string, fn: () => Promise<T>): Promise<T> {
+  const prev = tonSeqnoQueues.get(address) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  const settled = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  tonSeqnoQueues.set(address, settled);
+  void settled.then(() => {
+    if (tonSeqnoQueues.get(address) === settled) {
+      tonSeqnoQueues.delete(address);
+    }
+  });
+  return next;
+}
+
 export type TonFetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export interface TonClientConfig {
@@ -243,20 +261,22 @@ export function createTonClient(config: TonClientConfig) {
       validUntil?: number | undefined;
     }): Promise<TonBroadcastResult> {
       const amountNano = parseTonToNano(input.amountTon);
-      const state = await this.getAccountState(input.account.friendlyAddress);
-      const bocBase64 = buildSignedTonTransfer({
-        account: input.account,
-        seqno: state.seqno,
-        validUntil: input.validUntil,
-        messages: [
-          {
-            destination: input.destination,
-            amountNano,
-            comment: input.comment,
-          },
-        ],
+      return enqueueTonAccountTx(input.account.rawAddress, async () => {
+        const state = await this.getAccountState(input.account.friendlyAddress);
+        const bocBase64 = buildSignedTonTransfer({
+          account: input.account,
+          seqno: state.seqno,
+          validUntil: input.validUntil,
+          messages: [
+            {
+              destination: input.destination,
+              amountNano,
+              comment: input.comment,
+            },
+          ],
+        });
+        return this.broadcastBoc(bocBase64);
       });
-      return this.broadcastBoc(bocBase64);
     },
 
     async broadcastBoc(bocBase64: string): Promise<TonBroadcastResult> {

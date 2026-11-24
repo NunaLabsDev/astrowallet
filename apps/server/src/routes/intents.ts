@@ -5,6 +5,7 @@ import {
   type ClaimLink,
   type ClassicAddress,
   type ServerConfig,
+  type SignedIntent,
 } from "@astrowallet/domain";
 import {
   buildTelegramMiniAppLink,
@@ -299,7 +300,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
 
     if (!check.valid) {
       if (check.reason === "expired" && intent.status === "pending") {
-        await repo.markIntentStatus(intent.intentId, "expired");
+        await repo.markIntentStatus(intent.intentId, "expired", "pending");
       }
       return c.json(
         { error: `Intent token ${check.reason}` },
@@ -449,13 +450,16 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: verification.error }, verification.status);
     }
     const verifiedInputs = verification.verifiedInputs;
+    const confirmed = await repo.markIntentConfirmed(intent.intentId);
+    if (!confirmed) {
+      return c.json({ error: "Connect intent already confirmed" }, 409);
+    }
 
     const linked = await repo.linkVerifiedAddresses({
       telegramUserId: intent.creatorTelegramUserId,
       usernameLower: storedPayload.challenge?.usernameLower,
       accounts: verifiedInputs,
     });
-    await repo.markIntentConfirmed(intent.intentId);
 
     if (intent.chatId) {
       await sendTelegramMessage(
@@ -498,6 +502,10 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: "Intent not found" }, 404);
     }
 
+    const verifyNowOverride =
+      intent.actionType === "claim" && parsedBody.stage === "refunded"
+        ? intent.expiresAt - 1
+        : undefined;
     const check = await verifyIntentToken(
       {
         intentId: intent.intentId,
@@ -507,6 +515,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       },
       parsedBody.sig,
       config.intentHmacSecret,
+      verifyNowOverride,
     );
     if (!check.valid) {
       return c.json(
@@ -672,25 +681,29 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
           .replace(/^@/, "")
           .toLowerCase();
 
-        await repo.createClaimLink({
-          claimId,
-          network: config.network,
-          senderAddress,
-          recipientUsernameLower,
-          assetCode: payload.assetCode ?? "XLM",
-          assetIssuer: payload.assetIssuer as ClassicAddress | undefined,
-          amount: payload.amount ?? "0",
-          escrowContractId: escrowParsed.data,
-          status: "open",
-          expiresAt: parsedBody.expiresAt ?? payload.escrowExpiresAt ?? intent.expiresAt,
-        });
-        await repo.recordSplitPayment({
-          intentId: intent.intentId,
-          payerAddress: senderAddress,
-          txHash: parsedBody.txHash,
-          amount: payload.amount ?? "0",
-        });
-        await repo.markIntentStatus(intent.intentId, "signed");
+        try {
+          await repo.createClaimLink({
+            claimId,
+            network: config.network,
+            senderAddress,
+            recipientUsernameLower,
+            assetCode: payload.assetCode ?? "XLM",
+            assetIssuer: payload.assetIssuer as ClassicAddress | undefined,
+            amount: payload.amount ?? "0",
+            escrowContractId: escrowParsed.data,
+            status: "open",
+            expiresAt: parsedBody.expiresAt ?? payload.escrowExpiresAt ?? intent.expiresAt,
+          });
+          await repo.recordSplitPayment({
+            intentId: intent.intentId,
+            payerAddress: senderAddress,
+            txHash: parsedBody.txHash,
+            amount: payload.amount ?? "0",
+          });
+        } catch {
+          return c.json({ error: "Claim link funding already recorded" }, 409);
+        }
+        await repo.markIntentStatus(intent.intentId, "signed", "pending");
 
         const cardUpdated = await maybeEditCard(
           formatClaimLinkCard({
@@ -716,13 +729,20 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       }
 
       if (stage === "cancelled" || stage === "refunded") {
-        await repo.recordSplitPayment({
-          intentId: intent.intentId,
-          txHash: parsedBody.txHash,
-          amount: "0",
-        });
-        await repo.markClaimLinkStatus(claimId, "refunded");
-        await repo.markIntentStatus(intent.intentId, "cancelled");
+        const claimUpdated = await repo.markClaimLinkStatus(claimId, "refunded", "open");
+        if (!claimUpdated) {
+          return c.json({ error: "Claim link is no longer open" }, 409);
+        }
+        try {
+          await repo.recordSplitPayment({
+            intentId: intent.intentId,
+            txHash: parsedBody.txHash,
+            amount: "0",
+          });
+        } catch {
+          return c.json({ error: "Transaction hash already used" }, 409);
+        }
+        await repo.markIntentStatus(intent.intentId, "cancelled", "signed");
 
         const cardUpdated = await maybeEditCard(
           formatClaimLinkCard({
@@ -747,8 +767,19 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         });
       }
 
-      await repo.markClaimLinkStatus(claimId, "claimed");
-      const updated = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+      const claimUpdated = await repo.markClaimLinkStatus(claimId, "claimed", "open");
+      if (!claimUpdated) {
+        return c.json({ error: "Claim link has already been claimed or closed" }, 409);
+      }
+      let updated: SignedIntent | null = null;
+      try {
+        updated = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+      } catch {
+        return c.json({ error: "Transaction hash already used for another intent" }, 409);
+      }
+      if (!updated) {
+        return c.json({ error: "Claim intent already confirmed" }, 409);
+      }
       await Promise.all([
         repo.recordVerifiedTx({
           txHash: parsedBody.txHash.toLowerCase(),
@@ -827,6 +858,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
           payerAddress: parsedBody.payerAddress,
           txHash: parsedBody.txHash,
           amount: payload.amount ?? "0",
+          maxParticipants: participantCount,
         });
         paidCount = recorded.paidCount;
       } catch {
@@ -835,21 +867,28 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       const allTxHashes = await repo.listSplitPaymentTxHashes(intent.intentId);
       const isComplete = paidCount >= participantCount;
       if (isComplete) {
-        await Promise.all([
-          repo.markIntentConfirmed(intent.intentId, parsedBody.txHash),
-          repo.recordVerifiedTx?.({
-            txHash: parsedBody.txHash.toLowerCase(),
-            network: config.network,
-            actionType: intent.actionType,
-            assetCode: payload.assetCode,
-            amountEst: payload.totalAmount ?? payload.amount,
-          }) ?? Promise.resolve(),
-          repo.incrementProductEvent?.({
-            dayUtc: new Date().toISOString().slice(0, 10),
-            network: config.network,
-            eventType: "intent_confirmed",
-          }) ?? Promise.resolve(),
-        ]);
+        let confirmedSplit: SignedIntent | null = null;
+        try {
+          confirmedSplit = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+        } catch {
+          confirmedSplit = null;
+        }
+        if (confirmedSplit) {
+          await Promise.all([
+            repo.recordVerifiedTx?.({
+              txHash: parsedBody.txHash.toLowerCase(),
+              network: config.network,
+              actionType: intent.actionType,
+              assetCode: payload.assetCode,
+              amountEst: payload.totalAmount ?? payload.amount,
+            }) ?? Promise.resolve(),
+            repo.incrementProductEvent?.({
+              dayUtc: new Date().toISOString().slice(0, 10),
+              network: config.network,
+              eventType: "intent_confirmed",
+            }) ?? Promise.resolve(),
+          ]);
+        }
       }
 
       const shareAmount = payload.amount ?? "?";
@@ -953,7 +992,15 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: txCheck.reason }, 409);
     }
 
-    const updated = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+    let updated: SignedIntent | null = null;
+    try {
+      updated = await repo.markIntentConfirmed(intent.intentId, parsedBody.txHash);
+    } catch {
+      return c.json({ error: "Transaction hash already used for another intent" }, 409);
+    }
+    if (!updated) {
+      return c.json({ error: "Intent already confirmed or closed" }, 409);
+    }
     const derivedAssetLabel =
       payload.assetCode ??
       (payload.fromAsset && payload.toAsset

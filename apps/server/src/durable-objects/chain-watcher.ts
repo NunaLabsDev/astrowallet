@@ -92,15 +92,17 @@ export class ChainWatcherDO {
       return;
     }
 
-    let shouldReschedule = false;
+    let shouldReschedule = true;
     try {
       const repo = createD1Repository(this.env.DB);
       const savedOffset = (await this.state.storage.get<number>("batch_offset")) ?? 0;
+      let effectiveOffset = savedOffset;
       let batch = repo.listWatchedAccountsPage
-        ? await repo.listWatchedAccountsPage(BATCH_SIZE, savedOffset)
-        : (await repo.listWatchedAccounts()).slice(savedOffset, savedOffset + BATCH_SIZE);
+        ? await repo.listWatchedAccountsPage(BATCH_SIZE, effectiveOffset)
+        : (await repo.listWatchedAccounts()).slice(effectiveOffset, effectiveOffset + BATCH_SIZE);
 
-      if (batch.length === 0 && savedOffset > 0) {
+      if (batch.length === 0 && effectiveOffset > 0) {
+        effectiveOffset = 0;
         await this.state.storage.put("batch_offset", 0);
         batch = repo.listWatchedAccountsPage
           ? await repo.listWatchedAccountsPage(BATCH_SIZE, 0)
@@ -108,12 +110,12 @@ export class ChainWatcherDO {
       }
 
       if (batch.length === 0) {
+        shouldReschedule = false;
         await this.state.storage.delete("batch_offset");
         return;
       }
 
-      shouldReschedule = true;
-      const nextOffset = batch.length < BATCH_SIZE ? 0 : savedOffset + BATCH_SIZE;
+      const nextOffset = batch.length < BATCH_SIZE ? 0 : effectiveOffset + BATCH_SIZE;
       await this.state.storage.put("batch_offset", nextOffset);
 
       const verifiedAssets = await getCachedSep42VerifiedAssets({
@@ -127,9 +129,9 @@ export class ChainWatcherDO {
         }
 
         const cursorKey = `pay_cursor:${config.network}:${entry.address}`;
-        const savedCursor = await this.state.storage.get<string>(cursorKey);
 
         try {
+          const savedCursor = await this.state.storage.get<string>(cursorKey);
           if (!savedCursor) {
             // Initialize baseline cursor at HEAD (order=desc&limit=1) without replaying historical transactions
             const latestToken = await fetchLatestPaymentCursor(config, entry.address);

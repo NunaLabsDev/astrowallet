@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ClassicAddress } from "@astrowallet/domain";
+import { normalizeDecimalAmountInput } from "@astrowallet/domain";
 import { buildSep7PayUri, encodeMuxedAddress } from "@astrowallet/stellar-core";
 import QRCode from "qrcode";
 import { useWallet } from "../state/wallet-context.js";
@@ -53,13 +54,23 @@ export function ReceiveSheet({
     if (mode === "muxed") {
       return muxedResult.value ?? activeAccount.address;
     }
-    return buildSep7PayUri({
-      destination: activeAccount.address,
-      amount: reqAmount.trim() || undefined,
-      memo: reqMemo.trim() || undefined,
-      memoType: reqMemo.trim() ? "MEMO_TEXT" : undefined,
-      msg: `Pay ${activeAccount.label} (${config.network.toUpperCase()})`,
-    });
+    const cleanAmt = reqAmount.trim() ? normalizeDecimalAmountInput(reqAmount, 7) : null;
+    try {
+      return buildSep7PayUri({
+        destination: activeAccount.address,
+        amount: cleanAmt ?? undefined,
+        memo: reqMemo.trim() || undefined,
+        memoType: reqMemo.trim() ? "MEMO_TEXT" : undefined,
+        msg: `Pay ${activeAccount.label} (${config.network.toUpperCase()})`,
+      });
+    } catch {
+      return buildSep7PayUri({
+        destination: activeAccount.address,
+        memo: reqMemo.trim() || undefined,
+        memoType: reqMemo.trim() ? "MEMO_TEXT" : undefined,
+        msg: `Pay ${activeAccount.label} (${config.network.toUpperCase()})`,
+      });
+    }
   }, [activeAccount, mode, muxedResult.value, reqAmount, reqMemo, config.network]);
 
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AGENT_DERIVATION_INDEX,
   createDefaultAgentBudgetPolicy,
@@ -126,7 +126,10 @@ export function AgentBudgetSheet() {
     ),
   );
 
+  const probingRef = useRef(false);
   const handleProbeX402 = async () => {
+    if (probingRef.current) return;
+    probingRef.current = true;
     setProbing(true);
     setProbeError(null);
     setProbeResult(null);
@@ -215,6 +218,7 @@ export function AgentBudgetSheet() {
     } catch (err) {
       setProbeError(err instanceof Error ? err.message : "x402 probe failed");
     } finally {
+      probingRef.current = false;
       setProbing(false);
     }
   };

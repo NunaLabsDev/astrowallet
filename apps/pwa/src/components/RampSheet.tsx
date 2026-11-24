@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import {
   NEAR_STELLAR_USDC_ASSET_ID,
   NEAR_STELLAR_XLM_ASSET_ID,
@@ -16,10 +16,15 @@ import {
   encodeLayerZeroRecipientBytes32,
   evmAddressToBytes32,
   quoteLayerZeroOftBridge,
+  stroops7ToDecimal,
   type LayerZeroOftQuoteResult,
   type NearIntentsQuoteResult,
 } from "@astrowallet/defi";
-import { ContractAddressSchema, type ClassicAddress } from "@astrowallet/domain";
+import {
+  ContractAddressSchema,
+  normalizeDecimalAmountInput,
+  type ClassicAddress,
+} from "@astrowallet/domain";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, openExternalUrl } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
@@ -41,14 +46,11 @@ const NEAR_ORIGIN_ASSETS = [
 ] as const;
 
 function decimalToAtomicString(decimalInput: string, decimals: number): string {
-  const clean = decimalInput.trim();
-  if (!/^\d+(?:\.\d+)?$/.test(clean)) {
-    throw new Error("Enter a valid positive decimal amount");
+  const clean = normalizeDecimalAmountInput(decimalInput, decimals);
+  if (!clean) {
+    throw new Error(`Enter a valid positive decimal amount (up to ${decimals} decimals)`);
   }
   const [wholePart = "0", fracPart = ""] = clean.split(".");
-  if (fracPart.length > decimals) {
-    throw new Error(`Maximum ${decimals} decimal places supported for this asset`);
-  }
   const paddedFrac = fracPart.padEnd(decimals, "0");
   const combined = `${wholePart}${paddedFrac}`.replace(/^0+/, "");
   if (!combined) {
@@ -556,14 +558,14 @@ export function RampSheet() {
           throw new Error("Enter a valid LayerZero V2 OFT C... contract ID.");
         }
         const toBytes32 = evmAddressToBytes32(evmDestAddress);
-        const { stroops7, sendableFormatted } = computeLayerZeroOftSharedAmount(amount);
+        const { sendableStroops7, sendableFormatted } = computeLayerZeroOftSharedAmount(amount);
         const slip = Number.parseInt(lzSlippageBps.trim() || "50", 10);
         const quote = await quoteLayerZeroOftBridge({
           oftContractId: parsedOft.data,
           from: activeAccount.address,
           dstEid: lzDestEid,
           toBytes32,
-          amountLdStroops7: stroops7,
+          amountLdStroops7: sendableStroops7,
           slippageBps: Number.isFinite(slip) ? slip : 50,
           rpcUrls: config.rpcUrls,
           networkPassphrase: config.networkPassphrase,
@@ -576,7 +578,7 @@ export function RampSheet() {
           refundAddress: activeAccount.address as ClassicAddress,
           dstEid: lzDestEid,
           toBytes32,
-          amountLdStroops7: stroops7,
+          amountLdStroops7: sendableStroops7,
           minAmountLdStroops7: quote.minAmountLdStroops7,
           nativeFeeStroops: quote.nativeFeeStroops,
           zroFee: quote.zroFee,
@@ -585,7 +587,7 @@ export function RampSheet() {
         });
         const destLabel =
           LAYERZERO_EIDS.find((x) => x.eid === lzDestEid)?.label ?? `EID ${lzDestEid}`;
-        const feeXlm = (Number(quote.nativeFeeStroops) / 10_000_000).toFixed(4);
+        const feeXlm = stroops7ToDecimal(quote.nativeFeeStroops);
         setPendingBridgeStage({
           step: "lz_send",
           label: `Send ${sendableFormatted} OFT -> ${destLabel}`,
@@ -600,8 +602,10 @@ export function RampSheet() {
     }
   };
 
+  const bridgeSubmittingRef = useRef(false);
   const handleSignProBridgeStage = async () => {
-    if (!pendingBridgeStage) return;
+    if (!pendingBridgeStage || bridgeSubmittingRef.current) return;
+    bridgeSubmittingRef.current = true;
     setBusy(true);
     setErrorMsg(null);
     try {
@@ -618,6 +622,7 @@ export function RampSheet() {
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : "Pro Bridge signing failed");
     } finally {
+      bridgeSubmittingRef.current = false;
       setBusy(false);
     }
   };
@@ -1212,9 +1217,9 @@ export function RampSheet() {
                 <div className="aw-banner aw-banner--trust" style={{ fontSize: 12, display: "grid", gap: 4 }}>
                   <strong>Live On-Chain OFT Quote:</strong>
                   <span className="tabular-nums">
-                    Expected Received: {(Number(lzQuote.amountReceivedLdStroops7) / 10_000_000).toFixed(4)} · Min
-                    Guaranteed: {(Number(lzQuote.minAmountLdStroops7) / 10_000_000).toFixed(4)} · Messaging Fee:{" "}
-                    {(Number(lzQuote.nativeFeeStroops) / 10_000_000).toFixed(4)} XLM
+                    Expected Received: {stroops7ToDecimal(lzQuote.amountReceivedLdStroops7)} · Min
+                    Guaranteed: {stroops7ToDecimal(lzQuote.minAmountLdStroops7)} · Messaging Fee:{" "}
+                    {stroops7ToDecimal(lzQuote.nativeFeeStroops)} XLM
                   </span>
                 </div>
               )}

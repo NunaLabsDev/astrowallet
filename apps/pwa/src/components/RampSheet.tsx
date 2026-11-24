@@ -2,18 +2,28 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import {
   NEAR_STELLAR_USDC_ASSET_ID,
   NEAR_STELLAR_XLM_ASSET_ID,
+  buildCctpApproveXdr,
+  buildCctpDepositForBurnXdr,
+  buildCctpForwarderHookData,
+  buildCctpMintAndForwardXdr,
+  buildLayerZeroOftSendXdr,
   computeLayerZeroOftSharedAmount,
+  contractStrkeyToBytes32Hex,
   convertEvmUsdc6ToStellarStroops7,
   convertStellarUsdcToEvmAtomic6,
-  createCircleCctpRampAdapter,
   createNearIntentsQuoteAdapter,
+  deriveAssetContractId,
   encodeLayerZeroRecipientBytes32,
+  evmAddressToBytes32,
+  quoteLayerZeroOftBridge,
+  type LayerZeroOftQuoteResult,
   type NearIntentsQuoteResult,
 } from "@astrowallet/defi";
-import { ContractAddressSchema } from "@astrowallet/domain";
+import { ContractAddressSchema, type ClassicAddress } from "@astrowallet/domain";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, openExternalUrl } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
 
 type RampTab = "cash" | "any_chain" | "pro_bridge";
 
@@ -70,14 +80,62 @@ const NEAR_DEST_CROSSCHAIN_ASSETS = [
   { id: "nep141:ton.omft.near", label: "TON (TON)", chain: "TON" },
 ] as const;
 
+const CCTP_DOMAINS = [
+  { domain: 0, label: "Ethereum (Domain 0)" },
+  { domain: 6, label: "Base (Domain 6)" },
+  { domain: 3, label: "Arbitrum (Domain 3)" },
+  { domain: 2, label: "Optimism (Domain 2)" },
+  { domain: 7, label: "Polygon (Domain 7)" },
+  { domain: 1, label: "Avalanche (Domain 1)" },
+] as const;
+
+const LAYERZERO_EIDS = [
+  { eid: 30101, label: "Ethereum (EID 30101)" },
+  { eid: 30109, label: "Polygon (EID 30109)" },
+  { eid: 30110, label: "Arbitrum (EID 30110)" },
+  { eid: 30111, label: "Optimism (EID 30111)" },
+  { eid: 30184, label: "Base (EID 30184)" },
+  { eid: 40161, label: "Sepolia Testnet (EID 40161)" },
+] as const;
+
+function defaultCctpContracts(network: "testnet" | "mainnet", configuredForwarder?: string) {
+  if (network === "mainnet") {
+    return {
+      tmm: "CAE2G5Z77UP7GYPYGFOWFGW7C7J6I4YP2AFGSADRKQY62SYUFLPNFTXL",
+      forwarder:
+        configuredForwarder ?? "CBZL2IH7F6BIDAA3WBNXYKIXSATJGMSW7K5P5MJ6STX5RXN47TZJDF5T",
+    };
+  }
+  return {
+    tmm: "CDNG7HXAPBWICI2E3AUBP3YZWZELJLYSB6F5CC7WLDTLTHVM74SLRTHP",
+    forwarder:
+      configuredForwarder ?? "CA66Q2WFBND6V4UEB7RD4SAXSVIWMD6RA4X3U32ELVFGXV5PJK4T4VSZ",
+  };
+}
+
+function defaultOftContract(network: "testnet" | "mainnet"): string {
+  return network === "mainnet"
+    ? "CBOWOLFSDM5PZXNFIVDMP5NZ7U2GSIHED6H6R446QOHF266XINKUMMF6"
+    : "";
+}
+
 /**
  * Unified Cash & Cross-Chain Hub inside Telegram Mini App:
  * 1) MoneyGram Ramps (SEP-24 Cash-Out / Cash-In)
  * 2) NEAR Intents 1-Click Cross-Chain Deposit (with strict MEMO guard)
- * 3) Pro Bridge Validator (Circle CCTP 6<->7 + LayerZero V2 OFT)
+ * 3) Pro Bridge Execution (Circle CCTP V2 Burn/Forward + LayerZero V2 OFT Quote/Send)
  */
 export function RampSheet() {
-  const { config, activeAccount, accountState, tonAccount, signSep10ChallengeXdr } = useWallet();
+  const {
+    config,
+    activeAccount,
+    accountState,
+    verifiedAssets,
+    tonAccount,
+    signSep10ChallengeXdr,
+    signAndSubmitRawXdrWithShield,
+    showToast,
+  } = useWallet();
 
   const [activeTab, setActiveTab] = useState<RampTab>("cash");
 
@@ -151,16 +209,77 @@ export function RampSheet() {
     setCashError(null);
   }, [config.network, config.moneygramAnchorDomain]);
 
-  // Pro Bridge (CCTP + OFT) state
-  const [direction, setDirection] = useState<"onramp" | "offramp">("onramp");
+  // Pro Bridge (CCTP V2 + LayerZero V2 OFT) state
+  const [proRail, setProRail] = useState<"cctp" | "layerzero">("cctp");
+  const [direction, setDirection] = useState<"onramp" | "offramp">("offramp");
   const [amount, setAmount] = useState("25.00");
-  const [cctpBridgeUrl, setCctpBridgeUrl] = useState(() => config.cctpBridgeUrl ?? "");
-  const [forwarderId, setForwarderId] = useState(
-    () => config.cctpForwarderContractId ?? "",
+  const [evmDestAddress, setEvmDestAddress] = useState("");
+  const [cctpDestDomain, setCctpDestDomain] = useState<number>(6);
+  const [cctpTmmId, setCctpTmmId] = useState(
+    () => defaultCctpContracts(config.network, config.cctpForwarderContractId).tmm,
   );
+  const [forwarderId, setForwarderId] = useState(
+    () => defaultCctpContracts(config.network, config.cctpForwarderContractId).forwarder,
+  );
+  const [cctpMessageHex, setCctpMessageHex] = useState("");
+  const [cctpAttestationHex, setCctpAttestationHex] = useState("");
+  const [lzDestEid, setLzDestEid] = useState<number>(
+    () => (config.network === "mainnet" ? 30101 : 40161),
+  );
+  const [lzOftContractId, setLzOftContractId] = useState(() => defaultOftContract(config.network));
+  const [lzSlippageBps, setLzSlippageBps] = useState("50");
+  const [lzQuote, setLzQuote] = useState<LayerZeroOftQuoteResult | null>(null);
+  const [pendingBridgeStage, setPendingBridgeStage] = useState<{
+    label: string;
+    unsignedXdr: string;
+    summary: string;
+    step: "cctp_approve" | "cctp_burn" | "cctp_forward" | "lz_send";
+  } | null>(null);
+  const [bridgeTxHash, setBridgeTxHash] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [previewPayload, setPreviewPayload] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const defaults = defaultCctpContracts(config.network, config.cctpForwarderContractId);
+    setCctpTmmId(defaults.tmm);
+    setForwarderId(defaults.forwarder);
+    setLzOftContractId(defaultOftContract(config.network));
+    setLzDestEid(config.network === "mainnet" ? 30101 : 40161);
+    setLzQuote(null);
+    setPendingBridgeStage(null);
+    setErrorMsg(null);
+    setBridgeTxHash(null);
+  }, [config.network, config.cctpForwarderContractId]);
+
+  const resolvedUsdcSacContractId = useMemo(() => {
+    const match = verifiedAssets.find((v) => v.code.trim().toUpperCase() === "USDC");
+    if (!match) return null;
+    try {
+      return deriveAssetContractId("USDC", match.issuer, config.networkPassphrase);
+    } catch {
+      return null;
+    }
+  }, [verifiedAssets, config.networkPassphrase]);
+
+  const cctpInboundHookPreview = useMemo(() => {
+    if (!activeAccount) return null;
+    try {
+      const hook = buildCctpForwarderHookData(activeAccount.address);
+      const parsedForwarder = ContractAddressSchema.safeParse(forwarderId.trim());
+      return {
+        ok: true as const,
+        hookDataHex: hook.hex,
+        forwarderBytes32: parsedForwarder.success
+          ? contractStrkeyToBytes32Hex(parsedForwarder.data)
+          : null,
+      };
+    } catch (err) {
+      return {
+        ok: false as const,
+        error: err instanceof Error ? err.message : "Invalid forwarder recipient",
+      };
+    }
+  }, [activeAccount, forwarderId]);
 
   const hasUsdcTrustline = useMemo(() => {
     if (!accountState?.funded) return false;
@@ -340,35 +459,164 @@ export function RampSheet() {
     await requestNearQuote(true);
   };
 
-  const handleBuildPreview = async (e: FormEvent) => {
+  const buildCctpOutboundStage = async (skipApproveCheck = false) => {
+    if (activeAccount.kind !== "classic" || !activeAccount.address.startsWith("G")) {
+      throw new Error("Pro Bridge signing requires an active Classic G... signer account.");
+    }
+    if (!resolvedUsdcSacContractId) {
+      throw new Error("USDC SEP-42 issuer / SAC contract could not be resolved on this network.");
+    }
+    const parsedTmm = ContractAddressSchema.safeParse(cctpTmmId.trim());
+    if (!parsedTmm.success) {
+      throw new Error("Enter a valid CCTP TokenMessengerMinter C... contract ID.");
+    }
+    const evmBytes32 = evmAddressToBytes32(evmDestAddress);
+    const { stroops7, formattedStellarUsdc } = convertEvmUsdc6ToStellarStroops7(
+      convertStellarUsdcToEvmAtomic6(amount).atomic6,
+    );
+
+    if (!skipApproveCheck) {
+      const approveRes = await buildCctpApproveXdr({
+        from: activeAccount.address as ClassicAddress,
+        usdcSacContractId: resolvedUsdcSacContractId,
+        tokenMessengerMinterContractId: parsedTmm.data,
+        amountStroops7: stroops7,
+        rpcUrls: config.rpcUrls,
+        networkPassphrase: config.networkPassphrase,
+      });
+      if (!approveRes.alreadyApproved && approveRes.unsignedXdr) {
+        setPendingBridgeStage({
+          step: "cctp_approve",
+          label: `Step 1/2 · Approve ${formattedStellarUsdc} USDC Allowance`,
+          unsignedXdr: approveRes.unsignedXdr,
+          summary: `Approve TokenMessengerMinter (${parsedTmm.data.slice(0, 6)}…) to burn ${formattedStellarUsdc} USDC via CCTP.`,
+        });
+        return;
+      }
+    }
+
+    const burnRes = await buildCctpDepositForBurnXdr({
+      from: activeAccount.address as ClassicAddress,
+      usdcSacContractId: resolvedUsdcSacContractId,
+      tokenMessengerMinterContractId: parsedTmm.data,
+      destinationDomain: cctpDestDomain,
+      mintRecipientBytes32: evmBytes32,
+      amountStroops7: stroops7,
+      rpcUrls: config.rpcUrls,
+      networkPassphrase: config.networkPassphrase,
+    });
+    const destLabel =
+      CCTP_DOMAINS.find((d) => d.domain === cctpDestDomain)?.label ?? `Domain ${cctpDestDomain}`;
+    setPendingBridgeStage({
+      step: "cctp_burn",
+      label: `Burn ${formattedStellarUsdc} USDC via CCTP -> ${destLabel}`,
+      unsignedXdr: burnRes.unsignedXdr,
+      summary: `Burn ${formattedStellarUsdc} USDC on Stellar via Circle CCTP V2 to ${evmDestAddress.trim()} on ${destLabel}.`,
+    });
+  };
+
+  const handlePrepareProBridge = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setErrorMsg(null);
-    setPreviewPayload(null);
+    setBridgeTxHash(null);
+    setPendingBridgeStage(null);
 
     try {
-      const parsedContract = ContractAddressSchema.safeParse(forwarderId.trim());
-      if (!parsedContract.success) {
-        throw new Error("Enter a valid CctpForwarder C... contract address");
+      if (activeAccount.kind !== "classic" || !activeAccount.address.startsWith("G")) {
+        throw new Error("Pro Bridge execution requires an active Classic G... signer account.");
       }
-      const adapter = createCircleCctpRampAdapter({
-        bridgeBaseUrl: cctpBridgeUrl.trim(),
-        forwarderContractId: parsedContract.data,
-      });
-      const res = await adapter.createSessionUrl({
-        direction,
-        fiatCurrency: "USD",
-        assetCode: "USDC",
-        amount: amount.trim(),
-        destinationAddress: activeAccount.address,
-      });
-      const parsed = new URL(res.url);
-      if (config.network === "mainnet" && parsed.protocol !== "https:") {
-        throw new Error("Mainnet CCTP endpoint requires strict HTTPS URL");
+
+      if (proRail === "cctp") {
+        if (direction === "offramp") {
+          await buildCctpOutboundStage(false);
+        } else {
+          const parsedFwd = ContractAddressSchema.safeParse(forwarderId.trim());
+          if (!parsedFwd.success) {
+            throw new Error("Enter a valid CctpForwarder C... contract address.");
+          }
+          const fwdRes = await buildCctpMintAndForwardXdr({
+            caller: activeAccount.address as ClassicAddress,
+            cctpForwarderContractId: parsedFwd.data,
+            messageHex: cctpMessageHex,
+            attestationHex: cctpAttestationHex,
+            rpcUrls: config.rpcUrls,
+            networkPassphrase: config.networkPassphrase,
+          });
+          setPendingBridgeStage({
+            step: "cctp_forward",
+            label: "Execute CctpForwarder.mint_and_forward",
+            unsignedXdr: fwdRes.unsignedXdr,
+            summary: `Verify Circle attestation & mint forwarded USDC onto Stellar via CctpForwarder (${parsedFwd.data.slice(0, 6)}…).`,
+          });
+        }
+      } else {
+        const parsedOft = ContractAddressSchema.safeParse(lzOftContractId.trim());
+        if (!parsedOft.success) {
+          throw new Error("Enter a valid LayerZero V2 OFT C... contract ID.");
+        }
+        const toBytes32 = evmAddressToBytes32(evmDestAddress);
+        const { stroops7, sendableFormatted } = computeLayerZeroOftSharedAmount(amount);
+        const slip = Number.parseInt(lzSlippageBps.trim() || "50", 10);
+        const quote = await quoteLayerZeroOftBridge({
+          oftContractId: parsedOft.data,
+          from: activeAccount.address,
+          dstEid: lzDestEid,
+          toBytes32,
+          amountLdStroops7: stroops7,
+          slippageBps: Number.isFinite(slip) ? slip : 50,
+          rpcUrls: config.rpcUrls,
+          networkPassphrase: config.networkPassphrase,
+        });
+        setLzQuote(quote);
+
+        const built = await buildLayerZeroOftSendXdr({
+          oftContractId: parsedOft.data,
+          from: activeAccount.address as ClassicAddress,
+          refundAddress: activeAccount.address as ClassicAddress,
+          dstEid: lzDestEid,
+          toBytes32,
+          amountLdStroops7: stroops7,
+          minAmountLdStroops7: quote.minAmountLdStroops7,
+          nativeFeeStroops: quote.nativeFeeStroops,
+          zroFee: quote.zroFee,
+          rpcUrls: config.rpcUrls,
+          networkPassphrase: config.networkPassphrase,
+        });
+        const destLabel =
+          LAYERZERO_EIDS.find((x) => x.eid === lzDestEid)?.label ?? `EID ${lzDestEid}`;
+        const feeXlm = (Number(quote.nativeFeeStroops) / 10_000_000).toFixed(4);
+        setPendingBridgeStage({
+          step: "lz_send",
+          label: `Send ${sendableFormatted} OFT -> ${destLabel}`,
+          unsignedXdr: built.unsignedXdr,
+          summary: `Bridge ${sendableFormatted} OFT to ${evmDestAddress.trim()} on ${destLabel} · LayerZero Fee: ${feeXlm} XLM.`,
+        });
       }
-      setPreviewPayload(parsed.toString());
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to prepare CCTP parameters");
+      setErrorMsg(err instanceof Error ? err.message : "Failed to simulate cross-chain transaction");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleSignProBridgeStage = async () => {
+    if (!pendingBridgeStage) return;
+    setBusy(true);
+    setErrorMsg(null);
+    try {
+      const stage = pendingBridgeStage;
+      const res = await signAndSubmitRawXdrWithShield(stage.unsignedXdr, false);
+      setBridgeTxHash(res.hash);
+      showToast(`Pro Bridge tx confirmed: ${res.hash.slice(0, 8)}…`);
+      if (stage.step === "cctp_approve") {
+        // Allowance confirmed; immediately prepare the CCTP deposit_for_burn tx for signature
+        await buildCctpOutboundStage(true);
+      } else {
+        setPendingBridgeStage(null);
+      }
+    } catch (err) {
+      setErrorMsg(err instanceof Error ? err.message : "Pro Bridge signing failed");
     } finally {
       setBusy(false);
     }
@@ -384,7 +632,7 @@ export function RampSheet() {
         <AstroNavigatorAvatar
           seedKey={`${activeAccount.address}:ramp`}
           kind={activeAccount.kind}
-          state={cashSessionUrl || nearQuote || previewPayload ? "zenith" : busy || nearBusy ? "warp" : "float"}
+          state={cashSessionUrl || nearQuote || bridgeTxHash ? "zenith" : busy || nearBusy ? "warp" : "float"}
           size={52}
         />
         <div style={{ minWidth: 0 }}>
@@ -674,99 +922,338 @@ export function RampSheet() {
       )}
 
       {activeTab === "pro_bridge" && (
-        <form onSubmit={handleBuildPreview} style={{ display: "grid", gap: 10 }}>
-          <div className="aw-two-col-inputs">
-            <div>
-              <label className="aw-label" htmlFor="ramp-direction">
-                Direction
-              </label>
-              <select
-                id="ramp-direction"
-                className="aw-input"
-                value={direction}
-                onChange={(e) => setDirection(e.target.value as "onramp" | "offramp")}
-              >
-                <option value="onramp">Mint onto Stellar</option>
-                <option value="offramp">Burn from Stellar</option>
-              </select>
-            </div>
-            <div>
-              <label className="aw-label" htmlFor="ramp-amount">
-                Amount (USDC / USDT0 / USDe)
-              </label>
-              <input
-                id="ramp-amount"
-                type="text"
-                inputMode="decimal"
-                className="aw-input tabular-nums"
-                value={amount}
-                onChange={(e) => setAmount(e.target.value)}
-              />
-            </div>
+        <form onSubmit={handlePrepareProBridge} style={{ display: "grid", gap: 10 }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              className={`aw-tab ${proRail === "cctp" ? "aw-tab--active" : ""}`}
+              style={{ flex: 1 }}
+              onClick={() => {
+                setProRail("cctp");
+                setPendingBridgeStage(null);
+                setErrorMsg(null);
+              }}
+            >
+              Circle CCTP V2 (USDC)
+            </button>
+            <button
+              type="button"
+              className={`aw-tab ${proRail === "layerzero" ? "aw-tab--active" : ""}`}
+              style={{ flex: 1 }}
+              onClick={() => {
+                setProRail("layerzero");
+                setPendingBridgeStage(null);
+                setErrorMsg(null);
+              }}
+            >
+              LayerZero V2 OFT
+            </button>
           </div>
 
-          <input
-            type="url"
-            className="aw-input"
-            placeholder="CCTP Bridge Base URL (VITE_CCTP_BRIDGE_URL)"
-            value={cctpBridgeUrl}
-            onChange={(e) => setCctpBridgeUrl(e.target.value)}
-          />
-          <input
-            type="text"
-            className="aw-input"
-            placeholder="CctpForwarder Contract C... (VITE_CCTP_FORWARDER_CONTRACT_ID)"
-            value={forwarderId}
-            onChange={(e) => setForwarderId(e.target.value)}
-          />
+          {proRail === "cctp" ? (
+            <>
+              <div className="aw-two-col-inputs">
+                <div>
+                  <label className="aw-label" htmlFor="ramp-direction">
+                    Direction
+                  </label>
+                  <select
+                    id="ramp-direction"
+                    className="aw-input"
+                    value={direction}
+                    onChange={(e) => {
+                      setDirection(e.target.value as "onramp" | "offramp");
+                      setPendingBridgeStage(null);
+                    }}
+                  >
+                    <option value="offramp">Burn Stellar USDC → EVM</option>
+                    <option value="onramp">Claim EVM → Stellar Forwarder</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="aw-label" htmlFor="ramp-amount">
+                    Amount (USDC)
+                  </label>
+                  <input
+                    id="ramp-amount"
+                    type="text"
+                    inputMode="decimal"
+                    className="aw-input tabular-nums"
+                    value={amount}
+                    onChange={(e) => {
+                      setAmount(e.target.value);
+                      setPendingBridgeStage(null);
+                    }}
+                  />
+                </div>
+              </div>
 
-          {decimalPreview && (
-            <div
-              className={decimalPreview.ok ? "aw-banner" : "aw-banner aw-banner--danger"}
-              style={{ fontSize: 12 }}
-            >
-              {decimalPreview.ok ? (
+              {direction === "offramp" ? (
                 <>
-                  <strong>CCTP 6&harr;7 Decimal Guard OK:</strong> {decimalPreview.atomic6} EVM units
-                  (6d) = {decimalPreview.stroops7} stroops ({decimalPreview.formatted} USDC)
+                  <div className="aw-two-col-inputs">
+                    <div>
+                      <label className="aw-label" htmlFor="cctp-domain">
+                        Destination Chain
+                      </label>
+                      <select
+                        id="cctp-domain"
+                        className="aw-input"
+                        value={cctpDestDomain}
+                        onChange={(e) => {
+                          setCctpDestDomain(Number(e.target.value));
+                          setPendingBridgeStage(null);
+                        }}
+                      >
+                        {CCTP_DOMAINS.map((d) => (
+                          <option key={d.domain} value={d.domain}>
+                            {d.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="aw-label" htmlFor="cctp-evm-dest">
+                        EVM Recipient (0x…)
+                      </label>
+                      <input
+                        id="cctp-evm-dest"
+                        type="text"
+                        className="aw-input"
+                        style={{ fontFamily: "monospace", fontSize: 12 }}
+                        placeholder="0x..."
+                        value={evmDestAddress}
+                        onChange={(e) => {
+                          setEvmDestAddress(e.target.value);
+                          setPendingBridgeStage(null);
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <input
+                    type="text"
+                    className="aw-input"
+                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                    placeholder="TokenMessengerMinter C..."
+                    value={cctpTmmId}
+                    onChange={(e) => setCctpTmmId(e.target.value)}
+                  />
+                  {decimalPreview && (
+                    <div
+                      className={decimalPreview.ok ? "aw-banner" : "aw-banner aw-banner--danger"}
+                      style={{ fontSize: 12 }}
+                    >
+                      {decimalPreview.ok ? (
+                        <>
+                          <strong>CCTP 6&harr;7 Decimal Guard OK:</strong> {decimalPreview.atomic6} EVM units
+                          (6d) = {decimalPreview.stroops7} stroops ({decimalPreview.formatted} USDC)
+                        </>
+                      ) : (
+                        decimalPreview.error
+                      )}
+                    </div>
+                  )}
                 </>
               ) : (
-                decimalPreview.error
-              )}
-            </div>
-          )}
-
-          {oftPreview && (
-            <div
-              className={oftPreview.ok ? "aw-banner" : "aw-banner aw-banner--danger"}
-              style={{ fontSize: 12, display: "grid", gap: 4 }}
-            >
-              {oftPreview.ok ? (
                 <>
-                  <strong>LayerZero V2 OFT (USDT0 / Ethena USDe):</strong>{" "}
+                  <input
+                    type="text"
+                    className="aw-input"
+                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                    placeholder="CctpForwarder Contract C..."
+                    value={forwarderId}
+                    onChange={(e) => setForwarderId(e.target.value)}
+                  />
+                  {cctpInboundHookPreview && cctpInboundHookPreview.ok && (
+                    <div className="aw-banner" style={{ fontSize: 11, display: "grid", gap: 4 }}>
+                      <strong>EVM → Stellar Safe CctpForwarder Hook Params:</strong>
+                      {cctpInboundHookPreview.forwarderBytes32 && (
+                        <code style={{ wordBreak: "break-all" }}>
+                          mintRecipient / destinationCaller: {cctpInboundHookPreview.forwarderBytes32}
+                        </code>
+                      )}
+                      <code style={{ wordBreak: "break-all" }}>
+                        hookData: {cctpInboundHookPreview.hookDataHex}
+                      </code>
+                    </div>
+                  )}
+                  <input
+                    type="text"
+                    className="aw-input"
+                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                    placeholder="Circle Iris Message Hex (0x...)"
+                    value={cctpMessageHex}
+                    onChange={(e) => setCctpMessageHex(e.target.value)}
+                  />
+                  <input
+                    type="text"
+                    className="aw-input"
+                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                    placeholder="Circle Iris Attestation Hex (0x...)"
+                    value={cctpAttestationHex}
+                    onChange={(e) => setCctpAttestationHex(e.target.value)}
+                  />
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              <div className="aw-two-col-inputs">
+                <div>
+                  <label className="aw-label" htmlFor="lz-eid">
+                    Destination EVM Chain
+                  </label>
+                  <select
+                    id="lz-eid"
+                    className="aw-input"
+                    value={lzDestEid}
+                    onChange={(e) => {
+                      setLzDestEid(Number(e.target.value));
+                      setLzQuote(null);
+                      setPendingBridgeStage(null);
+                    }}
+                  >
+                    {LAYERZERO_EIDS.map((item) => (
+                      <option key={item.eid} value={item.eid}>
+                        {item.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="aw-label" htmlFor="lz-amount">
+                    Amount (USDT0 / OFT)
+                  </label>
+                  <input
+                    id="lz-amount"
+                    type="text"
+                    inputMode="decimal"
+                    className="aw-input tabular-nums"
+                    value={amount}
+                    onChange={(e) => {
+                      setAmount(e.target.value);
+                      setLzQuote(null);
+                      setPendingBridgeStage(null);
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div className="aw-two-col-inputs">
+                <input
+                  type="text"
+                  className="aw-input"
+                  style={{ fontFamily: "monospace", fontSize: 12 }}
+                  placeholder="EVM Recipient (0x...)"
+                  value={evmDestAddress}
+                  onChange={(e) => {
+                    setEvmDestAddress(e.target.value);
+                    setLzQuote(null);
+                    setPendingBridgeStage(null);
+                  }}
+                />
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="aw-input tabular-nums"
+                  placeholder="Slippage bps (50 = 0.5%)"
+                  value={lzSlippageBps}
+                  onChange={(e) => {
+                    setLzSlippageBps(e.target.value);
+                    setLzQuote(null);
+                  }}
+                />
+              </div>
+
+              <input
+                type="text"
+                className="aw-input"
+                style={{ fontFamily: "monospace", fontSize: 12 }}
+                placeholder="LayerZero V2 OFT Contract C... (Mainnet USDT0 prefilled)"
+                value={lzOftContractId}
+                onChange={(e) => {
+                  setLzOftContractId(e.target.value);
+                  setLzQuote(null);
+                  setPendingBridgeStage(null);
+                }}
+              />
+
+              {config.network === "testnet" && (
+                <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+                  USDT0 does not maintain an official Stellar Testnet OFT deployment; paste a custom
+                  Testnet OFT contract ID above or switch to Mainnet for canonical USDT0.
+                </div>
+              )}
+
+              {oftPreview && (
+                <div
+                  className={oftPreview.ok ? "aw-banner" : "aw-banner aw-banner--danger"}
+                  style={{ fontSize: 12, display: "grid", gap: 4 }}
+                >
+                  {oftPreview.ok ? (
+                    <>
+                      <strong>LayerZero V2 OFT (6d Shared / 7d Local Guard):</strong>{" "}
+                      <span className="tabular-nums">
+                        {oftPreview.sharedUnits6.toString()} shared units · Sendable: {oftPreview.sendableFormatted}
+                        {oftPreview.dustStroops > 0n
+                          ? ` (7th-digit dust: ${oftPreview.dustStroops.toString()} stroops)`
+                          : ""}
+                      </span>
+                      <code style={{ wordBreak: "break-all", fontSize: 11 }}>
+                        sender bytes32: {oftPreview.recipientBytes32}
+                      </code>
+                    </>
+                  ) : (
+                    oftPreview.error
+                  )}
+                </div>
+              )}
+
+              {lzQuote && (
+                <div className="aw-banner aw-banner--trust" style={{ fontSize: 12, display: "grid", gap: 4 }}>
+                  <strong>Live On-Chain OFT Quote:</strong>
                   <span className="tabular-nums">
-                    {oftPreview.sharedUnits6.toString()} shared units (6d) · Sendable: {oftPreview.sendableFormatted}
-                    {oftPreview.dustStroops > 0n ? ` (7th-digit dust: ${oftPreview.dustStroops.toString()} stroops)` : ""}
+                    Expected Received: {(Number(lzQuote.amountReceivedLdStroops7) / 10_000_000).toFixed(4)} · Min
+                    Guaranteed: {(Number(lzQuote.minAmountLdStroops7) / 10_000_000).toFixed(4)} · Messaging Fee:{" "}
+                    {(Number(lzQuote.nativeFeeStroops) / 10_000_000).toFixed(4)} XLM
                   </span>
-                  <code style={{ wordBreak: "break-all", fontSize: 11 }}>
-                    bytes32 recipient: {oftPreview.recipientBytes32}
-                  </code>
-                </>
-              ) : (
-                oftPreview.error
+                </div>
               )}
-            </div>
+            </>
           )}
 
           <button type="submit" className="aw-btn-primary" disabled={busy}>
-            {busy ? "Validating Parameters..." : "Validate CCTP Transfer Intent"}
+            {busy
+              ? "Simulating On Soroban RPC..."
+              : proRail === "layerzero"
+                ? "Quote OFT & Preview Send"
+                : direction === "offramp"
+                  ? "Simulate CCTP Burn Transaction"
+                  : "Simulate CctpForwarder Claim"}
           </button>
 
           {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
-          {previewPayload && (
-            <div className="aw-banner" style={{ display: "grid", gap: 6, fontSize: 12 }}>
-              <strong>Validated Parameter Uri (Copy inside Mini App):</strong>
-              <code style={{ wordBreak: "break-all" }}>{previewPayload}</code>
+          {bridgeTxHash && (
+            <div className="aw-banner aw-banner--trust" style={{ fontSize: 12 }}>
+              Submitted on-chain! Hash: <code style={{ wordBreak: "break-all" }}>{bridgeTxHash}</code>
+            </div>
+          )}
+
+          {pendingBridgeStage && (
+            <div style={{ display: "grid", gap: 8 }}>
+              <ClearSignSummaryCard
+                unsignedXdr={pendingBridgeStage.unsignedXdr}
+                networkPassphrase={config.networkPassphrase}
+                scanReport={null}
+                overrideSummary={pendingBridgeStage.summary}
+              />
+              <button
+                type="button"
+                className="aw-btn-gold"
+                disabled={busy}
+                onClick={() => void handleSignProBridgeStage()}
+              >
+                {busy ? "Signing & Submitting..." : `Sign & Submit · ${pendingBridgeStage.label}`}
+              </button>
             </div>
           )}
         </form>

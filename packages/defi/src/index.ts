@@ -1,5 +1,7 @@
 import { Asset } from "@stellar/stellar-sdk";
+export * from "./pro-bridge.js";
 export * from "./ramps.js";
+export * from "./sep40.js";
 import type {
   ContractAddress,
   RampPort,

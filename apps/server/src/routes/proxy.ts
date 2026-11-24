@@ -1,7 +1,9 @@
 import {
   buildSoroswapQuoteBody,
   createHorizonPathSwapAdapter,
+  fetchSep40OraclePrices,
   parseSoroswapQuoteOutput,
+  type Sep40PriceRequestAsset,
 } from "@astrowallet/defi";
 import {
   ClassicAddressSchema,
@@ -1286,6 +1288,68 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     } catch (err) {
       return c.json({ error: err instanceof Error ? err.message : "SEP-24 interactive error" }, 502);
     }
+  });
+
+  router.get("/oracle/prices", async (c) => {
+    const config = c.get("config");
+    const overrideContract = (c.req.query("oracleContractId") ?? "").trim();
+    const oracleContractId = overrideContract || config.redstoneOracleContractId;
+    if (overrideContract && !/^C[A-Z2-7]{55}$/.test(overrideContract)) {
+      return c.json({ error: "Invalid SEP-40 oracleContractId" }, 400);
+    }
+    if (!oracleContractId) {
+      return c.json({
+        configured: false,
+        network: config.network,
+        oracleContractId: null,
+        decimals: null,
+        prices: {},
+      });
+    }
+
+    const rawAssets = (c.req.query("assets") ?? "XLM,USDC,USDT0,USDE,SUSDE,EURC,BTC,ETH").trim();
+    const parsedAssets: Sep40PriceRequestAsset[] = [];
+    const seenKeys = new Set<string>();
+    for (const part of rawAssets.split(",").slice(0, 16)) {
+      const clean = part.trim();
+      if (!clean) continue;
+      const [symPart, contractPart] = clean.split(":");
+      const symbol = (symPart ?? "").trim().slice(0, 16);
+      const contractId =
+        contractPart && /^C[A-Z2-7]{55}$/.test(contractPart.trim())
+          ? contractPart.trim()
+          : undefined;
+      const key = symbol ? symbol.toUpperCase() : contractId;
+      if (!key || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      parsedAssets.push({
+        key,
+        symbol: symbol || undefined,
+        contractId,
+      });
+    }
+    if (parsedAssets.length === 0) {
+      return c.json({ error: "At least one asset symbol or contract ID is required" }, 400);
+    }
+
+    return serveEdgeCachedJson(c, {
+      cacheKey: `sep40:${config.network}:${oracleContractId}:${parsedAssets.map((a) => `${a.key}:${a.contractId ?? ""}`).join(",")}`,
+      freshTtlSec: 30,
+      staleTtlSec: 120,
+      compute: async () => {
+        const snapshot = await fetchSep40OraclePrices({
+          oracleContractId: oracleContractId as `C${string}`,
+          rpcUrls: config.rpcUrls,
+          networkPassphrase: config.networkPassphrase,
+          assets: parsedAssets,
+        });
+        return {
+          configured: true,
+          network: config.network,
+          ...snapshot,
+        };
+      },
+    });
   });
 
   return router;

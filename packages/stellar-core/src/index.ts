@@ -5,6 +5,7 @@ export * from "./ledger/client.js";
 export * from "./ledger/token-explorer.js";
 export * from "./network.js";
 export * from "./sep0005.js";
+export * from "./sep50/index.js";
 export * from "./smart-account/index.js";
 export * from "./vault/crypto.js";
 export * from "./vault/indexeddb-store.js";

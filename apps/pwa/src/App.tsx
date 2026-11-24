@@ -38,6 +38,7 @@ import { AccountSwitcher } from "./components/AccountSwitcher.js";
 import { partitionWalletBalances } from "./components/asset-classification.js";
 import { AstroNavigatorAvatar } from "./components/AstroNavigatorAvatar.js";
 import { AstroWalletLogo } from "./components/AstroWalletLogo.js";
+import { fetchCachedOraclePrices, type OraclePriceQuoteEntry } from "./state/oracle-prices.js";
 import { TelegramOnlyGate } from "./components/TelegramOnlyGate.js";
 import {
   IconAccounts,
@@ -530,6 +531,7 @@ function WalletShell({
   const [selectedTokenTarget, setSelectedTokenTarget] = useState<SelectedTokenTarget | null>(null);
   const [inspectTarget, setInspectTarget] = useState<ChainInspectTarget | null>(null);
   const [nftDetailTarget, setNftDetailTarget] = useState<ClassicNftDetailTarget | null>(null);
+  const [oraclePrices, setOraclePrices] = useState<Record<string, OraclePriceQuoteEntry>>({});
 
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [copiedTxId, setCopiedTxId] = useState<string | null>(null);
@@ -747,8 +749,39 @@ function WalletShell({
     return () => setTelegramClosingConfirmation(false);
   }, [vaultStatus, activeDrawer, pendingTonConnectTx, intentRoute]);
 
+  useEffect(() => {
+    let cancelled = false;
+    void fetchCachedOraclePrices({
+      apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
+    }).then((snap) => {
+      if (!cancelled) {
+        setOraclePrices(snap?.configured ? snap.prices : {});
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [config.apiBaseUrl, config.network]);
+
   const primaryXlmBalance =
     accountState?.balances.find((b) => b.assetCode === "XLM")?.balance ?? "0.0000000";
+
+  const portfolioUsdValue = useMemo(() => {
+    if (!accountState?.balances || Object.keys(oraclePrices).length === 0) return null;
+    let totalUsd = 0;
+    let matchedAny = false;
+    for (const bal of accountState.balances) {
+      const code = bal.assetCode.trim().toUpperCase();
+      const quote = oraclePrices[code];
+      const amountNum = Number(bal.balance);
+      if (quote && Number.isFinite(amountNum) && amountNum > 0) {
+        totalUsd += amountNum * quote.priceUsd;
+        matchedAny = true;
+      }
+    }
+    return matchedAny ? totalUsd : null;
+  }, [accountState?.balances, oraclePrices]);
 
   const reserveStats = useMemo(() => {
     const total = Math.max(0, Number(primaryXlmBalance));
@@ -1571,6 +1604,25 @@ function WalletShell({
                               XLM
                             </span>
                           </div>
+
+                          {portfolioUsdValue !== null && (
+                            <div
+                              className="tabular-nums"
+                              style={{
+                                display: "flex",
+                                alignItems: "center",
+                                gap: 6,
+                                flexWrap: "wrap",
+                                fontSize: 12,
+                                color: "var(--aw-ink-secondary)",
+                              }}
+                            >
+                              <span>&approx; ${portfolioUsdValue.toFixed(2)} USD portfolio</span>
+                              <span className="glass-pill glass-pill--trust" style={{ fontSize: 10 }}>
+                                RedStone SEP-40
+                              </span>
+                            </div>
+                          )}
 
                           {accountState?.funded ? (
                             <div className="aw-reserve-panel">

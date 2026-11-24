@@ -232,8 +232,12 @@ describe("parseServerConfig", () => {
       ...VALID_TESTNET_SERVER_ENV,
       TG_BOT_USERNAME: "@AstroWalletTestBot",
       TG_MINI_APP_SHORT_NAME: "wallet",
+      REDSTONE_ORACLE_CONTRACT_ID: "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
     });
     expect(serverCfg.tgBotUsername).toBe("AstroWalletTestBot");
     expect(serverCfg.tgMiniAppShortName).toBe("wallet");
+    expect(serverCfg.redstoneOracleContractId).toBe(
+      "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
+    );
   });
 });

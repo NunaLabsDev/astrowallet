@@ -1,8 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { ContractAddressSchema, type ClassicAddress, type ContractAddress } from "@astrowallet/domain";
+import {
+  buildSep50TransferXdr,
+  fetchSep50Holdings,
+  type Sep50CollectibleItem,
+  type Sep50HoldingsSnapshot,
+} from "@astrowallet/stellar-core";
 import { readCachedEntry, writeCachedEntry } from "../state/market-cache.js";
 import { useWallet } from "../state/wallet-context.js";
 import { partitionWalletBalances } from "./asset-classification.js";
-import { IconNft, IconSearch } from "./Icons.js";
+import { IconNft, IconRefresh, IconSearch } from "./Icons.js";
 
 export interface ClassicNftMeta {
   code: string;
@@ -28,12 +35,149 @@ export interface CollectiblesSheetProps {
 
 const NFT_BATCH_SIZE = 12;
 const NFT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const SEP50_CACHE_TTL_MS = 120_000;
 
 export function CollectiblesSheet({
   onBack,
   onSelectClassicNft,
 }: CollectiblesSheetProps = {}) {
-  const { config, activeAccount, accountState } = useWallet();
+  const { config, activeAccount, accountState, signAndSubmitRawXdrWithShield, showToast } =
+    useWallet();
+
+  const [sep50ContractInput, setSep50ContractInput] = useState(
+    () => config.sorobitsContractId ?? "",
+  );
+  const [sep50ActiveContractId, setSep50ActiveContractId] = useState<ContractAddress | undefined>(
+    () => config.sorobitsContractId,
+  );
+  const [sep50Loading, setSep50Loading] = useState(false);
+  const [sep50Error, setSep50Error] = useState<string | null>(null);
+  const [sep50Snapshot, setSep50Snapshot] = useState<Sep50HoldingsSnapshot | null>(null);
+  const [sep50RefreshNonce, setSep50RefreshNonce] = useState(0);
+  const [selectedSep50, setSelectedSep50] = useState<Sep50CollectibleItem | null>(null);
+  const [transferTo, setTransferTo] = useState("");
+  const [transferBusy, setTransferBusy] = useState(false);
+  const [transferError, setTransferError] = useState<string | null>(null);
+  const [transferTxHash, setTransferTxHash] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSep50ContractInput(config.sorobitsContractId ?? "");
+    setSep50ActiveContractId(config.sorobitsContractId);
+    setSelectedSep50(null);
+    setSep50Snapshot(null);
+    setSep50Error(null);
+    setTransferTo("");
+    setTransferError(null);
+    setTransferTxHash(null);
+  }, [config.sorobitsContractId, config.network, activeAccount?.address]);
+
+  useEffect(() => {
+    if (!activeAccount || !sep50ActiveContractId) {
+      setSep50Snapshot(null);
+      setSep50Loading(false);
+      return undefined;
+    }
+
+    let cancelled = false;
+    const cacheKey = `sep50:${config.network}:${sep50ActiveContractId}:${activeAccount.address}`;
+    let hasWarmCache = false;
+    if (sep50RefreshNonce === 0) {
+      void readCachedEntry<Sep50HoldingsSnapshot>(cacheKey, SEP50_CACHE_TTL_MS).then((hit) => {
+        if (!cancelled && hit?.data) {
+          hasWarmCache = true;
+          setSep50Snapshot(hit.data);
+          setSep50Loading(false);
+        }
+      });
+    }
+
+    setSep50Loading(!hasWarmCache);
+    setSep50Error(null);
+
+    void fetchSep50Holdings({
+      contractId: sep50ActiveContractId,
+      ownerAddress: activeAccount.address,
+      rpcUrls: config.rpcUrls,
+      networkPassphrase: config.networkPassphrase,
+      maxItems: 12,
+    })
+      .then((snap) => {
+        if (cancelled) return;
+        writeCachedEntry(cacheKey, snap, SEP50_CACHE_TTL_MS);
+        setSep50Snapshot(snap);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setSep50Error(
+          err instanceof Error ? err.message : "Failed to query Soroban SEP-50 collectibles",
+        );
+      })
+      .finally(() => {
+        if (!cancelled) setSep50Loading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    activeAccount,
+    sep50ActiveContractId,
+    config.network,
+    config.rpcUrls,
+    config.networkPassphrase,
+    sep50RefreshNonce,
+  ]);
+
+  const handleLoadCustomSep50Contract = (e: FormEvent) => {
+    e.preventDefault();
+    const trimmed = sep50ContractInput.trim();
+    if (!trimmed) {
+      setSep50ActiveContractId(undefined);
+      setSep50Snapshot(null);
+      setSep50Error(null);
+      return;
+    }
+    const parsed = ContractAddressSchema.safeParse(trimmed);
+    if (!parsed.success) {
+      setSep50Error("Enter a valid 56-character C... Soroban SEP-50 contract ID");
+      return;
+    }
+    setSep50Error(null);
+    setSelectedSep50(null);
+    setSep50ActiveContractId(parsed.data);
+    setSep50RefreshNonce((n) => n + 1);
+  };
+
+  const handleTransferSep50 = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!selectedSep50 || !activeAccount) return;
+    if (activeAccount.kind !== "classic" || !activeAccount.address.startsWith("G")) {
+      setTransferError("Direct SEP-50 transfer requires an active Classic G... signer account.");
+      return;
+    }
+    setTransferBusy(true);
+    setTransferError(null);
+    setTransferTxHash(null);
+    try {
+      const built = await buildSep50TransferXdr({
+        contractId: selectedSep50.contractId,
+        from: activeAccount.address as ClassicAddress,
+        to: transferTo.trim(),
+        tokenId: selectedSep50.tokenId,
+        rpcUrls: config.rpcUrls,
+        networkPassphrase: config.networkPassphrase,
+      });
+      const res = await signAndSubmitRawXdrWithShield(built.unsignedXdr, false);
+      setTransferTxHash(res.hash);
+      setTransferTo("");
+      showToast(`Transferred ${selectedSep50.name} on-chain`);
+      setSep50RefreshNonce((n) => n + 1);
+    } catch (err) {
+      setTransferError(err instanceof Error ? err.message : "SEP-50 transfer failed");
+    } finally {
+      setTransferBusy(false);
+    }
+  };
 
   const classicNfts = useMemo(
     () => partitionWalletBalances(accountState?.balances ?? []).classicNfts,
@@ -166,11 +310,220 @@ export function CollectiblesSheet({
           <button type="button" className="aw-chip-btn" onClick={onBack}>
             ← Back to Wallet
           </button>
-          <span className="glass-pill glass-pill--gold tabular-nums">
-            {classicNfts.length} Classic NFTs
-          </span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            <span className="glass-pill glass-pill--trust tabular-nums">
+              {sep50Snapshot?.totalOwned ?? 0} Soroban SEP-50
+            </span>
+            <span className="glass-pill glass-pill--gold tabular-nums">
+              {classicNfts.length} Classic NFTs
+            </span>
+          </div>
         </div>
       )}
+
+      {/* Sorobits / Soroban SEP-50 NFTs */}
+      <section className="glass-card" style={{ display: "grid", gap: 12 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 8,
+            flexWrap: "wrap",
+          }}
+        >
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 16 }}>
+              {sep50Snapshot?.collectionName ?? "Soroban SEP-50 Collectibles"}
+              {sep50Snapshot?.collectionSymbol ? ` (${sep50Snapshot.collectionSymbol})` : ""}
+            </div>
+            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
+              On-chain Sorobits &amp; SEP-50 Enumerable NFTs ({config.network.toUpperCase()})
+            </div>
+          </div>
+          {sep50ActiveContractId && (
+            <button
+              type="button"
+              className="aw-chip-btn"
+              disabled={sep50Loading}
+              onClick={() => setSep50RefreshNonce((n) => n + 1)}
+            >
+              <IconRefresh size={13} />
+              <span>{sep50Loading ? "Syncing..." : "Refresh"}</span>
+            </button>
+          )}
+        </div>
+
+        <form
+          onSubmit={handleLoadCustomSep50Contract}
+          style={{ display: "flex", gap: 8, flexWrap: "wrap" }}
+        >
+          <input
+            type="text"
+            className="aw-input"
+            style={{ flex: "1 1 220px", fontFamily: "monospace", fontSize: 12 }}
+            placeholder="SEP-50 Contract ID C... (VITE_SOROBITS_CONTRACT_ID)"
+            value={sep50ContractInput}
+            onChange={(e) => setSep50ContractInput(e.target.value)}
+          />
+          <button type="submit" className="aw-btn-secondary" disabled={sep50Loading}>
+            Load Collection
+          </button>
+        </form>
+
+        {sep50Error && (
+          <div className="aw-banner aw-banner--danger" style={{ fontSize: 12 }}>
+            {sep50Error}
+          </div>
+        )}
+
+        {!sep50ActiveContractId ? (
+          <div className="aw-banner" style={{ fontSize: 12 }}>
+            No default Sorobits SEP-50 contract configured on this build. Enter any deployed SEP-50{" "}
+            <code>C...</code> contract address above to load on-chain NFTs.
+          </div>
+        ) : sep50Loading && !sep50Snapshot ? (
+          <div className="aw-sorobit-grid">
+            <div className="aw-sorobit-skeleton" />
+            <div className="aw-sorobit-skeleton" />
+          </div>
+        ) : !sep50Snapshot || sep50Snapshot.items.length === 0 ? (
+          <div className="aw-banner" style={{ fontSize: 12 }}>
+            No SEP-50 collectibles owned by <code>{activeAccount.label}</code> in contract{" "}
+            <code>
+              {sep50ActiveContractId.slice(0, 6)}…{sep50ActiveContractId.slice(-4)}
+            </code>
+            .
+          </div>
+        ) : (
+          <div className="aw-sorobit-grid">
+            {sep50Snapshot.items.map((item) => (
+              <div
+                key={`${item.contractId}:${item.tokenId}`}
+                className="aw-sorobit-card"
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  setSelectedSep50(item);
+                  setTransferError(null);
+                  setTransferTxHash(null);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    setSelectedSep50(item);
+                    setTransferError(null);
+                    setTransferTxHash(null);
+                  }
+                }}
+                style={{ cursor: "pointer" }}
+              >
+                <div className="aw-sorobit-media">
+                  {item.image ? (
+                    <img src={item.image} alt={item.name} loading="lazy" />
+                  ) : (
+                    <div className="aw-nft-fallback">
+                      <IconNft size={26} />
+                      <span>#{item.tokenId}</span>
+                    </div>
+                  )}
+                  <span className="aw-sorobit-badge">
+                    {item.soulbound ? "Soulbound" : `#${item.tokenId}`}
+                  </span>
+                </div>
+                <div className="aw-sorobit-info">
+                  <div className="aw-sorobit-title">{item.name}</div>
+                  <div className="aw-sorobit-meta">
+                    <span>{sep50Snapshot.collectionSymbol ?? "SEP-50"}</span>
+                    <span>Token #{item.tokenId}</span>
+                  </div>
+                  {item.traits.length > 0 && (
+                    <div className="aw-sorobit-traits">
+                      {item.traits.slice(0, 3).map((tr) => (
+                        <span key={`${tr.traitType}:${tr.value}`} className="glass-pill">
+                          {tr.traitType}: {tr.value}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {selectedSep50 && (
+          <div
+            className="glass-card glass-card--vault"
+            style={{ display: "grid", gap: 10, padding: 12 }}
+          >
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+              <strong style={{ fontSize: 14 }}>
+                {selectedSep50.name} (Token #{selectedSep50.tokenId})
+              </strong>
+              <button
+                type="button"
+                className="aw-chip-btn"
+                onClick={() => setSelectedSep50(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            {selectedSep50.description && (
+              <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                {selectedSep50.description}
+              </div>
+            )}
+
+            {selectedSep50.traits.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {selectedSep50.traits.map((tr) => (
+                  <span key={`${tr.traitType}:${tr.value}`} className="glass-pill">
+                    {tr.traitType}: {tr.value}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {selectedSep50.soulbound ? (
+              <div className="aw-banner aw-banner--warn" style={{ fontSize: 12 }}>
+                This SEP-50 token is soulbound (`soulbound = true`) and cannot be transferred.
+              </div>
+            ) : (
+              <form onSubmit={handleTransferSep50} style={{ display: "grid", gap: 8 }}>
+                <label className="aw-label" htmlFor="sep50-transfer-to">
+                  Transfer To Stellar Recipient (G... or C...)
+                </label>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <input
+                    id="sep50-transfer-to"
+                    type="text"
+                    className="aw-input"
+                    style={{ flex: "1 1 200px", fontFamily: "monospace", fontSize: 12 }}
+                    placeholder="G... or C..."
+                    value={transferTo}
+                    onChange={(e) => setTransferTo(e.target.value)}
+                  />
+                  <button type="submit" className="aw-btn-primary" disabled={transferBusy}>
+                    {transferBusy ? "Signing Transfer..." : "Transfer SEP-50"}
+                  </button>
+                </div>
+                {transferError && (
+                  <div className="aw-banner aw-banner--danger" style={{ fontSize: 12 }}>
+                    {transferError}
+                  </div>
+                )}
+                {transferTxHash && (
+                  <div className="aw-banner aw-banner--trust" style={{ fontSize: 12 }}>
+                    Transferred! Tx: <code>{transferTxHash}</code>
+                  </div>
+                )}
+              </form>
+            )}
+          </div>
+        )}
+      </section>
 
       {/* Classic Stellar NFTs (0.0000001 / Litemint & SEP-1) */}
       <section className="glass-card" style={{ display: "grid", gap: 14 }}>

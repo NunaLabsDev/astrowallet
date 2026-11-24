@@ -19,6 +19,7 @@ import {
   type TokenHolderEntry,
   type TokenLiquidityPoolEntry,
 } from "../state/market-cache.js";
+import { fetchCachedOraclePrices, type OraclePriceQuoteEntry } from "../state/oracle-prices.js";
 import { useWallet } from "../state/wallet-context.js";
 import {
   copyTextToClipboard,
@@ -129,11 +130,30 @@ export function TokenExplorerSheet({
   const [detailError, setDetailError] = useState<string | null>(null);
   const [trustBusy, setTrustBusy] = useState(false);
   const [copiedField, setCopiedField] = useState<string | null>(null);
+  const [oraclePrices, setOraclePrices] = useState<Record<string, OraclePriceQuoteEntry>>({});
 
   useEffect(() => {
     setSelectedToken(initialToken ?? null);
     setInspectorTab("overview");
   }, [initialToken]);
+
+  // Pre-load RedStone SEP-40 USD oracle prices when available for active network
+  useEffect(() => {
+    let cancelled = false;
+    void fetchCachedOraclePrices({
+      apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
+    }).then((snap) => {
+      if (!cancelled && snap?.configured) {
+        setOraclePrices(snap.prices);
+      } else if (!cancelled) {
+        setOraclePrices({});
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [config.apiBaseUrl, config.network]);
 
   // Pre-load live liquid tokens via 3-tier SWR cache (DeviceStorage + Edge Cache + Horizon)
   useEffect(() => {
@@ -638,6 +658,7 @@ export function TokenExplorerSheet({
     verifiedEntry?.icon && verifiedEntry.icon !== displayIcon ? verifiedEntry.icon : undefined;
   const quoteCode = priceHistory?.quoteCode ?? (isNativeXlm && verifiedUsdcCounter ? "USDC" : "XLM");
   const positiveChange = (priceHistory?.changePct ?? 0) >= 0;
+  const oracleQuote = oraclePrices[selectedToken.assetCode.trim().toUpperCase()];
 
   return (
     <section
@@ -735,6 +756,14 @@ export function TokenExplorerSheet({
                 >
                   {positiveChange ? "+" : ""}
                   {priceHistory.changePct.toFixed(2)}% ({timeframe.toUpperCase()})
+                </span>
+              )}
+              {oracleQuote && (
+                <span
+                  className="glass-pill glass-pill--trust tabular-nums"
+                  title="On-chain RedStone SEP-40 USD feed"
+                >
+                  Oracle ${oracleQuote.priceUsd < 1 ? oracleQuote.priceUsd.toFixed(4) : oracleQuote.priceUsd.toFixed(2)} USD
                 </span>
               )}
             </div>

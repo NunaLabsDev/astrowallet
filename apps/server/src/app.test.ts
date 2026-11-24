@@ -3443,4 +3443,25 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(badRes.status).toBe(502);
   });
+
+  it("returns configured:false honestly on /v1/proxy/oracle/prices when unconfigured and rejects invalid oracleContractId", async () => {
+    const repo = createMemoryRepo();
+    const app = createApp(repo);
+
+    const unconfiguredRes = await app.request("/v1/proxy/oracle/prices?assets=XLM,USDC", {}, TEST_ENV);
+    expect(unconfiguredRes.status).toBe(200);
+    const unconfiguredJson = (await unconfiguredRes.json()) as {
+      configured: boolean;
+      prices: Record<string, unknown>;
+    };
+    expect(unconfiguredJson.configured).toBe(false);
+    expect(unconfiguredJson.prices).toEqual({});
+
+    const badContractRes = await app.request(
+      "/v1/proxy/oracle/prices?oracleContractId=INVALID_CONTRACT",
+      {},
+      TEST_ENV,
+    );
+    expect(badContractRes.status).toBe(400);
+  });
 });

@@ -606,6 +606,10 @@ const RawServerEnvSchema = z
       emptyToUndefined,
       ContractAddressSchema.optional(),
     ),
+    REDSTONE_ORACLE_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
     SMART_ACCOUNT_WASM_HASH: z.preprocess(
       emptyToUndefined,
       z
@@ -774,6 +778,7 @@ export interface ServerConfig {
   astrogateApiBaseUrl?: string | undefined;
   sep42AssetListUrls: string[];
   claimEscrowContractId?: ContractAddress | undefined;
+  redstoneOracleContractId?: ContractAddress | undefined;
   smartAccountWasmHash?: string | undefined;
   relayAllowedContracts: string[];
   relayRateLimitPerMin: number;
@@ -817,6 +822,7 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     astrogateApiBaseUrl: parsed.ASTROGATE_API_BASE_URL,
     sep42AssetListUrls: parsed.SEP42_ASSET_LIST_URLS,
     claimEscrowContractId: parsed.CLAIM_ESCROW_CONTRACT_ID,
+    redstoneOracleContractId: parsed.REDSTONE_ORACLE_CONTRACT_ID,
     smartAccountWasmHash: parsed.SMART_ACCOUNT_WASM_HASH,
     relayAllowedContracts: parsed.RELAY_ALLOWED_CONTRACTS,
     relayRateLimitPerMin: parsed.RELAY_RATE_LIMIT_PER_MIN,

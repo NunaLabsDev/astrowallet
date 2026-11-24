@@ -84,7 +84,7 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
         c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
         c.header(
           "Access-Control-Allow-Headers",
-          "Content-Type, Authorization, X-Connect-Token, X-Ecosystem-Secret",
+          "Content-Type, Authorization, X-Connect-Token, X-Ecosystem-Secret, X-Astro-Network",
         );
       } else {
         if (!config.allowedOrigins.includes(origin)) {

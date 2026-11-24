@@ -87,6 +87,9 @@ async function callTonRpcWithFailover<T>(
           method,
           params,
         }),
+        ...(typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+          ? { signal: AbortSignal.timeout(8_000) }
+          : {}),
       });
       if (!response.ok) {
         throw new Error(`TON RPC ${method} HTTP ${response.status}`);

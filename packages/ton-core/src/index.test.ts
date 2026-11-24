@@ -192,14 +192,25 @@ describe("@astrowallet/ton-core", () => {
     ).toMatchObject({ ok: false, code: 1 });
 
     let primaryCalls = 0;
+    let sawAbortSignal = false;
     const client = createTonClient({
       network: "testnet",
-      rpcUrls: ["https://primary.rpc.example/jsonRPC", "https://backup.rpc.example/jsonRPC"],
+      rpcUrls: [
+        "https://primary.rpc.example/jsonRPC",
+        "https://timeout.rpc.example/jsonRPC",
+        "https://backup.rpc.example/jsonRPC",
+      ],
       fetchFn: async (url, init) => {
+        if (init?.signal) {
+          sawAbortSignal = true;
+        }
         const body = JSON.parse(String(init?.body ?? "{}")) as { method?: string };
         if (String(url).includes("primary.rpc.example")) {
           primaryCalls += 1;
           return new Response("down", { status: 503 });
+        }
+        if (String(url).includes("timeout.rpc.example")) {
+          throw new DOMException("Timed out", "TimeoutError");
         }
         if (body.method === "getAddressInformation") {
           return new Response(
@@ -217,6 +228,7 @@ describe("@astrowallet/ton-core", () => {
 
     const state = await client.getAccountState(dest.friendlyAddress);
     expect(primaryCalls).toBe(2);
+    expect(sawAbortSignal).toBe(true);
     expect(state.balanceTon).toBe("2.5");
     expect(state.seqno).toBe(3);
 

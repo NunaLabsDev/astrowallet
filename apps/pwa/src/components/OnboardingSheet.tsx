@@ -392,6 +392,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
   const handleImportSeedSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     setError(null);
     if (!validateMnemonicPhrase(importMnemonic)) {
       setError("Enter a valid 12 or 24-word BIP-39 recovery phrase.");
@@ -434,6 +435,7 @@ export function OnboardingSheet({ onRegisterBackHandler }: OnboardingSheetProps)
 
   const handleRestoreAgVaultSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (busy) return;
     setError(null);
     if (!agVaultJson.trim()) {
       setError("Select or paste your encrypted .agvault.json backup.");

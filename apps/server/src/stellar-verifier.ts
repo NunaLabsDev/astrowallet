@@ -132,8 +132,10 @@ async function fetchFromHorizonFailover(
   horizonUrls: readonly string[],
   path: string,
   fetchFn: FetchLike,
+  opts?: { retryOn404?: boolean },
 ): Promise<Response> {
   let lastError: unknown;
+  let lastNotFoundResponse: Response | null = null;
   for (const base of horizonUrls) {
     const cleanBase = base.replace(/\/+$/, "");
     try {
@@ -141,13 +143,23 @@ async function fetchFromHorizonFailover(
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(8_000),
       });
-      if (response.status === 404 || response.ok) {
+      if (response.ok) {
         return response;
+      }
+      if (response.status === 404) {
+        if (!opts?.retryOn404) {
+          return response;
+        }
+        lastNotFoundResponse = response;
+        continue;
       }
       lastError = new Error(`Horizon returned HTTP ${response.status}`);
     } catch (err) {
       lastError = err;
     }
+  }
+  if (lastNotFoundResponse) {
+    return lastNotFoundResponse;
   }
   throw lastError instanceof Error ? lastError : new Error("All Horizon endpoints failed");
 }
@@ -336,6 +348,7 @@ export async function verifyTransactionConfirmed(
     config.horizonUrls,
     `/transactions/${encodeURIComponent(txHash)}`,
     fetchFn,
+    { retryOn404: true },
   );
 
   let tx: NormalizedTx;
@@ -605,6 +618,7 @@ export async function verifyTransactionConfirmed(
       config.horizonUrls,
       `/transactions/${encodeURIComponent(txHash)}/operations?limit=50`,
       fetchFn,
+      { retryOn404: true },
     );
     if (opsRes.status === 404) {
       return { confirmed: false, reason: "Transaction operations not found" };

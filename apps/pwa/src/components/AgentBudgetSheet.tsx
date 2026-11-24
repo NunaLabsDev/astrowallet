@@ -132,7 +132,22 @@ export function AgentBudgetSheet() {
     setProbeResult(null);
     try {
       const parsedUrl = new URL(probeUrl.trim());
-      const res = await fetch(parsedUrl.toString(), { method: "GET" });
+      const isLocalHttp =
+        parsedUrl.protocol === "http:" &&
+        (parsedUrl.hostname === "localhost" || parsedUrl.hostname === "127.0.0.1");
+      if (parsedUrl.protocol !== "https:" && !isLocalHttp) {
+        throw new Error(
+          "Agent endpoints must use https:// (or http://localhost for local development).",
+        );
+      }
+      const timeoutOpt =
+        typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+          ? { signal: AbortSignal.timeout(10_000) }
+          : {};
+      const res = await fetch(parsedUrl.toString(), {
+        method: "GET",
+        ...timeoutOpt,
+      });
       if (res.status === 402) {
         const hdr = res.headers.get("PAYMENT-REQUIRED");
         if (!hdr) {
@@ -177,6 +192,7 @@ export function AgentBudgetSheet() {
             [paymentHeaderName]: signed.paymentHeader,
             "X-PAYMENT": signed.paymentHeader,
           },
+          ...timeoutOpt,
         });
         if (paidRes.ok) {
           savePolicy(recordAgentSpend(policy, first.amount));

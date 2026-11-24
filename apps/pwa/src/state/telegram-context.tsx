@@ -332,14 +332,19 @@ export function TelegramProvider({
     setAuthError(null);
     try {
       const base = config.apiBaseUrl.replace(/\/+$/, "");
+      const targetNetwork = config.network;
       const res = await fetch(`${base}/v1/tg/auth`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-Astro-Network": networkRef.current,
+          "X-Astro-Network": targetNetwork,
         },
         body: JSON.stringify({ initData: wa.initData }),
+        ...(typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+          ? { signal: AbortSignal.timeout(8_000) }
+          : {}),
       });
+      if (targetNetwork !== networkRef.current) return;
       const body = (await res.json()) as {
         error?: string;
         sessionToken?: string;
@@ -382,7 +387,7 @@ export function TelegramProvider({
         err instanceof Error ? err.message : "Failed to verify Telegram Mini App session",
       );
     }
-  }, [config.apiBaseUrl, loadCloudBackupWithToken]);
+  }, [config.apiBaseUrl, config.network, loadCloudBackupWithToken]);
 
   useEffect(() => {
     void authenticate();
@@ -422,7 +427,7 @@ export function TelegramProvider({
   useEffect(() => {
     if (!sessionToken || authStatus !== "verified") return;
     void refreshLinkedAccounts();
-  }, [config.network, sessionToken, authStatus, refreshLinkedAccounts]);
+  }, [sessionToken, authStatus, refreshLinkedAccounts]);
 
   const refreshCloudBackup = useCallback(async (): Promise<string | null> => {
     const activeToken = await ensureFreshSessionToken();

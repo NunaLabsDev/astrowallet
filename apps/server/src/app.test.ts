@@ -3467,4 +3467,79 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(badContractRes.status).toBe(400);
   });
+
+  it("fails over verifyTransactionConfirmed past a lagging Horizon 404 to confirm on secondary Horizon", async () => {
+    const dest = Keypair.random().publicKey();
+    const source = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    const txHash = "c9".repeat(32);
+
+    const laggingFetch: typeof fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.startsWith("https://horizon-lagging.example")) {
+        return new Response("Not Found", { status: 404 });
+      }
+      if (url.startsWith("https://horizon-synced.example") && url.includes(`/transactions/${txHash}/operations`)) {
+        return new Response(
+          JSON.stringify({
+            _embedded: {
+              records: [
+                {
+                  type: "payment",
+                  to: dest,
+                  amount: "12.5000000",
+                  asset_type: "native",
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.startsWith("https://horizon-synced.example") && url.includes(`/transactions/${txHash}`)) {
+        return new Response(
+          JSON.stringify({
+            successful: true,
+            ledger: 12345,
+            created_at: new Date().toISOString(),
+            source_account: source,
+            envelope_xdr: BENIGN_PAYMENT_TX_XDR,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("Not Found", { status: 404 });
+    };
+
+    const result = await verifyTransactionConfirmed(
+      {
+        horizonUrls: [
+          "https://horizon-lagging.example",
+          "https://horizon-synced.example",
+        ],
+        networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+      },
+      txHash,
+      laggingFetch,
+      {
+        destination: dest,
+        amount: "12.5",
+        assetCode: "XLM",
+        expectedSourceAccount: source,
+      },
+    );
+    expect(result).toEqual({ confirmed: true, ledger: 12345 });
+
+    const all404Result = await verifyTransactionConfirmed(
+      {
+        horizonUrls: [
+          "https://horizon-lagging.example",
+          "https://horizon-also-lagging.example",
+        ],
+        networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+      },
+      txHash,
+      async () => new Response("Not Found", { status: 404 }),
+    );
+    expect(all404Result.confirmed).toBe(false);
+  });
 });

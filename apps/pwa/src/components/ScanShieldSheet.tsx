@@ -43,6 +43,9 @@ export function ScanShieldSheet() {
           "X-Astro-Network": config.network,
         },
         body: JSON.stringify({ target: cleaned }),
+        ...(typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
+          ? { signal: AbortSignal.timeout(8_000) }
+          : {}),
       }).catch(() => null);
 
       if (res && res.ok) {
@@ -156,7 +159,7 @@ export function ScanShieldSheet() {
                 ? "aw-banner aw-banner--danger"
                 : report.verdict === "warning"
                   ? "aw-banner aw-banner--warn"
-                  : "aw-banner"
+                  : "aw-banner aw-banner--trust"
             }
           >
             <div style={{ fontWeight: 700, marginBottom: 4 }}>

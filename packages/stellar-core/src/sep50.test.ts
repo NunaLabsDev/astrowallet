@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { parseSep50TokenUri } from "./sep50/index.js";
+import { TransactionBuilder, nativeToScVal, type xdr } from "@stellar/stellar-sdk";
+import { describe, expect, it, vi } from "vitest";
+import { fetchSep50Holdings, parseSep50TokenUri } from "./sep50/index.js";
 
 const SAMPLE_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
@@ -78,5 +79,98 @@ describe("SEP-50 Soroban NFT token_uri parser", () => {
       JSON.stringify({ name: "Safe Gradient", image: `data:image/svg+xml;base64,${safeB64}` }),
     );
     expect(safeParsed.image).toMatch(/^data:image\/svg\+xml;base64,/);
+  });
+
+  it("routes off-chain SEP-50 metadata hydration through /v1/proxy/sep50-meta with X-Astro-Network when apiBaseUrl is provided", async () => {
+    const requestedUrls: string[] = [];
+    const seenNetworkHeaders: Array<string | null> = [];
+    const owner = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    const passphrase = "Public Global Stellar Network ; September 2015";
+
+    const rpcSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url =
+        typeof input === "string" ? input : input instanceof Request ? input.url : String(input);
+      requestedUrls.push(url);
+      if (url.startsWith("https://rpc.example.org")) {
+        const rawBody = init?.body
+          ? String(init.body)
+          : input instanceof Request
+            ? await input.clone().text()
+            : "{}";
+        const body = JSON.parse(rawBody) as {
+          id?: number;
+          method?: string;
+          params?: { transaction?: string };
+        };
+        if (body.method === "simulateTransaction" && body.params?.transaction) {
+          const tx = TransactionBuilder.fromXDR(body.params.transaction, passphrase);
+          const op = tx.operations[0] as unknown as { func?: xdr.HostFunction };
+          const fnName = op?.func?.invokeContract?.functionName?.toString();
+          let retval: xdr.ScVal = nativeToScVal(null, { type: "void" });
+          if (fnName === "balance") retval = nativeToScVal(1, { type: "u32" });
+          else if (fnName === "name") retval = nativeToScVal("Sorobits", { type: "string" });
+          else if (fnName === "symbol") retval = nativeToScVal("SBIT", { type: "string" });
+          else if (fnName === "get_owner_token_id") retval = nativeToScVal(7, { type: "u32" });
+          else if (fnName === "token_uri") {
+            retval = nativeToScVal("https://pinata.example.com/ipfs/QmTest/7.json", {
+              type: "string",
+            });
+          }
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: { latestLedger: 99, results: [{ xdr: retval.toXDR("base64") }] },
+            }),
+            { status: 200 },
+          );
+        }
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+
+    const customFetch: typeof fetch = async (input, init) => {
+      const url = String(input);
+      requestedUrls.push(url);
+      const hdrs = new Headers(init?.headers);
+      seenNetworkHeaders.push(hdrs.get("X-Astro-Network"));
+      if (
+        url ===
+        `https://api.astrowallet.example/v1/proxy/sep50-meta?url=${encodeURIComponent("https://pinata.example.com/ipfs/QmTest/7.json")}`
+      ) {
+        return new Response(
+          JSON.stringify({
+            name: "Sorobit #7",
+            description: "Hydrated via Worker Proxy",
+            image: "https://pinata.example.com/ipfs/QmTest/7.png",
+            attributes: [{ trait_type: "Soulbound", value: "true" }],
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("Unexpected direct fetch", { status: 500 });
+    };
+
+    try {
+      const snap = await fetchSep50Holdings({
+        contractId: SAMPLE_CONTRACT,
+        ownerAddress: owner,
+        rpcUrls: ["https://rpc.example.org"],
+        networkPassphrase: passphrase,
+        apiBaseUrl: "https://api.astrowallet.example",
+        network: "mainnet",
+        fetchFn: customFetch,
+      });
+
+      expect(snap.totalOwned).toBe(1);
+      expect(snap.items[0]?.name).toBe("Sorobit #7");
+      expect(snap.items[0]?.description).toBe("Hydrated via Worker Proxy");
+      expect(snap.items[0]?.image).toBe("https://pinata.example.com/ipfs/QmTest/7.png");
+      expect(snap.items[0]?.soulbound).toBe(true);
+      expect(seenNetworkHeaders).toEqual(["mainnet"]);
+      expect(requestedUrls.some((u) => u.startsWith("https://pinata.example.com"))).toBe(false);
+    } finally {
+      rpcSpy.mockRestore();
+    }
   });
 });

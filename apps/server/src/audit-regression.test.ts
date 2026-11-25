@@ -954,4 +954,89 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
       rpcSpy.mockRestore();
     }
   });
+
+  it("proxies SEP-50 off-chain metadata safely, blocks SSRF URLs, and emits security/no-store headers", async () => {
+    const { repo } = createD1FaithfulRepo();
+    const fetchedUrls: string[] = [];
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input) => {
+        const url = String(input);
+        fetchedUrls.push(url);
+        if (url === "https://cdn.example.org/token/42.json") {
+          return new Response(
+            JSON.stringify({
+              name: "Sorobit #42",
+              description: "Verified navigator",
+              image: "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/42.svg",
+              attributes: [{ trait_type: "Tier", value: "Gold" }],
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url === "https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/9.json") {
+          return new Response(
+            JSON.stringify({
+              name: "IPFS Collectible #9",
+              image: "https://cdn.example.org/art/9.png",
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    const healthRes = await app.request("/health", { method: "GET" }, TEST_ENV);
+    expect(healthRes.status).toBe(200);
+    expect(healthRes.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(healthRes.headers.get("Referrer-Policy")).toBe("no-referrer");
+
+    const tgMeRes = await app.request("/v1/tg/me", { method: "GET" }, TEST_ENV);
+    expect(tgMeRes.status).toBe(401);
+    expect(tgMeRes.headers.get("Cache-Control")).toBe("no-store");
+
+    for (const badUrl of [
+      "http://127.0.0.1/meta.json",
+      "https://169.254.169.254/latest/meta-data",
+      "https://10.0.0.1/secret.json",
+      "https://localhost/meta.json",
+    ]) {
+      const badRes = await app.request(
+        `/v1/proxy/sep50-meta?url=${encodeURIComponent(badUrl)}`,
+        { method: "GET" },
+        TEST_ENV,
+      );
+      expect(badRes.status).toBe(400);
+    }
+    expect(fetchedUrls).toHaveLength(0);
+
+    const okHttps = await app.request(
+      `/v1/proxy/sep50-meta?url=${encodeURIComponent("https://cdn.example.org/token/42.json")}`,
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(okHttps.status).toBe(200);
+    const httpsJson = (await okHttps.json()) as {
+      name?: string;
+      description?: string;
+      image?: string;
+      attributes?: Array<{ trait_type: string; value: string }>;
+    };
+    expect(httpsJson.name).toBe("Sorobit #42");
+    expect(httpsJson.image).toBe(
+      "https://ipfs.io/ipfs/bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/42.svg",
+    );
+    expect(httpsJson.attributes).toEqual([{ trait_type: "Tier", value: "Gold" }]);
+
+    const okIpfs = await app.request(
+      `/v1/proxy/sep50-meta?url=${encodeURIComponent("ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi/9.json")}`,
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(okIpfs.status).toBe(200);
+    const ipfsJson = (await okIpfs.json()) as { name?: string; image?: string };
+    expect(ipfsJson.name).toBe("IPFS Collectible #9");
+    expect(ipfsJson.image).toBe("https://cdn.example.org/art/9.png");
+  });
 });

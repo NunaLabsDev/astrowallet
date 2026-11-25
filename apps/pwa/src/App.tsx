@@ -634,7 +634,7 @@ function WalletShell({
     if (vaultStatus !== "unlocked" || !sessionToken || !activeAccount) return;
     const prefKey = `${config.network}:${activeAccount.address}`;
     if (lastEcoPrefKeyRef.current === prefKey) return;
-    lastEcoPrefKeyRef.current = prefKey;
+    let cancelled = false;
     const base = config.apiBaseUrl.replace(/\/+$/, "");
     void fetch(`${base}/v1/tg/preferences`, {
       method: "PUT",
@@ -647,7 +647,16 @@ function WalletShell({
         preferredNetwork: config.network,
         activeAddress: activeAccount.address,
       }),
-    }).catch(() => undefined);
+    })
+      .then((res) => {
+        if (!cancelled && res.ok) {
+          lastEcoPrefKeyRef.current = prefKey;
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
   }, [vaultStatus, sessionToken, activeAccount, config.network, config.apiBaseUrl]);
 
   const partitionedBalances = useMemo(

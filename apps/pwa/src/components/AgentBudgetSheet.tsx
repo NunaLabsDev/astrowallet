@@ -17,12 +17,11 @@ const STORAGE_KEY = "astrowallet_x402_agent_policy_v1";
 function loadPolicy(
   network: "testnet" | "mainnet",
   configuredHost?: string,
+  altHost?: string,
 ): AgentBudgetPolicy {
-  const defaultDomains = configuredHost
-    ? Array.from(
-        new Set([configuredHost, "astrodex.pages.dev", "astrodex-testnet.pages.dev"]),
-      )
-    : undefined;
+  const defaultDomains = Array.from(
+    new Set([configuredHost, altHost].filter((h): h is string => Boolean(h))),
+  );
   try {
     const raw = localStorage.getItem(`${STORAGE_KEY}:${network}`);
     if (raw) {
@@ -32,7 +31,7 @@ function loadPolicy(
     // Fallback to default policy
   }
   return createDefaultAgentBudgetPolicy(network, Date.now(), {
-    allowedDomains: defaultDomains,
+    allowedDomains: defaultDomains.length > 0 ? defaultDomains : undefined,
   });
 }
 
@@ -57,6 +56,7 @@ export function AgentBudgetSheet() {
   } = useWallet();
 
   const envDexUrl = config.astrodexApiBaseUrl?.trim();
+  const altDexUrl = config.altNetworkProfile?.astrodexApiBaseUrl?.trim();
 
   const configuredDexHost = useMemo(() => {
     try {
@@ -66,17 +66,20 @@ export function AgentBudgetSheet() {
     }
   }, [envDexUrl]);
 
+  const altDexHost = useMemo(() => {
+    try {
+      return altDexUrl ? new URL(altDexUrl).hostname : undefined;
+    } catch {
+      return undefined;
+    }
+  }, [altDexUrl]);
+
   const [policy, setPolicy] = useState<AgentBudgetPolicy>(() =>
-    loadPolicy(config.network, configuredDexHost),
+    loadPolicy(config.network, configuredDexHost, altDexHost),
   );
   const [domainsInput, setDomainsInput] = useState(() => policy.allowedDomains.join(", "));
   const [probeUrl, setProbeUrl] = useState(() => {
-    const base = (
-      envDexUrl ||
-      (config.network === "mainnet"
-        ? "https://astrodex.pages.dev"
-        : "https://astrodex-testnet.pages.dev")
-    ).replace(/\/+$/, "");
+    const base = (envDexUrl || altDexUrl || config.apiBaseUrl).replace(/\/+$/, "");
     return `${base}/v1/agent/forensic-alpha/XLM`;
   });
   const [probing, setProbing] = useState(false);
@@ -85,17 +88,12 @@ export function AgentBudgetSheet() {
   const [copiedKey, setCopiedKey] = useState(false);
 
   useEffect(() => {
-    const next = loadPolicy(config.network, configuredDexHost);
+    const next = loadPolicy(config.network, configuredDexHost, altDexHost);
     setPolicy(next);
     setDomainsInput(next.allowedDomains.join(", "));
-    const base = (
-      envDexUrl ||
-      (config.network === "mainnet"
-        ? "https://astrodex.pages.dev"
-        : "https://astrodex-testnet.pages.dev")
-    ).replace(/\/+$/, "");
+    const base = (envDexUrl || altDexUrl || config.apiBaseUrl).replace(/\/+$/, "");
     setProbeUrl(`${base}/v1/agent/forensic-alpha/XLM`);
-  }, [config.network, envDexUrl, configuredDexHost]);
+  }, [config.network, config.apiBaseUrl, envDexUrl, altDexUrl, configuredDexHost, altDexHost]);
 
   const derivedAgentAddress = useMemo(
     () => (vaultStatus === "unlocked" ? deriveAgentAccountAddress() : null),
@@ -116,6 +114,8 @@ export function AgentBudgetSheet() {
     }
   };
 
+  const probingRef = useRef(false);
+
   if (!activeAccount) return null;
 
   const effectiveSpentTodayStroops = getEffectiveSpentTodayStroops(policy);
@@ -126,7 +126,6 @@ export function AgentBudgetSheet() {
     ),
   );
 
-  const probingRef = useRef(false);
   const handleProbeX402 = async () => {
     if (probingRef.current) return;
     probingRef.current = true;

@@ -398,6 +398,8 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       path.endsWith("/stellar-toml") ||
       path.endsWith("/ton-manifest") ||
       path.endsWith("/nft-meta") ||
+      path.endsWith("/sep50-meta") ||
+      path.endsWith("/oracle/prices") ||
       path.includes("/market/");
     const limit = await checkRateLimit({
       repository: c.get("repo"),
@@ -1628,6 +1630,91 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         502,
       );
     }
+  });
+
+  router.get("/sep50-meta", async (c) => {
+    const rawUrl = (c.req.query("url") ?? "").trim();
+    if (!rawUrl || rawUrl.length > 2048) {
+      return c.json({ error: "Valid SEP-50 metadata url query parameter is required" }, 400);
+    }
+
+    const candidateUrl = rawUrl.startsWith("/ipfs/")
+      ? `https://ipfs.io${rawUrl}`
+      : (normalizeIpfsUrl(rawUrl) ?? rawUrl);
+    const parsed = parseSafeHttpsPublicUrl(candidateUrl);
+    if (!parsed || parsed.username || parsed.password) {
+      return c.json({ error: "Invalid or unsafe SEP-50 metadata URL" }, 400);
+    }
+    const normalizedUrl = parsed.toString();
+
+    return serveEdgeCachedJson(c, {
+      cacheKey: `sep50meta:${normalizedUrl}`,
+      freshTtlSec: 3600,
+      staleTtlSec: 86_400,
+      compute: async () => {
+        const ipfsMatch = /^https:\/\/(?:ipfs\.io|dweb\.link)\/ipfs\/(.+)$/i.exec(normalizedUrl);
+        const candidates = ipfsMatch?.[1]
+          ? [
+              `https://ipfs.io/ipfs/${ipfsMatch[1]}`,
+              `https://dweb.link/ipfs/${ipfsMatch[1]}`,
+            ]
+          : [normalizedUrl];
+
+        let rawText: string | null = null;
+        let lastError = "Unable to fetch SEP-50 metadata";
+        for (const targetUrl of candidates) {
+          const res = await fetchSafePublicHttpsText({
+            initialUrl: targetUrl,
+            maxBytes: 65_536,
+            accept: "application/json, */*",
+            userAgent: "AstroWallet-SEP50-Metadata/1.0",
+            fetchFn,
+            label: "SEP-50 metadata",
+          });
+          if (res.ok) {
+            rawText = res.text;
+            break;
+          }
+          lastError = res.error;
+        }
+        if (rawText === null) {
+          throw new Error(lastError);
+        }
+
+        let parsedJson: unknown;
+        try {
+          parsedJson = JSON.parse(rawText);
+        } catch {
+          throw new Error("SEP-50 metadata endpoint returned invalid JSON");
+        }
+        if (!parsedJson || typeof parsedJson !== "object" || Array.isArray(parsedJson)) {
+          throw new Error("SEP-50 metadata payload must be a JSON object");
+        }
+
+        const rec = parsedJson as Record<string, unknown>;
+        const name =
+          typeof rec.name === "string" && rec.name.trim()
+            ? rec.name.trim().slice(0, 160)
+            : undefined;
+        const description =
+          typeof rec.description === "string" && rec.description.trim()
+            ? rec.description.trim().slice(0, 1000)
+            : undefined;
+        const rawImage = typeof rec.image === "string" ? rec.image.trim() : "";
+        const normalizedImage = rawImage
+          ? normalizeIpfsUrl(rawImage) ??
+            (rawImage.startsWith("data:image/") ? rawImage.slice(0, 32_768) : undefined)
+          : undefined;
+        const attributes = Array.isArray(rec.attributes) ? rec.attributes.slice(0, 32) : undefined;
+
+        return {
+          ...(name ? { name } : {}),
+          ...(description ? { description } : {}),
+          ...(normalizedImage ? { image: normalizedImage } : {}),
+          ...(attributes ? { attributes } : {}),
+        };
+      },
+    });
   });
 
   return router;

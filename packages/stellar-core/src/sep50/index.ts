@@ -222,6 +222,9 @@ export async function fetchSep50Holdings(input: {
   rpcUrls: readonly string[];
   networkPassphrase: string;
   maxItems?: number | undefined;
+  apiBaseUrl?: string | undefined;
+  network?: "testnet" | "mainnet" | undefined;
+  fetchFn?: typeof fetch | undefined;
 }): Promise<Sep50HoldingsSnapshot> {
   if (!StrKey.isValidContract(input.contractId)) {
     throw new Error(`Invalid SEP-50 contract ID: ${input.contractId}`);
@@ -312,11 +315,35 @@ export async function fetchSep50Holdings(input: {
             );
             if (item.metadataUrl && !item.image && !item.description) {
               try {
-                const metaRes = await fetch(item.metadataUrl, {
-                  headers: { Accept: "application/json" },
-                  signal: AbortSignal.timeout(5000),
-                });
-                if (metaRes.ok) {
+                const fetchImpl = input.fetchFn ?? fetch;
+                const cleanApiBase = input.apiBaseUrl?.trim().replace(/\/+$/, "");
+                let metaRes: Response | null = null;
+                if (cleanApiBase) {
+                  const proxyUrl = `${cleanApiBase}/v1/proxy/sep50-meta?url=${encodeURIComponent(item.metadataUrl)}`;
+                  metaRes = await fetchImpl(proxyUrl, {
+                    headers: {
+                      Accept: "application/json",
+                      ...(input.network ? { "X-Astro-Network": input.network } : {}),
+                    },
+                    signal: AbortSignal.timeout(5000),
+                  });
+                  if (
+                    metaRes.status === 404 &&
+                    (item.metadataUrl.startsWith("https://ipfs.io/") ||
+                      item.metadataUrl.startsWith("https://dweb.link/"))
+                  ) {
+                    metaRes = await fetchImpl(item.metadataUrl, {
+                      headers: { Accept: "application/json" },
+                      signal: AbortSignal.timeout(5000),
+                    });
+                  }
+                } else {
+                  metaRes = await fetchImpl(item.metadataUrl, {
+                    headers: { Accept: "application/json" },
+                    signal: AbortSignal.timeout(5000),
+                  });
+                }
+                if (metaRes && metaRes.ok) {
                   const rawMeta = (await metaRes.json()) as unknown;
                   if (rawMeta && typeof rawMeta === "object" && !Array.isArray(rawMeta)) {
                     const rec = rawMeta as Record<string, unknown>;

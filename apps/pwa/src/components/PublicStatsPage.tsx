@@ -180,6 +180,24 @@ function ActivityTrendChart({ series }: { series: DailyPoint[] }) {
   return <div ref={containerRef} style={{ width: "100%", height: 220 }} />;
 }
 
+function normalizeHttpsUrl(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "https:" ? trimmed.replace(/\/+$/, "") : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeBotUsername(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const clean = raw.trim().replace(/^@/, "");
+  return /^[A-Za-z0-9_]{5,32}$/.test(clean) ? clean : null;
+}
+
 export function PublicStatsPage() {
   const [scope, setScope] = useState<NetworkScope>("all");
   const [loading, setLoading] = useState(true);
@@ -570,10 +588,14 @@ export function PublicStatsPage() {
           ) : (
             <div style={{ display: "grid", gap: 6 }}>
               {summary.recentTxs.map((tx) => {
+                const primaryNet =
+                  (import.meta.env.VITE_STELLAR_NETWORK as string | undefined)?.trim() === "mainnet"
+                    ? "mainnet"
+                    : "testnet";
+                const primaryExp = normalizeHttpsUrl(import.meta.env.VITE_EXPLORER_BASE_URL);
+                const altExp = normalizeHttpsUrl(import.meta.env.VITE_ALT_EXPLORER_BASE_URL);
                 const explorerBase =
-                  tx.network === "mainnet"
-                    ? "https://stellar.expert/explorer/public/tx"
-                    : "https://stellar.expert/explorer/testnet/tx";
+                  tx.network === primaryNet ? (primaryExp ?? altExp) : (altExp ?? primaryExp);
                 return (
                   <div
                     key={`${tx.source}:${tx.txHash}`}
@@ -603,15 +625,21 @@ export function PublicStatsPage() {
                         </span>
                       )}
                     </div>
-                    <a
-                      href={`${explorerBase}/${tx.txHash}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="tabular-nums"
-                      style={{ color: "#F5C928", textDecoration: "none", fontWeight: 600 }}
-                    >
-                      {tx.txHash.slice(0, 8)}…{tx.txHash.slice(-6)} ↗
-                    </a>
+                    {explorerBase ? (
+                      <a
+                        href={`${explorerBase}/tx/${tx.txHash}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="tabular-nums"
+                        style={{ color: "#F5C928", textDecoration: "none", fontWeight: 600 }}
+                      >
+                        {tx.txHash.slice(0, 8)}…{tx.txHash.slice(-6)} ↗
+                      </a>
+                    ) : (
+                      <span className="tabular-nums" style={{ color: "#F5C928", fontWeight: 600 }}>
+                        {tx.txHash.slice(0, 8)}…{tx.txHash.slice(-6)}
+                      </span>
+                    )}
                   </div>
                 );
               })}
@@ -619,19 +647,36 @@ export function PublicStatsPage() {
           )}
         </section>
 
-        <footer className="glass-card" style={{ fontSize: 11, color: "var(--aw-ink-secondary)", display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-          <span>
-            Official Telegram Bot MAU counters:{" "}
-            <a href="https://t.me/AstroWalletAppBot" target="_blank" rel="noreferrer" style={{ color: "#A58BE0" }}>
-              @AstroWalletAppBot
-            </a>{" "}
-            ·{" "}
-            <a href="https://t.me/AstroDexBot" target="_blank" rel="noreferrer" style={{ color: "#A58BE0" }}>
-              @AstroDexBot
-            </a>
-          </span>
-          <span>API: /v1/metrics/public · Badge: /v1/metrics/badge.svg</span>
-        </footer>
+        {(() => {
+          const walletBot =
+            normalizeBotUsername(mainnetData?.ecosystem?.tgBotUsername) ??
+            normalizeBotUsername(testnetData?.ecosystem?.tgBotUsername) ??
+            normalizeBotUsername(import.meta.env.VITE_TG_BOT_USERNAME);
+          const dexBot = normalizeBotUsername(import.meta.env.VITE_ASTRODEX_BOT_USERNAME);
+          return (
+            <footer className="glass-card" style={{ fontSize: 11, color: "var(--aw-ink-secondary)", display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+              <span>
+                Official Telegram Bot MAU counters:{" "}
+                {walletBot ? (
+                  <a href={`https://t.me/${walletBot}`} target="_blank" rel="noreferrer" style={{ color: "#A58BE0" }}>
+                    @{walletBot}
+                  </a>
+                ) : (
+                  <span>AstroWallet</span>
+                )}
+                {dexBot && (
+                  <>
+                    {" "}·{" "}
+                    <a href={`https://t.me/${dexBot}`} target="_blank" rel="noreferrer" style={{ color: "#A58BE0" }}>
+                      @{dexBot}
+                    </a>
+                  </>
+                )}
+              </span>
+              <span>API: /v1/metrics/public · Badge: /v1/metrics/badge.svg</span>
+            </footer>
+          );
+        })()}
       </div>
     </main>
   );

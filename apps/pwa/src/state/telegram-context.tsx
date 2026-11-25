@@ -12,6 +12,7 @@ import {
   EncryptedVaultBackupEnvelopeSchema,
   type EncryptedVaultBackupEnvelope,
   type PwaConfig,
+  type StellarNetwork,
   type TelegramUserBinding,
 } from "@astrowallet/domain";
 import { parseStartAppParam, type ParsedStartAppParam } from "@astrowallet/tg-protocol";
@@ -88,6 +89,7 @@ export function TelegramProvider({
   );
   const [authError, setAuthError] = useState<string | null>(null);
   const [sessionToken, setSessionToken] = useState<string | null>(null);
+  const [sessionNetwork, setSessionNetwork] = useState<StellarNetwork | null>(null);
   const [sessionExpiresAt, setSessionExpiresAt] = useState<number | null>(null);
   const [tgUser, setTgUser] = useState<TelegramProfileUser | null>(null);
   const [linkedAccounts, setLinkedAccounts] = useState<readonly TelegramUserBinding[]>([]);
@@ -100,17 +102,20 @@ export function TelegramProvider({
   const [checkingCloudBackup, setCheckingCloudBackup] = useState(false);
 
   const sessionTokenRef = useRef<string | null>(null);
+  const sessionNetworkRef = useRef<StellarNetwork | null>(null);
   const sessionExpiresAtRef = useRef<number | null>(null);
   const refreshPromiseRef = useRef<Promise<string | null> | null>(null);
   const networkRef = useRef(config.network);
   sessionTokenRef.current = sessionToken;
+  sessionNetworkRef.current = sessionNetwork;
   sessionExpiresAtRef.current = sessionExpiresAt;
   networkRef.current = config.network;
 
   const refreshSessionToken = useCallback(
     async (tokenOverride?: string | null): Promise<string | null> => {
       const current = tokenOverride ?? sessionTokenRef.current;
-      if (!current) return null;
+      const targetNet = networkRef.current;
+      if (!current || sessionNetworkRef.current !== targetNet) return null;
       if (refreshPromiseRef.current) {
         return refreshPromiseRef.current;
       }
@@ -121,24 +126,28 @@ export function TelegramProvider({
             method: "POST",
             headers: {
               Authorization: `Bearer ${current}`,
-              "X-Astro-Network": networkRef.current,
+              "X-Astro-Network": targetNet,
             },
           });
+          if (targetNet !== networkRef.current) return null;
           if (!res.ok) return current;
           const data = (await res.json()) as {
             sessionToken?: string;
             expiresAt?: number;
           };
+          if (targetNet !== networkRef.current) return null;
           if (data.sessionToken && typeof data.expiresAt === "number") {
             sessionTokenRef.current = data.sessionToken;
+            sessionNetworkRef.current = targetNet;
             sessionExpiresAtRef.current = data.expiresAt;
             setSessionToken(data.sessionToken);
+            setSessionNetwork(targetNet);
             setSessionExpiresAt(data.expiresAt);
             return data.sessionToken;
           }
           return current;
         } catch {
-          return current;
+          return targetNet === networkRef.current ? current : null;
         } finally {
           refreshPromiseRef.current = null;
         }
@@ -152,7 +161,7 @@ export function TelegramProvider({
   const ensureFreshSessionToken = useCallback(async (): Promise<string | null> => {
     const current = sessionTokenRef.current;
     const exp = sessionExpiresAtRef.current;
-    if (!current) return null;
+    if (!current || sessionNetworkRef.current !== networkRef.current) return null;
     const now = Math.floor(Date.now() / 1000);
     if (exp && exp - now < 60) {
       return refreshSessionToken(current);
@@ -161,7 +170,12 @@ export function TelegramProvider({
   }, [refreshSessionToken]);
 
   useEffect(() => {
-    if (!sessionToken || !sessionExpiresAt || typeof window === "undefined") {
+    if (
+      !sessionToken ||
+      sessionNetwork !== config.network ||
+      !sessionExpiresAt ||
+      typeof window === "undefined"
+    ) {
       return undefined;
     }
     const nowSec = Math.floor(Date.now() / 1000);
@@ -170,7 +184,7 @@ export function TelegramProvider({
       void refreshSessionToken(sessionToken);
     }, delayMs);
     return () => window.clearTimeout(timer);
-  }, [sessionToken, sessionExpiresAt, refreshSessionToken]);
+  }, [sessionToken, sessionNetwork, config.network, sessionExpiresAt, refreshSessionToken]);
 
   const authSeqRef = useRef(0);
   const authAbortRef = useRef<AbortController | null>(null);
@@ -332,7 +346,11 @@ export function TelegramProvider({
     }
 
     if (!inside || !wa) {
+      sessionTokenRef.current = null;
+      sessionNetworkRef.current = null;
+      sessionExpiresAtRef.current = null;
       setSessionToken(null);
+      setSessionNetwork(null);
       setSessionExpiresAt(null);
       setTgUser(null);
       setAuthStatus("outside");
@@ -382,9 +400,11 @@ export function TelegramProvider({
         throw new Error(body.error ?? `Telegram Mini App verification failed (${res.status})`);
       }
       sessionTokenRef.current = body.sessionToken;
+      sessionNetworkRef.current = targetNetwork;
       sessionExpiresAtRef.current =
         typeof body.expiresAt === "number" ? body.expiresAt : null;
       setSessionToken(body.sessionToken);
+      setSessionNetwork(targetNetwork);
       setSessionExpiresAt(typeof body.expiresAt === "number" ? body.expiresAt : null);
       setTgUser(body.user);
       setLinkedAccounts(Array.isArray(body.linkedAccounts) ? body.linkedAccounts : []);
@@ -404,8 +424,10 @@ export function TelegramProvider({
     } catch (err) {
       if (seq !== authSeqRef.current || targetNetwork !== networkRef.current) return;
       sessionTokenRef.current = null;
+      sessionNetworkRef.current = null;
       sessionExpiresAtRef.current = null;
       setSessionToken(null);
+      setSessionNetwork(null);
       setSessionExpiresAt(null);
       setAuthStatus("error");
       setAuthError(
@@ -553,13 +575,16 @@ export function TelegramProvider({
     authStatus,
   });
 
+  const activeSessionToken =
+    sessionToken && sessionNetwork === config.network ? sessionToken : null;
+
   const value = useMemo<TelegramContextValue>(
     () => ({
       inTelegram,
       allowed,
       authStatus,
       authError,
-      sessionToken,
+      sessionToken: activeSessionToken,
       tgUser,
       linkedAccounts,
       startParamRoute,
@@ -579,7 +604,7 @@ export function TelegramProvider({
       allowed,
       authStatus,
       authError,
-      sessionToken,
+      activeSessionToken,
       tgUser,
       linkedAccounts,
       startParamRoute,

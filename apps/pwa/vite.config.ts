@@ -14,6 +14,7 @@ function collectConfiguredConnectOrigins(env: Record<string, string | undefined>
     "VITE_TON_RPC_URLS",
     "VITE_TON_BRIDGE_URL",
     "VITE_NEAR_INTENTS_API_BASE",
+    "VITE_CCTP_BRIDGE_URL",
     "VITE_ASTRODEX_API_BASE_URL",
     "VITE_ALT_ASTRODEX_API_BASE_URL",
     "VITE_ALT_STELLAR_RPC_URLS",

@@ -52,6 +52,9 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
 
   // 1. Validate env via Zod on startup/request (zero hardcoding, fail fast)
   app.use("*", async (c, next) => {
+    c.header("X-Content-Type-Options", "nosniff");
+    c.header("Referrer-Policy", "no-referrer");
+
     let config: ServerConfig;
     try {
       config = parseServerConfig(c.env as Record<string, unknown>);
@@ -138,6 +141,11 @@ export function createApp(deps: ServerDeps = {}): Hono<AppEnv> {
   };
 
   app.use("/tg/webhook", attachRepo);
+  app.use("/v1/tg/*", async (c, next) => {
+    c.header("Cache-Control", "no-store");
+    await next();
+    return undefined;
+  });
   app.use("/v1/tg/*", attachRepo);
   app.use("/v1/identity/*", attachRepo);
   app.use("/v1/connect/*", attachRepo);

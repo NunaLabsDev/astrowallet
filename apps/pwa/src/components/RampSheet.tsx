@@ -313,7 +313,9 @@ export function RampSheet() {
     }
   }, [amount, activeAccount]);
 
-  if (!activeAccount) return null;
+  const cashBusyRef = useRef(false);
+  const nearBusyRef = useRef(false);
+  const bridgeSubmittingRef = useRef(false);
 
   useEffect(() => {
     if (
@@ -325,8 +327,7 @@ export function RampSheet() {
     }
   }, [activeTab, originAsset, destAsset, tonAccount, ensureTonAccount]);
 
-  const cashBusyRef = useRef(false);
-  const nearBusyRef = useRef(false);
+  if (!activeAccount) return null;
 
   const handleBuildMoneyGramSession = async (e: FormEvent) => {
     e.preventDefault();
@@ -613,7 +614,6 @@ export function RampSheet() {
     }
   };
 
-  const bridgeSubmittingRef = useRef(false);
   const handleSignProBridgeStage = async () => {
     if (!pendingBridgeStage || bridgeSubmittingRef.current) return;
     bridgeSubmittingRef.current = true;

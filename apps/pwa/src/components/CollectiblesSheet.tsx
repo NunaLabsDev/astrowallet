@@ -100,6 +100,8 @@ export function CollectiblesSheet({
       rpcUrls: config.rpcUrls,
       networkPassphrase: config.networkPassphrase,
       maxItems: 12,
+      apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
     })
       .then((snap) => {
         if (cancelled) return;
@@ -122,6 +124,7 @@ export function CollectiblesSheet({
   }, [
     activeAccount,
     sep50ActiveContractId,
+    config.apiBaseUrl,
     config.network,
     config.rpcUrls,
     config.networkPassphrase,

@@ -61,6 +61,7 @@ RELAY_DAILY_BUDGET_STROOPS = "500000000"
 TELEGRAM_API_ORIGIN = "https://api.telegram.org"
 TG_BOT_USERNAME = "AstroWalletAppBot"
 TG_MINI_APP_SHORT_NAME = "wallet"
+CONNECT_VERIFIED_BOTS = "AstroDexBot,AstroGateSorobanBot"
 
 [env.testnet]
 name = "astrowallet-server"
@@ -115,6 +116,7 @@ RELAY_DAILY_BUDGET_STROOPS = "500000000"
 TELEGRAM_API_ORIGIN = "https://api.telegram.org"
 TG_BOT_USERNAME = "AstroWalletAppBot"
 TG_MINI_APP_SHORT_NAME = "wallet"
+CONNECT_VERIFIED_BOTS = "AstroDexBot,AstroGateSorobanBot"
 
 [env.mainnet]
 name = "astrowallet-server-mainnet"
@@ -141,9 +143,10 @@ class_name = "ChannelPoolDO"
 [env.mainnet.triggers]
 crons = ["0 */6 * * *"]
 
-[[env.mainnet.services]]
-binding = "ASTRODEX"
-service = "astrodex-server"
+# astrodex-server is Testnet-only; until astrodex-server-mainnet is deployed, Mainnet routes via ASTRODEX_API_BASE_URL HTTP.
+# [[env.mainnet.services]]
+# binding = "ASTRODEX"
+# service = "astrodex-server"
 
 [env.mainnet.vars]
 STELLAR_NETWORK = "mainnet"
@@ -171,3 +174,4 @@ RELAY_DAILY_BUDGET_STROOPS = "500000000"
 TELEGRAM_API_ORIGIN = "https://api.telegram.org"
 TG_BOT_USERNAME = "AstroWalletAppBot"
 TG_MINI_APP_SHORT_NAME = "wallet"
+CONNECT_VERIFIED_BOTS = "AstroDexBot,AstroGateSorobanBot"

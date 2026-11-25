@@ -100,27 +100,6 @@ const LAYERZERO_EIDS = [
   { eid: 40161, label: "Sepolia Testnet (EID 40161)" },
 ] as const;
 
-function defaultCctpContracts(network: "testnet" | "mainnet", configuredForwarder?: string) {
-  if (network === "mainnet") {
-    return {
-      tmm: "CAE2G5Z77UP7GYPYGFOWFGW7C7J6I4YP2AFGSADRKQY62SYUFLPNFTXL",
-      forwarder:
-        configuredForwarder ?? "CBZL2IH7F6BIDAA3WBNXYKIXSATJGMSW7K5P5MJ6STX5RXN47TZJDF5T",
-    };
-  }
-  return {
-    tmm: "CDNG7HXAPBWICI2E3AUBP3YZWZELJLYSB6F5CC7WLDTLTHVM74SLRTHP",
-    forwarder:
-      configuredForwarder ?? "CA66Q2WFBND6V4UEB7RD4SAXSVIWMD6RA4X3U32ELVFGXV5PJK4T4VSZ",
-  };
-}
-
-function defaultOftContract(network: "testnet" | "mainnet"): string {
-  return network === "mainnet"
-    ? "CBOWOLFSDM5PZXNFIVDMP5NZ7U2GSIHED6H6R446QOHF266XINKUMMF6"
-    : "";
-}
-
 /**
  * Unified Cash & Cross-Chain Hub inside Telegram Mini App:
  * 1) MoneyGram Ramps (SEP-24 Cash-Out / Cash-In)
@@ -145,9 +124,7 @@ export function RampSheet() {
   const [cashDirection, setCashDirection] = useState<"offramp" | "onramp">("offramp");
   const [cashAmount, setCashAmount] = useState("50.00");
   const [anchorDomain, setAnchorDomain] = useState(
-    () =>
-      config.moneygramAnchorDomain ??
-      (config.network === "mainnet" ? "stellar.moneygram.com" : "extstellar.moneygram.com"),
+    () => config.moneygramAnchorDomain ?? "",
   );
   const [cashBusy, setCashBusy] = useState(false);
   const [cashSessionUrl, setCashSessionUrl] = useState<string | null>(null);
@@ -203,10 +180,7 @@ export function RampSheet() {
   }, [destAsset, isStellarOrigin, activeAccount?.address, tonAccount?.friendlyAddress]);
 
   useEffect(() => {
-    setAnchorDomain(
-      config.moneygramAnchorDomain ??
-        (config.network === "mainnet" ? "stellar.moneygram.com" : "extstellar.moneygram.com"),
-    );
+    setAnchorDomain(config.moneygramAnchorDomain ?? "");
     setCashSessionUrl(null);
     setCashError(null);
   }, [config.network, config.moneygramAnchorDomain]);
@@ -218,17 +192,17 @@ export function RampSheet() {
   const [evmDestAddress, setEvmDestAddress] = useState("");
   const [cctpDestDomain, setCctpDestDomain] = useState<number>(6);
   const [cctpTmmId, setCctpTmmId] = useState(
-    () => defaultCctpContracts(config.network, config.cctpForwarderContractId).tmm,
+    () => config.cctpTokenMessengerContractId ?? "",
   );
   const [forwarderId, setForwarderId] = useState(
-    () => defaultCctpContracts(config.network, config.cctpForwarderContractId).forwarder,
+    () => config.cctpForwarderContractId ?? "",
   );
   const [cctpMessageHex, setCctpMessageHex] = useState("");
   const [cctpAttestationHex, setCctpAttestationHex] = useState("");
   const [lzDestEid, setLzDestEid] = useState<number>(
     () => (config.network === "mainnet" ? 30101 : 40161),
   );
-  const [lzOftContractId, setLzOftContractId] = useState(() => defaultOftContract(config.network));
+  const [lzOftContractId, setLzOftContractId] = useState(() => config.lzOftContractId ?? "");
   const [lzSlippageBps, setLzSlippageBps] = useState("50");
   const [lzQuote, setLzQuote] = useState<LayerZeroOftQuoteResult | null>(null);
   const [pendingBridgeStage, setPendingBridgeStage] = useState<{
@@ -242,16 +216,20 @@ export function RampSheet() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    const defaults = defaultCctpContracts(config.network, config.cctpForwarderContractId);
-    setCctpTmmId(defaults.tmm);
-    setForwarderId(defaults.forwarder);
-    setLzOftContractId(defaultOftContract(config.network));
+    setCctpTmmId(config.cctpTokenMessengerContractId ?? "");
+    setForwarderId(config.cctpForwarderContractId ?? "");
+    setLzOftContractId(config.lzOftContractId ?? "");
     setLzDestEid(config.network === "mainnet" ? 30101 : 40161);
     setLzQuote(null);
     setPendingBridgeStage(null);
     setErrorMsg(null);
     setBridgeTxHash(null);
-  }, [config.network, config.cctpForwarderContractId]);
+  }, [
+    config.network,
+    config.cctpTokenMessengerContractId,
+    config.cctpForwarderContractId,
+    config.lzOftContractId,
+  ]);
 
   const resolvedUsdcSacContractId = useMemo(() => {
     const match = verifiedAssets.find((v) => v.code.trim().toUpperCase() === "USDC");
@@ -349,6 +327,9 @@ export function RampSheet() {
       }
       const apiBase = config.apiBaseUrl.replace(/\/+$/, "");
       const cleanDomain = anchorDomain.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+      if (!cleanDomain) {
+        throw new Error("Enter a valid SEP-24 anchor domain.");
+      }
       const chRes = await fetch(
         `${apiBase}/v1/proxy/sep10/challenge?domain=${encodeURIComponent(cleanDomain)}&account=${encodeURIComponent(activeAccount.address)}`,
         { headers: { "X-Astro-Network": config.network } },
@@ -735,6 +716,9 @@ export function RampSheet() {
               id="mg-domain"
               type="text"
               className="aw-input"
+              placeholder={
+                config.network === "mainnet" ? "stellar.moneygram.com" : "extstellar.moneygram.com"
+              }
               value={anchorDomain}
               onChange={(e) => setAnchorDomain(e.target.value)}
             />

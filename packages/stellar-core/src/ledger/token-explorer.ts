@@ -468,6 +468,7 @@ export async function fetchAssetStellarTomlMeta(input: {
   assetCode: string;
   assetIssuer?: string | undefined;
   apiBaseUrl?: string | undefined;
+  network?: "testnet" | "mainnet" | undefined;
   fetchFn?: typeof fetch | undefined;
 }): Promise<StellarTomlCurrencyMeta | null> {
   const domain = normalizeDomainName(input.domain);
@@ -491,7 +492,10 @@ export async function fetchAssetStellarTomlMeta(input: {
     try {
       const proxyUrl = `${input.apiBaseUrl.replace(/\/+$/, "")}/v1/proxy/stellar-toml?domain=${encodeURIComponent(domain)}`;
       const res = await fetchFn(proxyUrl, {
-        headers: { Accept: "text/plain" },
+        headers: {
+          Accept: "text/plain",
+          ...(input.network ? { "X-Astro-Network": input.network } : {}),
+        },
       });
       if (res.ok) {
         tomlText = await res.text();
@@ -533,7 +537,10 @@ export async function fetchAssetStellarTomlMeta(input: {
           : null;
       if (linkedTargetUrl) {
         const linkedRes = await fetchFn(linkedTargetUrl, {
-          headers: { Accept: "text/plain" },
+          headers: {
+            Accept: "text/plain",
+            ...(input.apiBaseUrl && input.network ? { "X-Astro-Network": input.network } : {}),
+          },
         });
         if (linkedRes.ok) {
           const linkedText = await linkedRes.text();
@@ -584,6 +591,7 @@ export async function fetchHeldAssetsTomlMetadata(input: {
     knownDomain?: string | undefined;
   }>;
   apiBaseUrl?: string | undefined;
+  network?: "testnet" | "mainnet" | undefined;
   fetchFn?: typeof fetch | undefined;
 }): Promise<Record<string, HeldTokenTomlMetadata>> {
   const fetchFn = input.fetchFn ?? fetch;
@@ -668,6 +676,7 @@ export async function fetchHeldAssetsTomlMetadata(input: {
           assetCode: asset.assetCode,
           assetIssuer: asset.assetIssuer,
           apiBaseUrl: input.apiBaseUrl,
+          network: input.network,
           fetchFn,
         }).catch(() => null);
 
@@ -693,6 +702,7 @@ async function enrichCatalogItemsWithToml(
   items: TokenCatalogItem[],
   apiBaseUrl: string | undefined,
   fetchFn: typeof fetch,
+  network?: "testnet" | "mainnet" | undefined,
 ): Promise<TokenCatalogItem[]> {
   if (!apiBaseUrl) return items;
   const candidates = items.filter((item) => Boolean(item.domain)).slice(0, 16);
@@ -707,6 +717,7 @@ async function enrichCatalogItemsWithToml(
         assetCode: item.assetCode,
         assetIssuer: item.assetIssuer,
         apiBaseUrl,
+        network,
         fetchFn,
       }).catch(() => null);
       enrichedMap.set(`${item.assetCode.toUpperCase()}:${item.assetIssuer ?? ""}`, meta);
@@ -732,6 +743,7 @@ export async function searchHorizonAssets(input: {
   query: string;
   limit?: number | undefined;
   apiBaseUrl?: string | undefined;
+  network?: "testnet" | "mainnet" | undefined;
   fetchFn?: typeof fetch | undefined;
 }): Promise<TokenCatalogItem[]> {
   const fetchFn = input.fetchFn ?? fetch;
@@ -779,7 +791,7 @@ export async function searchHorizonAssets(input: {
     });
   }
 
-  return enrichCatalogItemsWithToml(items, input.apiBaseUrl, fetchFn);
+  return enrichCatalogItemsWithToml(items, input.apiBaseUrl, fetchFn, input.network);
 }
 
 /**
@@ -792,6 +804,7 @@ export async function fetchTokenOnChainDetails(input: {
   assetCode: string;
   assetIssuer?: ClassicAddress | undefined;
   apiBaseUrl?: string | undefined;
+  network?: "testnet" | "mainnet" | undefined;
   fetchFn?: typeof fetch | undefined;
 }): Promise<StellarTokenDetails> {
   const fetchFn = input.fetchFn ?? fetch;
@@ -904,6 +917,7 @@ export async function fetchTokenOnChainDetails(input: {
         assetCode: cleanCode,
         assetIssuer: input.assetIssuer,
         apiBaseUrl: input.apiBaseUrl,
+        network: input.network,
         fetchFn,
       }).catch(() => null)
     : null;
@@ -1511,6 +1525,7 @@ export async function discoverLiquidHorizonAssets(input: {
   horizonUrls: readonly string[];
   limit?: number | undefined;
   apiBaseUrl?: string | undefined;
+  network?: "testnet" | "mainnet" | undefined;
   fetchFn?: typeof fetch | undefined;
 }): Promise<TokenCatalogItem[]> {
   const fetchFn = input.fetchFn ?? fetch;
@@ -1590,5 +1605,5 @@ export async function discoverLiquidHorizonAssets(input: {
     }
     return (b.numAccounts ?? 0) - (a.numAccounts ?? 0);
   });
-  return enrichCatalogItemsWithToml(sorted, input.apiBaseUrl, fetchFn);
+  return enrichCatalogItemsWithToml(sorted, input.apiBaseUrl, fetchFn, input.network);
 }

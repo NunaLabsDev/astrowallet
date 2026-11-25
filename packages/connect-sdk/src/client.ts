@@ -127,8 +127,13 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
   const fetchImpl = config.fetchFn ?? fetch;
   const openLinkImpl = config.openLinkFn ?? defaultOpenTelegramLink;
 
+  const withNetworkHeader = (extra: Record<string, string> = {}): Record<string, string> => ({
+    ...extra,
+    ...(config.network ? { "X-Astro-Network": config.network } : {}),
+  });
+
   async function postCreateRequest(body: Record<string, unknown>): Promise<ConnectRequestHandle> {
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    const headers = withNetworkHeader({ "Content-Type": "application/json" });
     if (config.ecosystemSecret) {
       headers["X-Ecosystem-Secret"] = config.ecosystemSecret;
     }
@@ -215,7 +220,7 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
         `${baseUrl}${requestsPrefix}/${encodeURIComponent(requestId)}`,
         {
           method: "GET",
-          headers: { "X-Connect-Token": resultToken },
+          headers: withNetworkHeader({ "X-Connect-Token": resultToken }),
           signal: AbortSignal.timeout(8_000),
         },
       );
@@ -366,8 +371,10 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
     },
 
     async resolveIdentity(query) {
+      const headers = withNetworkHeader();
       const res = await fetchImpl(
         `${baseUrl}${identityPrefix}?q=${encodeURIComponent(query)}`,
+        Object.keys(headers).length > 0 ? { headers } : undefined,
       );
       const data = (await res.json()) as AstroIdentity & { error?: string };
       if (!res.ok) {
@@ -404,7 +411,7 @@ export function createAstroConnectClient(config: AstroConnectConfig): AstroConne
     async scanTarget(target) {
       const res = await fetchImpl(`${baseUrl}${scanPath}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: withNetworkHeader({ "Content-Type": "application/json" }),
         body: JSON.stringify({ target }),
       });
       const data = (await res.json()) as {

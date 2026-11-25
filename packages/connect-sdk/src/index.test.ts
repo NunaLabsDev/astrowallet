@@ -379,4 +379,80 @@ describe("@astrowallet/connect SDK", () => {
     expect(handle.requestId).toBe("ac_proxy1");
     expect(calls).toContain("/api/v1/wallet/connect/requests");
   });
+
+  it("propagates X-Astro-Network across all HTTP calls and supports benign scan verdict", async () => {
+    const seenHeaders: Array<{ url: string; network: string | null }> = [];
+    const client = createAstroConnectClient({
+      apiBaseUrl: "https://wallet.example.org",
+      network: "testnet",
+      app: { name: "DexApp", botUsername: "DexAppBot" },
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        const h = new Headers(init?.headers);
+        seenHeaders.push({ url, network: h.get("X-Astro-Network") });
+        if (url.endsWith("/v1/connect/requests") && init?.method === "POST") {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              requestId: "ac_net1",
+              network: "testnet",
+              action: "auth",
+              trustTier: "verified",
+              sig: "d".repeat(32),
+              resultToken: "rt_net1",
+              expiresAt: Math.floor(Date.now() / 1000) + 300,
+              deepLink: "https://t.me/AstroWalletAppBot/wallet?startapp=c-ac_net1-dddd",
+            }),
+            { status: 201 },
+          );
+        }
+        if (url.endsWith("/v1/connect/requests/ac_net1")) {
+          return new Response(
+            JSON.stringify({
+              ok: true,
+              requestId: "ac_net1",
+              network: "testnet",
+              action: "auth",
+              status: "pending",
+              trustTier: "verified",
+              expiresAt: Math.floor(Date.now() / 1000) + 300,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.includes("/v1/identity/resolve")) {
+          return new Response(JSON.stringify({ found: false, accounts: [] }), { status: 200 });
+        }
+        if (url.endsWith("/v1/connect/scan")) {
+          return new Response(
+            JSON.stringify({
+              report: {
+                verdict: "benign",
+                findings: [
+                  {
+                    code: "OK",
+                    severity: "benign",
+                    title: "Clean",
+                    description: "No risks detected",
+                  },
+                ],
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+      openLinkFn: () => undefined,
+    });
+
+    await client.createLoginRequest();
+    await client.getRequestStatus("ac_net1", "rt_net1");
+    await client.resolveIdentity("alice");
+    const report = await client.scanTarget("G" + "A".repeat(55));
+    expect(report.verdict).toBe("benign");
+    expect(report.findings[0]?.severity).toBe("benign");
+    expect(seenHeaders).toHaveLength(4);
+    expect(seenHeaders.every((entry) => entry.network === "testnet")).toBe(true);
+  });
 });

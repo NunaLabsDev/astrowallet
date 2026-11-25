@@ -56,7 +56,7 @@ export function AgentBudgetSheet() {
     signAgentX402Challenge,
   } = useWallet();
 
-  const envDexUrl = (import.meta.env.VITE_ASTRODEX_API_BASE_URL as string | undefined)?.trim();
+  const envDexUrl = config.astrodexApiBaseUrl?.trim();
 
   const configuredDexHost = useMemo(() => {
     try {
@@ -147,12 +147,67 @@ export function AgentBudgetSheet() {
         typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function"
           ? { signal: AbortSignal.timeout(10_000) }
           : {};
-      const res = await fetch(parsedUrl.toString(), {
-        method: "GET",
-        ...timeoutOpt,
-      });
+      const runProbe = async (
+        extraHeaders?: Record<string, string>,
+      ): Promise<{
+        status: number;
+        ok: boolean;
+        paymentRequired: string | null;
+        paymentResponse: string | null;
+        bodyPreview: string;
+      }> => {
+        if (parsedUrl.protocol === "https:" && config.apiBaseUrl) {
+          const proxyRes = await fetch(
+            `${config.apiBaseUrl.replace(/\/+$/, "")}/v1/proxy/x402-probe`,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Astro-Network": config.network,
+              },
+              body: JSON.stringify({
+                url: parsedUrl.toString(),
+                ...(extraHeaders ? { headers: extraHeaders } : {}),
+              }),
+              ...timeoutOpt,
+            },
+          );
+          const payload = (await proxyRes.json().catch(() => ({}))) as {
+            status?: number;
+            ok?: boolean;
+            paymentRequired?: string | null;
+            paymentResponse?: string | null;
+            bodyPreview?: string;
+            error?: string;
+          };
+          if (!proxyRes.ok || typeof payload.status !== "number") {
+            throw new Error(payload.error ?? `x402 proxy probe failed (${proxyRes.status})`);
+          }
+          return {
+            status: payload.status,
+            ok: Boolean(payload.ok),
+            paymentRequired: payload.paymentRequired ?? null,
+            paymentResponse: payload.paymentResponse ?? null,
+            bodyPreview: payload.bodyPreview ?? "",
+          };
+        }
+        const directRes = await fetch(parsedUrl.toString(), {
+          method: "GET",
+          ...(extraHeaders ? { headers: extraHeaders } : {}),
+          ...timeoutOpt,
+        });
+        return {
+          status: directRes.status,
+          ok: directRes.ok,
+          paymentRequired: directRes.headers.get("PAYMENT-REQUIRED"),
+          paymentResponse: directRes.headers.get("PAYMENT-RESPONSE"),
+          bodyPreview: await directRes.text().catch(() => ""),
+        };
+      };
+
+      const res = await runProbe();
       if (res.status === 402) {
-        const hdr = res.headers.get("PAYMENT-REQUIRED");
+        const hdr = res.paymentRequired;
         if (!hdr) {
           throw new Error("Server returned HTTP 402 without a PAYMENT-REQUIRED header");
         }
@@ -189,23 +244,19 @@ export function AgentBudgetSheet() {
         });
         const paymentHeaderName =
           terms.x402Version >= 2 ? "PAYMENT-SIGNATURE" : "X-PAYMENT";
-        const paidRes = await fetch(parsedUrl.toString(), {
-          method: "GET",
-          headers: {
-            [paymentHeaderName]: signed.paymentHeader,
-            "X-PAYMENT": signed.paymentHeader,
-          },
-          ...timeoutOpt,
+        const paidRes = await runProbe({
+          [paymentHeaderName]: signed.paymentHeader,
+          "X-PAYMENT": signed.paymentHeader,
         });
         if (paidRes.ok) {
           savePolicy(recordAgentSpend(policy, first.amount));
-          const receiptHdr = paidRes.headers.get("PAYMENT-RESPONSE");
-          const bodyPreview = await paidRes.text().catch(() => "");
+          const receiptHdr = paidRes.paymentResponse;
+          const bodyPreview = paidRes.bodyPreview;
           setProbeResult(
             `HTTP 200 PAID via m/44'/148'/${AGENT_DERIVATION_INDEX}' (${signed.payer.slice(0, 6)}…${signed.payer.slice(-4)} · ${formatStroopsUsdc(first.amount)} USDC) · ${receiptHdr ? "PAYMENT-RESPONSE verified" : "settled"}${bodyPreview ? ` · ${bodyPreview.slice(0, 120)}` : ""}`,
           );
         } else {
-          const errText = await paidRes.text().catch(() => "");
+          const errText = paidRes.bodyPreview;
           setProbeResult(
             `HTTP 402 Terms: ${formatStroopsUsdc(first.amount)} USDC · Signed by m/44'/148'/${AGENT_DERIVATION_INDEX}' (${signed.payer.slice(0, 6)}…${signed.payer.slice(-4)}) · Status ${paidRes.status}${errText ? ` (${errText.slice(0, 100)})` : ""}`,
           );

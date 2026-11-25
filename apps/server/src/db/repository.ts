@@ -432,6 +432,7 @@ export function createD1Repository(db: D1Database): ServerRepository {
            FROM linked_addresses la
            JOIN tg_users u ON u.telegram_user_id = la.telegram_user_id
            WHERE la.address = ?
+           ORDER BY la.is_default DESC, la.created_at DESC
            LIMIT 1`,
         )
         .bind(normalized)
@@ -488,51 +489,33 @@ export function createD1Repository(db: D1Database): ServerRepository {
         const acc = accounts[i];
         if (!acc) continue;
 
-        const existingMatch = await db
-          .prepare(
-            "SELECT id FROM linked_addresses WHERE telegram_user_id = ? AND address = ?",
-          )
-          .bind(telegramUserId, acc.address)
-          .first<{ id: string }>();
-
         const makeDefault =
           Boolean(acc.isDefault) || (!hasDefaultAlready && !requestSetsDefault && i === 0);
+        const id = `${telegramUserId}:${acc.address.slice(0, 12)}:${now}:${i}`;
 
-        if (existingMatch) {
-          await db
-            .prepare(
-              `UPDATE linked_addresses
-               SET kind = ?, label = ?, is_default = ?, verified_sig_hash = ?
-               WHERE id = ?`,
-            )
-            .bind(
-              acc.kind,
-              acc.label,
-              makeDefault ? 1 : 0,
-              acc.verifiedSigHash,
-              existingMatch.id,
-            )
-            .run();
-        } else {
-          const id = `${telegramUserId}:${acc.address.slice(0, 12)}:${now}:${i}`;
-          await db
-            .prepare(
-              `INSERT INTO linked_addresses
-               (id, telegram_user_id, address, kind, label, is_default, verified_sig_hash, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-            )
-            .bind(
-              id,
-              telegramUserId,
-              acc.address,
-              acc.kind,
-              acc.label,
-              makeDefault ? 1 : 0,
-              acc.verifiedSigHash,
-              now,
-            )
-            .run();
-        }
+        await db
+          .prepare(
+            `INSERT INTO linked_addresses
+             (id, telegram_user_id, address, kind, label, is_default, verified_sig_hash, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(address) DO UPDATE SET
+               telegram_user_id = excluded.telegram_user_id,
+               kind = excluded.kind,
+               label = excluded.label,
+               is_default = excluded.is_default,
+               verified_sig_hash = excluded.verified_sig_hash`,
+          )
+          .bind(
+            id,
+            telegramUserId,
+            acc.address,
+            acc.kind,
+            acc.label,
+            makeDefault ? 1 : 0,
+            acc.verifiedSigHash,
+            now,
+          )
+          .run();
       }
 
       return this.listLinkedAddresses(telegramUserId);
@@ -991,7 +974,7 @@ export function createD1Repository(db: D1Database): ServerRepository {
       await db.batch([
         db
           .prepare(
-            "DELETE FROM signed_intents WHERE expires_at < ? AND status != 'confirmed'",
+            "DELETE FROM signed_intents WHERE expires_at < ? AND status NOT IN ('confirmed', 'signed')",
           )
           .bind(nowSec - 3600),
         db

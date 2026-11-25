@@ -201,6 +201,7 @@ export async function fetchCachedTokenBundle(input: {
         assetCode: input.assetCode,
         assetIssuer: input.assetIssuer,
         apiBaseUrl: input.apiBaseUrl,
+        network: input.network,
       }),
       fetchTokenOrderbookAgainstXlm({
         horizonUrls: input.horizonUrls,
@@ -256,6 +257,7 @@ export async function fetchCachedLiquidAssets(input: {
       horizonUrls: input.horizonUrls,
       limit,
       apiBaseUrl: input.apiBaseUrl,
+      network: input.network,
     });
     writeCachedEntry(cacheKey, items, freshMs);
     return items;

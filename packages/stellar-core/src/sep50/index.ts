@@ -301,11 +301,70 @@ export async function fetchSep50Holdings(input: {
               method: "token_uri",
               args: [nativeToScVal(tokenId, { type: "u32" })],
             });
-            return parseSep50TokenUri(
+            const item = parseSep50TokenUri(
               input.contractId,
               tokenId,
               typeof rawUri === "string" ? rawUri : "",
             );
+            if (item.metadataUrl && !item.image && !item.description) {
+              try {
+                const metaRes = await fetch(item.metadataUrl, {
+                  headers: { Accept: "application/json" },
+                  signal: AbortSignal.timeout(5000),
+                });
+                if (metaRes.ok) {
+                  const rawMeta = (await metaRes.json()) as unknown;
+                  if (rawMeta && typeof rawMeta === "object" && !Array.isArray(rawMeta)) {
+                    const rec = rawMeta as Record<string, unknown>;
+                    const hydratedName =
+                      typeof rec.name === "string" && rec.name.trim()
+                        ? rec.name.trim()
+                        : item.name;
+                    const hydratedDesc =
+                      typeof rec.description === "string" && rec.description.trim()
+                        ? rec.description.trim()
+                        : item.description;
+                    const hydratedImage = normalizeCollectibleImageUrl(
+                      typeof rec.image === "string" ? rec.image : item.image,
+                    );
+                    const hydratedTraits: Sep50Trait[] = [...item.traits];
+                    if (hydratedTraits.length === 0 && Array.isArray(rec.attributes)) {
+                      for (const rawAttr of rec.attributes) {
+                        if (!rawAttr || typeof rawAttr !== "object") continue;
+                        const attr = rawAttr as Record<string, unknown>;
+                        const traitType =
+                          typeof attr.trait_type === "string" ? attr.trait_type.trim() : "";
+                        const val = attr.value;
+                        if (
+                          traitType &&
+                          (typeof val === "string" ||
+                            typeof val === "number" ||
+                            typeof val === "boolean")
+                        ) {
+                          hydratedTraits.push({ traitType, value: String(val) });
+                        }
+                      }
+                    }
+                    const sbAttr = hydratedTraits.find(
+                      (t) => t.traitType.toLowerCase() === "soulbound",
+                    );
+                    return {
+                      ...item,
+                      name: hydratedName,
+                      description: hydratedDesc,
+                      image: hydratedImage,
+                      traits: hydratedTraits,
+                      soulbound: sbAttr
+                        ? sbAttr.value.toLowerCase() === "true"
+                        : item.soulbound,
+                    };
+                  }
+                }
+              } catch {
+                // Non-fatal if off-chain NFT metadata URL is unreachable
+              }
+            }
+            return item;
           } catch {
             return null;
           }

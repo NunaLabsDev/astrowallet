@@ -72,6 +72,19 @@ const OptionalNonEmptyStringSchema = z.preprocess(
   z.string().trim().min(1).optional(),
 );
 
+const PUBLIC_DOMAIN_REGEX =
+  /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/i;
+
+const OptionalDomainSchema = (field: string) =>
+  z.preprocess(
+    emptyToUndefined,
+    z
+      .string()
+      .trim()
+      .regex(PUBLIC_DOMAIN_REGEX, `${field} must be a valid domain hostname`)
+      .optional(),
+  );
+
 function parseBooleanWithDefault(defaultValue: boolean) {
   return z.preprocess((val) => {
     if (typeof val === "boolean") return val;
@@ -282,6 +295,7 @@ const RawPwaEnvSchema = z
     VITE_TG_MINI_APP_SHORT_NAME: OptionalShortNameSchema("VITE_TG_MINI_APP_SHORT_NAME"),
     VITE_ASTRODEX_BOT_USERNAME: OptionalBotUsernameSchema("VITE_ASTRODEX_BOT_USERNAME"),
     VITE_ASTRODEX_MINI_APP_SHORT_NAME: OptionalShortNameSchema("VITE_ASTRODEX_MINI_APP_SHORT_NAME"),
+    VITE_ASTRODEX_API_BASE_URL: OptionalUrlSchema("VITE_ASTRODEX_API_BASE_URL"),
     VITE_ASTROGATE_BOT_USERNAME: OptionalBotUsernameSchema("VITE_ASTROGATE_BOT_USERNAME"),
     VITE_TON_NETWORK: z.preprocess(emptyToUndefined, TonNetworkSchema.optional()),
     VITE_TON_RPC_URLS: parseUrlCsv("VITE_TON_RPC_URLS", false),
@@ -314,13 +328,21 @@ const RawPwaEnvSchema = z
     ),
     VITE_REOWN_PROJECT_ID: OptionalNonEmptyStringSchema,
     VITE_CCTP_BRIDGE_URL: OptionalUrlSchema("VITE_CCTP_BRIDGE_URL"),
+    VITE_CCTP_TOKEN_MESSENGER_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
     VITE_CCTP_FORWARDER_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
+    VITE_LZ_OFT_CONTRACT_ID: z.preprocess(
       emptyToUndefined,
       ContractAddressSchema.optional(),
     ),
     VITE_MOONPAY_WIDGET_URL: OptionalUrlSchema("VITE_MOONPAY_WIDGET_URL"),
     VITE_TRANSAK_WIDGET_URL: OptionalUrlSchema("VITE_TRANSAK_WIDGET_URL"),
-    VITE_MONEYGRAM_ANCHOR_DOMAIN: OptionalNonEmptyStringSchema,
+    VITE_MONEYGRAM_ANCHOR_DOMAIN: OptionalDomainSchema("VITE_MONEYGRAM_ANCHOR_DOMAIN"),
     VITE_NEAR_INTENTS_API_BASE: OptionalUrlSchema("VITE_NEAR_INTENTS_API_BASE"),
     VITE_HIGH_VALUE_REAUTH_XLM: z.preprocess(
       (val) => emptyToUndefined(val) ?? "250",
@@ -348,6 +370,20 @@ const RawPwaEnvSchema = z
     ),
     VITE_ALT_SEP42_ASSET_LIST_URLS: parseUrlCsv("VITE_ALT_SEP42_ASSET_LIST_URLS", false),
     VITE_ALT_EXPLORER_BASE_URL: OptionalUrlSchema("VITE_ALT_EXPLORER_BASE_URL"),
+    VITE_ALT_ASTRODEX_API_BASE_URL: OptionalUrlSchema("VITE_ALT_ASTRODEX_API_BASE_URL"),
+    VITE_ALT_CCTP_TOKEN_MESSENGER_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
+    VITE_ALT_CCTP_FORWARDER_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
+    VITE_ALT_LZ_OFT_CONTRACT_ID: z.preprocess(
+      emptyToUndefined,
+      ContractAddressSchema.optional(),
+    ),
+    VITE_ALT_MONEYGRAM_ANCHOR_DOMAIN: OptionalDomainSchema("VITE_ALT_MONEYGRAM_ANCHOR_DOMAIN"),
   })
   .superRefine((env, ctx) => {
     if (env.VITE_STELLAR_NETWORK === "mainnet" && env.VITE_FRIENDBOT_URL) {
@@ -373,6 +409,7 @@ const RawPwaEnvSchema = z
         ...env.VITE_HORIZON_URLS,
         env.VITE_API_BASE_URL,
         env.VITE_PWA_ORIGIN,
+        env.VITE_ASTRODEX_API_BASE_URL,
         ...env.VITE_SEP42_ASSET_LIST_URLS,
         env.VITE_EXPLORER_BASE_URL,
         env.VITE_SOROBITS_EXPLORER_URL,
@@ -427,6 +464,7 @@ const RawPwaEnvSchema = z
             env.VITE_ALT_EXPLORER_BASE_URL,
             ...env.VITE_ALT_TON_RPC_URLS,
             env.VITE_ALT_TON_EXPLORER_BASE_URL,
+            env.VITE_ALT_ASTRODEX_API_BASE_URL,
           ],
           ctx,
           "VITE_ALT_STELLAR_NETWORK_PASSPHRASE",
@@ -449,6 +487,11 @@ export interface PwaNetworkProfile {
   sorobitsContractId?: string | undefined;
   sep42AssetListUrls: string[];
   explorerBaseUrl?: string | undefined;
+  astrodexApiBaseUrl?: string | undefined;
+  cctpTokenMessengerContractId?: ContractAddress | undefined;
+  cctpForwarderContractId?: ContractAddress | undefined;
+  lzOftContractId?: ContractAddress | undefined;
+  moneygramAnchorDomain?: string | undefined;
 }
 
 export interface PwaConfig {
@@ -462,6 +505,7 @@ export interface PwaConfig {
   tgMiniAppShortName?: string | undefined;
   astrodexBotUsername?: string | undefined;
   astrodexMiniAppShortName?: string | undefined;
+  astrodexApiBaseUrl?: string | undefined;
   astrogateBotUsername?: string | undefined;
   tonNetwork: TonNetwork;
   tonRpcUrls: string[];
@@ -478,7 +522,9 @@ export interface PwaConfig {
   sorobanMaxResourceFeeStroops: string;
   reownProjectId?: string | undefined;
   cctpBridgeUrl?: string | undefined;
+  cctpTokenMessengerContractId?: ContractAddress | undefined;
   cctpForwarderContractId?: ContractAddress | undefined;
+  lzOftContractId?: ContractAddress | undefined;
   moonPayWidgetUrl?: string | undefined;
   transakWidgetUrl?: string | undefined;
   moneygramAnchorDomain?: string | undefined;
@@ -504,6 +550,11 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
           sorobitsContractId: parsed.VITE_ALT_SOROBITS_CONTRACT_ID,
           sep42AssetListUrls: parsed.VITE_ALT_SEP42_ASSET_LIST_URLS,
           explorerBaseUrl: parsed.VITE_ALT_EXPLORER_BASE_URL,
+          astrodexApiBaseUrl: parsed.VITE_ALT_ASTRODEX_API_BASE_URL,
+          cctpTokenMessengerContractId: parsed.VITE_ALT_CCTP_TOKEN_MESSENGER_CONTRACT_ID,
+          cctpForwarderContractId: parsed.VITE_ALT_CCTP_FORWARDER_CONTRACT_ID,
+          lzOftContractId: parsed.VITE_ALT_LZ_OFT_CONTRACT_ID,
+          moneygramAnchorDomain: parsed.VITE_ALT_MONEYGRAM_ANCHOR_DOMAIN,
         }
       : undefined;
 
@@ -518,6 +569,7 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     tgMiniAppShortName: parsed.VITE_TG_MINI_APP_SHORT_NAME,
     astrodexBotUsername: parsed.VITE_ASTRODEX_BOT_USERNAME,
     astrodexMiniAppShortName: parsed.VITE_ASTRODEX_MINI_APP_SHORT_NAME,
+    astrodexApiBaseUrl: parsed.VITE_ASTRODEX_API_BASE_URL,
     astrogateBotUsername: parsed.VITE_ASTROGATE_BOT_USERNAME,
     tonNetwork: parsed.VITE_TON_NETWORK ?? parsed.VITE_STELLAR_NETWORK,
     tonRpcUrls: parsed.VITE_TON_RPC_URLS,
@@ -534,7 +586,9 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     sorobanMaxResourceFeeStroops: parsed.VITE_SOROBAN_MAX_RESOURCE_FEE_STROOPS,
     reownProjectId: parsed.VITE_REOWN_PROJECT_ID,
     cctpBridgeUrl: parsed.VITE_CCTP_BRIDGE_URL,
+    cctpTokenMessengerContractId: parsed.VITE_CCTP_TOKEN_MESSENGER_CONTRACT_ID,
     cctpForwarderContractId: parsed.VITE_CCTP_FORWARDER_CONTRACT_ID,
+    lzOftContractId: parsed.VITE_LZ_OFT_CONTRACT_ID,
     moonPayWidgetUrl: parsed.VITE_MOONPAY_WIDGET_URL,
     transakWidgetUrl: parsed.VITE_TRANSAK_WIDGET_URL,
     moneygramAnchorDomain: parsed.VITE_MONEYGRAM_ANCHOR_DOMAIN,
@@ -574,6 +628,11 @@ export function applyPwaNetworkProfile(
     sorobitsContractId: alt.sorobitsContractId,
     sep42AssetListUrls: alt.sep42AssetListUrls,
     explorerBaseUrl: alt.explorerBaseUrl,
+    astrodexApiBaseUrl: alt.astrodexApiBaseUrl,
+    cctpTokenMessengerContractId: alt.cctpTokenMessengerContractId,
+    cctpForwarderContractId: alt.cctpForwarderContractId,
+    lzOftContractId: alt.lzOftContractId,
+    moneygramAnchorDomain: alt.moneygramAnchorDomain,
     altNetworkProfile: {
       network: config.network,
       networkPassphrase: config.networkPassphrase,
@@ -587,6 +646,11 @@ export function applyPwaNetworkProfile(
       sorobitsContractId: config.sorobitsContractId,
       sep42AssetListUrls: config.sep42AssetListUrls,
       explorerBaseUrl: config.explorerBaseUrl,
+      astrodexApiBaseUrl: config.astrodexApiBaseUrl,
+      cctpTokenMessengerContractId: config.cctpTokenMessengerContractId,
+      cctpForwarderContractId: config.cctpForwarderContractId,
+      lzOftContractId: config.lzOftContractId,
+      moneygramAnchorDomain: config.moneygramAnchorDomain,
     },
   };
 }

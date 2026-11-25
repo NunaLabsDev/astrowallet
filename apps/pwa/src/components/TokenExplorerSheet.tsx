@@ -377,6 +377,7 @@ export function TokenExplorerSheet({
         query: cleaned,
         limit: 20,
         apiBaseUrl: config.apiBaseUrl,
+        network: config.network,
       });
       setHorizonResults(results);
       if (results.length === 0 && cleaned.length > 0) {

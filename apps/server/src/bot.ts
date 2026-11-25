@@ -1233,12 +1233,13 @@ export function createTelegramBot(
       const dexBase = config.astrodexApiBaseUrl?.replace(/\/+$/, "");
       if (dexBase) {
       try {
-        const dexRes = await fetchFn(`${dexBase}/v1/quote?net=${config.network}`, {
+        const dexRes = await fetchFn(`${dexBase}/v1/quote?net=${config.network}&network=${config.network}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             Accept: "application/json",
             "User-Agent": "AstroWallet-Worker/1.0",
+            "X-Astro-Network": config.network,
           },
           body: JSON.stringify({
             fromAsset,

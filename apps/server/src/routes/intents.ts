@@ -287,6 +287,10 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: "Intent not found" }, 404);
     }
 
+    const verifyNowOverride =
+      intent.actionType === "claim" && intent.status === "signed"
+        ? intent.expiresAt - 1
+        : undefined;
     const check = await verifyIntentToken(
       {
         intentId: intent.intentId,
@@ -296,6 +300,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       },
       sig,
       config.intentHmacSecret,
+      verifyNowOverride,
     );
 
     if (!check.valid) {
@@ -1029,6 +1034,7 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       });
       const callbackHeaders: Record<string, string> = {
         "Content-Type": "application/json",
+        "X-Astro-Network": config.network,
       };
       if (config.ecosystemSharedIntentSecret) {
         callbackHeaders["X-Ecosystem-Secret"] = config.ecosystemSharedIntentSecret;

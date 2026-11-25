@@ -208,7 +208,18 @@ export function PublicStatsPage() {
       setMainnetData(mainJson);
       setTestnetData(testJson);
 
-      const envDex = (import.meta.env.VITE_ASTRODEX_API_BASE_URL as string | undefined)?.trim();
+      const rawEnvDex = (import.meta.env.VITE_ASTRODEX_API_BASE_URL as string | undefined)?.trim();
+      let envDex = "";
+      if (rawEnvDex) {
+        try {
+          const parsedDex = new URL(rawEnvDex);
+          if (parsedDex.protocol === "https:") {
+            envDex = parsedDex.origin;
+          }
+        } catch {
+          envDex = "";
+        }
+      }
       const mainDexBase = mainJson?.ecosystem?.astroDexApiBaseUrl || envDex || "";
       const testDexBase = testJson?.ecosystem?.astroDexApiBaseUrl || envDex || "";
 

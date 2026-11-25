@@ -13,6 +13,14 @@ function collectConfiguredConnectOrigins(env: Record<string, string | undefined>
     "VITE_SEP42_ASSET_LIST_URLS",
     "VITE_TON_RPC_URLS",
     "VITE_TON_BRIDGE_URL",
+    "VITE_NEAR_INTENTS_API_BASE",
+    "VITE_ASTRODEX_API_BASE_URL",
+    "VITE_ALT_ASTRODEX_API_BASE_URL",
+    "VITE_ALT_STELLAR_RPC_URLS",
+    "VITE_ALT_HORIZON_URLS",
+    "VITE_ALT_TON_RPC_URLS",
+    "VITE_ALT_FRIENDBOT_URL",
+    "VITE_ALT_SEP42_ASSET_LIST_URLS",
   ];
   for (const key of urlKeys) {
     const raw = env[key];

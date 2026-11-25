@@ -934,6 +934,7 @@ export function WalletProvider({
       horizonUrls: config.horizonUrls,
       assets: assetsToResolve,
       apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
     })
       .then((resolved) => {
         if (!cancelled) {

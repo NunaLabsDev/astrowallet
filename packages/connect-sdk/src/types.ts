@@ -15,6 +15,8 @@ export interface ConnectAppInfo {
 export interface AstroConnectConfig {
   /** Base URL of the AstroWallet server / Pages origin (or "" for same-origin Worker proxy). */
   apiBaseUrl: string;
+  /** Optional target Stellar network routed via X-Astro-Network ("testnet" | "mainnet"). */
+  network?: AstroNetwork | undefined;
   /** Calling dApp identity metadata displayed in AstroWallet Clear-Sign UI and Boomerang CTA. */
   app: ConnectAppInfo;
   /** Optional custom fetch implementation (defaults to globalThis.fetch). */
@@ -188,14 +190,14 @@ export interface CrossAppIntentEnvelopeV1 {
 
 export interface UniversalScanFinding {
   code: string;
-  severity: "info" | "warning" | "critical";
+  severity: "benign" | "info" | "warning" | "malicious" | "critical";
   title: string;
   description: string;
   blocksSigning?: boolean | undefined;
 }
 
 export interface UniversalScanReport {
-  verdict: "safe" | "warning" | "malicious";
+  verdict: "benign" | "safe" | "warning" | "malicious";
   requiresMemoCheck?: boolean | undefined;
   findings: UniversalScanFinding[];
 }

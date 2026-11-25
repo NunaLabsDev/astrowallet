@@ -539,4 +539,185 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     );
     expect(zeroSep24.status).toBe(400);
   });
+
+  it("keeps expired funded claim links readable (200) while returning 410 for expired pending intents", async () => {
+    const { repo } = createD1FaithfulRepo();
+    const now = Math.floor(Date.now() / 1000);
+    const expiredAt = now - 600;
+    const fundedSig = await signIntentToken(
+      {
+        intentId: "int_claim_funded",
+        network: "testnet",
+        telegramUserId: "111",
+        expiresAt: expiredAt,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    const pendingSig = await signIntentToken(
+      {
+        intentId: "int_claim_pending",
+        network: "testnet",
+        telegramUserId: "111",
+        expiresAt: expiredAt,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
+    await repo.createSignedIntent({
+      intentId: "int_claim_funded",
+      network: "testnet",
+      actionType: "claim",
+      creatorTelegramUserId: "111",
+      creatorUsername: "alice",
+      payloadJson: JSON.stringify({ amount: "10", assetCode: "XLM", to: "anyone" }),
+      signatureHex: fundedSig,
+      status: "signed",
+      expiresAt: expiredAt,
+      createdAt: expiredAt - 3600,
+    });
+    await repo.createSignedIntent({
+      intentId: "int_claim_pending",
+      network: "testnet",
+      actionType: "claim",
+      creatorTelegramUserId: "111",
+      creatorUsername: "alice",
+      payloadJson: JSON.stringify({ amount: "10", assetCode: "XLM", to: "anyone" }),
+      signatureHex: pendingSig,
+      status: "pending",
+      expiresAt: expiredAt,
+      createdAt: expiredAt - 3600,
+    });
+
+    const app = createApp({ createRepo: () => repo });
+
+    const fundedRes = await app.request(
+      `/v1/intents/int_claim_funded?sig=${fundedSig}`,
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(fundedRes.status).toBe(200);
+    const fundedJson = (await fundedRes.json()) as { status: string; intentId: string };
+    expect(fundedJson.intentId).toBe("int_claim_funded");
+    expect(fundedJson.status).toBe("signed");
+
+    const pendingRes = await app.request(
+      `/v1/intents/int_claim_pending?sig=${pendingSig}`,
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(pendingRes.status).toBe(410);
+  });
+
+  it("blocks SSRF on POST /v1/proxy/x402-probe and forwards only x402 payment headers", async () => {
+    const { repo } = createD1FaithfulRepo();
+    let seenHeaders: Headers | null = null;
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (_input, init) => {
+        seenHeaders = new Headers(init?.headers);
+        return new Response(JSON.stringify({ data: "alpha" }), {
+          status: 402,
+          headers: {
+            "PAYMENT-REQUIRED": "x402-terms",
+            "PAYMENT-RESPONSE": "receipt-ok",
+          },
+        });
+      },
+    });
+
+    for (const badUrl of [
+      "https://127.0.0.1/x",
+      "https://169.254.169.254/latest/meta-data/",
+      "http://api.example.org/x402",
+      "https://user:pass@api.example.org/x402",
+    ]) {
+      const badRes = await app.request(
+        "/v1/proxy/x402-probe",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: badUrl }),
+        },
+        TEST_ENV,
+      );
+      expect(badRes.status).toBe(400);
+    }
+
+    const okRes = await app.request(
+      "/v1/proxy/x402-probe",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          url: "https://astrodex-testnet.pages.dev/v1/agent/forensic-alpha/XLM",
+          headers: {
+            "PAYMENT-SIGNATURE": "sig-v2",
+            "X-PAYMENT": "sig-v1",
+            Authorization: "Bearer evil-leak",
+            Cookie: "session=evil",
+          },
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(okRes.status).toBe(200);
+    const body = (await okRes.json()) as {
+      status: number;
+      hostname: string;
+      paymentRequired: string | null;
+      paymentResponse: string | null;
+      bodyPreview: string;
+    };
+    expect(body.status).toBe(402);
+    expect(body.hostname).toBe("astrodex-testnet.pages.dev");
+    expect(body.paymentRequired).toBe("x402-terms");
+    expect(body.paymentResponse).toBe("receipt-ok");
+    expect(body.bodyPreview).toContain("alpha");
+    expect(seenHeaders).not.toBeNull();
+    expect(seenHeaders!.get("PAYMENT-SIGNATURE")).toBe("sig-v2");
+    expect(seenHeaders!.get("X-PAYMENT")).toBe("sig-v1");
+    expect(seenHeaders!.get("Authorization")).toBeNull();
+    expect(seenHeaders!.get("Cookie")).toBeNull();
+  });
+
+  it("omits client_domain from SEP-10 challenge when SEP10_CLIENT_SIGNING_SECRET is missing", async () => {
+    const { repo } = createD1FaithfulRepo();
+    let requestedChallengeUrl = "";
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/.well-known/stellar.toml")) {
+          return new Response(
+            'WEB_AUTH_ENDPOINT="https://anchor.example.org/auth"\nTRANSFER_SERVER_SEP0024="https://anchor.example.org/sep24"\n',
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("https://anchor.example.org/auth")) {
+          requestedChallengeUrl = url;
+          return new Response(
+            JSON.stringify({
+              transaction: "AAAAAg==",
+              network_passphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    const kp = Keypair.random();
+    const res = await app.request(
+      `/v1/proxy/sep10/challenge?domain=anchor.example.org&account=${kp.publicKey()}`,
+      { method: "GET" },
+      {
+        ...TEST_ENV,
+        SEP10_CLIENT_DOMAIN: "astrowallet-soroban.pages.dev",
+      },
+    );
+    expect(res.status).toBe(200);
+    expect(requestedChallengeUrl).toContain(`account=${kp.publicKey()}`);
+    expect(requestedChallengeUrl).not.toContain("client_domain=");
+  });
 });

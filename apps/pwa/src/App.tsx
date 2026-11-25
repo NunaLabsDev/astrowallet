@@ -86,6 +86,7 @@ import { TelegramProvider, useTelegram } from "./state/telegram-context.js";
 import { WalletProvider, useWallet } from "./state/wallet-context.js";
 import {
   copyTextToClipboard,
+  initTelegramMiniApp,
   setTelegramClosingConfirmation,
   triggerTelegramHaptic,
   useTelegramBackButton,
@@ -1037,10 +1038,36 @@ function WalletShell({
         const selectedIndices = accounts.map((a) => a.derivationIndex ?? 0);
 
         const syncToNetwork = async (targetNet: StellarNetwork) => {
+          let targetSessionToken = sessionToken;
+          if (targetNet !== config.network) {
+            const initData = initTelegramMiniApp()?.initData ?? "";
+            if (!initData) {
+              throw new Error(`Missing Telegram initData for ${targetNet} cross-network sync`);
+            }
+            const authRes = await fetch(`${base}/v1/tg/auth`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Astro-Network": targetNet,
+              },
+              body: JSON.stringify({ initData }),
+            });
+            const authData = (await authRes.json()) as {
+              sessionToken?: string;
+              error?: string;
+            };
+            if (!authRes.ok || !authData.sessionToken) {
+              throw new Error(
+                authData.error ??
+                  `Failed to authenticate ${targetNet} Telegram session (${authRes.status})`,
+              );
+            }
+            targetSessionToken = authData.sessionToken;
+          }
           const chRes = await fetch(`${base}/v1/tg/link-challenge`, {
             method: "POST",
             headers: {
-              Authorization: `Bearer ${sessionToken}`,
+              Authorization: `Bearer ${targetSessionToken}`,
               "X-Astro-Network": targetNet,
             },
           });
@@ -1065,7 +1092,7 @@ function WalletShell({
             method: "POST",
             headers: {
               "Content-Type": "application/json",
-              Authorization: `Bearer ${sessionToken}`,
+              Authorization: `Bearer ${targetSessionToken}`,
               "X-Astro-Network": targetNet,
             },
             body: JSON.stringify({

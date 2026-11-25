@@ -406,6 +406,7 @@ export function SwapSheet({
       assetCode: fromParsed.code,
       assetIssuer: fromParsed.issuer as ClassicAddress | undefined,
       apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
     })
       .then((det) => {
         if (!cancelled) setFromDetails(det);
@@ -416,7 +417,7 @@ export function SwapSheet({
     return () => {
       cancelled = true;
     };
-  }, [fromParsed, config.horizonUrls, config.networkPassphrase, config.apiBaseUrl]);
+  }, [fromParsed, config.horizonUrls, config.networkPassphrase, config.apiBaseUrl, config.network]);
 
   useEffect(() => {
     if (!toParsed) {
@@ -434,6 +435,7 @@ export function SwapSheet({
       assetCode: toParsed.code,
       assetIssuer: toParsed.issuer as ClassicAddress | undefined,
       apiBaseUrl: config.apiBaseUrl,
+      network: config.network,
     })
       .then((det) => {
         if (!cancelled) setToDetails(det);
@@ -444,7 +446,7 @@ export function SwapSheet({
     return () => {
       cancelled = true;
     };
-  }, [toParsed, config.horizonUrls, config.networkPassphrase, config.apiBaseUrl]);
+  }, [toParsed, config.horizonUrls, config.networkPassphrase, config.apiBaseUrl, config.network]);
 
   const minReceived = useMemo(() => {
     if (!quote) return "0";

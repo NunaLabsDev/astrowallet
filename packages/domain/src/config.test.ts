@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parsePwaConfig, parseServerConfig } from "./config.js";
+import { applyPwaNetworkProfile, parsePwaConfig, parseServerConfig } from "./config.js";
 
 const VALID_TESTNET_PWA_ENV = {
   VITE_STELLAR_NETWORK: "testnet",
@@ -239,5 +239,46 @@ describe("parseServerConfig", () => {
     expect(serverCfg.redstoneOracleContractId).toBe(
       "CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF",
     );
+  });
+
+  it("rotates bridge contracts, anchor domain, and astrodex URL across altNetworkProfile", () => {
+    const primaryCctp = "CDNG7HXAPBWICI2E3AUBP3YZWZELJLYSB6F5CC7WLDTLTHVM74SLRTHP";
+    const primaryFwd = "CA66Q2WFBND6V4UEB7RD4SAXSVIWMD6RA4X3U32ELVFGXV5PJK4T4VSZ";
+    const altCctp = "CAE2G5Z77UP7GYPYGFOWFGW7C7J6I4YP2AFGSADRKQY62SYUFLPNFTXL";
+    const altFwd = "CBZL2IH7F6BIDAA3WBNXYKIXSATJGMSW7K5P5MJ6STX5RXN47TZJDF5T";
+    const altOft = "CBOWOLFSDM5PZXNFIVDMP5NZ7U2GSIHED6H6R446QOHF266XINKUMMF6";
+
+    const cfg = parsePwaConfig({
+      ...VALID_TESTNET_PWA_ENV,
+      VITE_ASTRODEX_API_BASE_URL: "https://astrodex-testnet.pages.dev",
+      VITE_CCTP_TOKEN_MESSENGER_CONTRACT_ID: primaryCctp,
+      VITE_CCTP_FORWARDER_CONTRACT_ID: primaryFwd,
+      VITE_MONEYGRAM_ANCHOR_DOMAIN: "extstellar.moneygram.com",
+      VITE_ALT_STELLAR_NETWORK: "mainnet",
+      VITE_ALT_STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+      VITE_ALT_STELLAR_RPC_URLS: "https://mainnet.sorobanrpc.com",
+      VITE_ALT_HORIZON_URLS: "https://horizon.stellar.org",
+      VITE_ALT_ASTRODEX_API_BASE_URL: "https://astrodex.pages.dev",
+      VITE_ALT_CCTP_TOKEN_MESSENGER_CONTRACT_ID: altCctp,
+      VITE_ALT_CCTP_FORWARDER_CONTRACT_ID: altFwd,
+      VITE_ALT_LZ_OFT_CONTRACT_ID: altOft,
+      VITE_ALT_MONEYGRAM_ANCHOR_DOMAIN: "stellar.moneygram.com",
+    });
+
+    const mainnetCfg = applyPwaNetworkProfile(cfg, "mainnet");
+    expect(mainnetCfg.network).toBe("mainnet");
+    expect(mainnetCfg.astrodexApiBaseUrl).toBe("https://astrodex.pages.dev");
+    expect(mainnetCfg.cctpTokenMessengerContractId).toBe(altCctp);
+    expect(mainnetCfg.cctpForwarderContractId).toBe(altFwd);
+    expect(mainnetCfg.lzOftContractId).toBe(altOft);
+    expect(mainnetCfg.moneygramAnchorDomain).toBe("stellar.moneygram.com");
+
+    const backToTestnet = applyPwaNetworkProfile(mainnetCfg, "testnet");
+    expect(backToTestnet.network).toBe("testnet");
+    expect(backToTestnet.astrodexApiBaseUrl).toBe("https://astrodex-testnet.pages.dev");
+    expect(backToTestnet.cctpTokenMessengerContractId).toBe(primaryCctp);
+    expect(backToTestnet.cctpForwarderContractId).toBe(primaryFwd);
+    expect(backToTestnet.lzOftContractId).toBeUndefined();
+    expect(backToTestnet.moneygramAnchorDomain).toBe("extstellar.moneygram.com");
   });
 });

@@ -159,3 +159,10 @@ Secrets stay in `~/.secrets/` (never print). Scratch E2E scripts: `~/.gemini/ant
 ### Open / next (User-side)
 1. **Real Mainnet Express Sign tx:** Tap any live `⚡ Express Sign Swap` button sitting in `@AstroWalletAppBot` chat (e.g. from `/buy 10 USDE`) or `/nft send` with your device PIN/biometric.
 2. **MoneyGram Partner Onboarding:** Register domain `astrowallet-soroban.pages.dev` and `SIGNING_KEY` (`GBFRJ6WMZJ37EQBA34RUEZBDSGZBKRY5T2JIVPG7EHJXZZUSKKQD6YRT`) with MoneyGram.
+
+---
+
+## Session checkpoint — 2026-11-25
+
+- Saved full Pre-Mainnet 5-audit dossier and live Cloudflare/on-chain diagnosis in [`MAINNET_READINESS_5_AUDITS_2026-11-25.md`](./MAINNET_READINESS_5_AUDITS_2026-11-25.md).
+- Resume execution from **Auditoría #1 (Paso 1 → Paso 7)** in that dossier.

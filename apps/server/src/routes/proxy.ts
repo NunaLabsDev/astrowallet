@@ -67,6 +67,46 @@ const ScanBodySchema = z.object({
   sourceAddress: StellarAddressSchema.optional(),
 });
 
+const X402ProbeBodySchema = z.object({
+  url: z.string().trim().url().max(2048),
+  headers: z.record(z.string(), z.string().max(4096)).optional(),
+});
+
+async function readTruncatedResponsePreview(res: Response, maxBytes = 4096): Promise<string> {
+  if (!res.body) {
+    const text = await res.text().catch(() => "");
+    return text.slice(0, maxBytes);
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (totalBytes < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      const remaining = maxBytes - totalBytes;
+      if (value.byteLength >= remaining) {
+        chunks.push(value.subarray(0, remaining));
+        totalBytes += remaining;
+        await reader.cancel().catch(() => {});
+        break;
+      }
+      chunks.push(value);
+      totalBytes += value.byteLength;
+    }
+  } catch {
+    // Return partial preview cleanly
+  }
+  const merged = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(merged);
+}
+
 const SAFE_PUBLIC_DOMAIN_REGEX =
   /^(?!-)[a-z0-9-]{1,63}(?<!-)(?:\.(?!-)[a-z0-9-]{1,63}(?<!-))+$/i;
 const BLOCKED_DOMAIN_SUFFIXES = [
@@ -1254,7 +1294,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       };
       const challengeUrl = new URL(endpoints.webAuthEndpoint);
       challengeUrl.searchParams.set("account", parsedAcct.data);
-      if (config.sep10ClientDomain) {
+      if (config.sep10ClientDomain && config.sep10ClientSigningSecret) {
         challengeUrl.searchParams.set("client_domain", config.sep10ClientDomain);
       }
       const res = await fetchFn(challengeUrl.toString(), {
@@ -1532,6 +1572,61 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         };
       },
     });
+  });
+
+  router.post("/x402-probe", async (c) => {
+    let body: z.infer<typeof X402ProbeBodySchema>;
+    try {
+      body = X402ProbeBodySchema.parse(await c.req.json());
+    } catch {
+      return c.json({ error: "Valid HTTPS url is required for x402 probe" }, 400);
+    }
+
+    const parsed = parseSafeHttpsPublicUrl(body.url);
+    if (!parsed || parsed.username || parsed.password) {
+      return c.json(
+        { error: "Only safe public HTTPS URLs are allowed for x402 probe" },
+        400,
+      );
+    }
+
+    const forwardedHeaders: Record<string, string> = {
+      Accept: "application/json, text/plain;q=0.9, */*;q=0.1",
+      "User-Agent": "AstroWallet-Worker/1.0",
+    };
+    if (body.headers) {
+      for (const [rawKey, rawValue] of Object.entries(body.headers)) {
+        const lower = rawKey.trim().toLowerCase();
+        if (lower === "x-payment") {
+          forwardedHeaders["X-PAYMENT"] = rawValue;
+        } else if (lower === "payment-signature") {
+          forwardedHeaders["PAYMENT-SIGNATURE"] = rawValue;
+        }
+      }
+    }
+
+    try {
+      const res = await fetchFn(parsed.toString(), {
+        method: "GET",
+        headers: forwardedHeaders,
+        redirect: "manual",
+        signal: AbortSignal.timeout(10_000),
+      });
+      const bodyPreview = await readTruncatedResponsePreview(res, 4096);
+      return c.json({
+        status: res.status,
+        ok: res.ok,
+        hostname: parsed.hostname,
+        paymentRequired: res.headers.get("PAYMENT-REQUIRED"),
+        paymentResponse: res.headers.get("PAYMENT-RESPONSE"),
+        bodyPreview,
+      });
+    } catch (err) {
+      return c.json(
+        { error: err instanceof Error ? err.message : "x402 probe request failed" },
+        502,
+      );
+    }
   });
 
   return router;

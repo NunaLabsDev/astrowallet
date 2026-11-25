@@ -3,6 +3,7 @@ import { Keypair } from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import {
   buildCancelClaimOperation,
+  buildCancelClaimToOperation,
   buildClaimEscrowSignPayload,
   buildClaimOperation,
   buildCreateClaimOperation,
@@ -106,6 +107,11 @@ describe("Claim Escrow V2 Ephemeral Ed25519 Contract Helpers", () => {
       escrowContractId: ESCROW_ZERO,
       claimIdHex,
     });
+    const cancelToOp = buildCancelClaimToOperation({
+      escrowContractId: ESCROW_ZERO,
+      claimIdHex,
+      recipientAddress: RECIPIENT_ZERO,
+    });
     const refundOp = buildRefundExpiredOperation({
       escrowContractId: ESCROW_ZERO,
       claimIdHex,
@@ -128,8 +134,45 @@ describe("Claim Escrow V2 Ephemeral Ed25519 Contract Helpers", () => {
     }
     expect(claimOp.body.type).toBe("invokeHostFunction");
     expect(cancelOp.body.type).toBe("invokeHostFunction");
+    expect(cancelToOp.body.type).toBe("invokeHostFunction");
     expect(refundOp.body.type).toBe("invokeHostFunction");
     expect(refundToOp.body.type).toBe("invokeHostFunction");
     expect(extendTtlOp.body.type).toBe("invokeHostFunction");
+
+    expect(() =>
+      buildCreateClaimOperation({
+        escrowContractId: ESCROW_ZERO,
+        claimIdHex,
+        senderAddress: RECIPIENT_ZERO,
+        tokenContractId: TOKEN_SAC,
+        amountStroops: 100n,
+        claimPubkeyHex: "00".repeat(32),
+        expiresAtUnix: 1_900_000_000,
+      }),
+    ).toThrow(/all-zero/);
+
+    expect(() =>
+      buildCreateClaimOperation({
+        escrowContractId: ESCROW_ZERO,
+        claimIdHex,
+        senderAddress: RECIPIENT_ZERO,
+        tokenContractId: TOKEN_SAC,
+        amountStroops: 100n,
+        claimPubkeyHex: ephemeral.publicKeyHex,
+        expiresAtUnix: Number.NaN,
+      }),
+    ).toThrow(/expiresAtUnix/);
+
+    expect(() =>
+      buildCreateClaimOperation({
+        escrowContractId: ESCROW_ZERO,
+        claimIdHex,
+        senderAddress: RECIPIENT_ZERO,
+        tokenContractId: TOKEN_SAC,
+        amountStroops: 100n,
+        claimPubkeyHex: ephemeral.publicKeyHex,
+        expiresAtUnix: 0,
+      }),
+    ).toThrow(/expiresAtUnix/);
   });
 });

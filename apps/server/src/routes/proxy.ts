@@ -558,6 +558,9 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     return c.json(manifestJson, 200);
   });
 
+  const SVG_XSS_PATTERN =
+    /(?:<\s*\/?\s*(?:script|foreignobject|iframe|object|embed|animate|animatemotion|animatetransform|set|meta|link|style|a|use|feimage|image|handler|listener)(?=[\s/>]|$)|on[a-z0-9_-]+\s*=|javascript:|vbscript:|data:\s*(?:text|application)\/|&#|<!entity|<!\[cdata\[|@import|url\(\s*["']?\s*(?!#)|(?:xlink:)?href\s*=\s*["']?\s*(?!#))/i;
+
   function normalizeIpfsUrl(raw: string): string | undefined {
     const trimmed = raw.trim();
     if (!trimmed) return undefined;
@@ -570,6 +573,58 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     }
     if (trimmed.startsWith("https://")) {
       return trimmed;
+    }
+    return undefined;
+  }
+
+  function sanitizeMetadataImageUrl(raw: string): string | undefined {
+    const trimmed = raw.trim();
+    if (!trimmed) return undefined;
+    const ipfsOrHttps = normalizeIpfsUrl(trimmed);
+    if (ipfsOrHttps) {
+      const parsed = parseSafeHttpsPublicUrl(ipfsOrHttps);
+      if (!parsed || parsed.username || parsed.password) return undefined;
+      return parsed.toString();
+    }
+    if (/^data:image\/(svg\+xml|png|jpeg|webp);(?:utf8|charset=utf-8|base64),/i.test(trimmed)) {
+      const bounded = trimmed.slice(0, 32_768);
+      if (bounded.length !== trimmed.length) return undefined;
+      if (/data:image\/svg\+xml/i.test(bounded)) {
+        let decodedSvg = bounded;
+        const b64Marker = ";base64,";
+        const idx = bounded.toLowerCase().indexOf(b64Marker);
+        if (idx !== -1) {
+          try {
+            const bin = atob(bounded.slice(idx + b64Marker.length));
+            const rawBytes = new Uint8Array(bin.length);
+            for (let i = 0; i < bin.length; i += 1) {
+              rawBytes[i] = bin.charCodeAt(i);
+            }
+            if (
+              (rawBytes.length >= 2 &&
+                ((rawBytes[0] === 0xfe && rawBytes[1] === 0xff) ||
+                  (rawBytes[0] === 0xff && rawBytes[1] === 0xfe))) ||
+              rawBytes.includes(0)
+            ) {
+              return undefined;
+            }
+            decodedSvg = new TextDecoder().decode(rawBytes);
+          } catch {
+            return undefined;
+          }
+        } else {
+          try {
+            decodedSvg = decodeURIComponent(bounded);
+          } catch {
+            decodedSvg = bounded;
+          }
+          if (decodedSvg.includes("\0")) return undefined;
+        }
+        if (SVG_XSS_PATTERN.test(decodedSvg)) {
+          return undefined;
+        }
+      }
+      return bounded;
     }
     return undefined;
   }
@@ -606,9 +661,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         const fName = matchField(block, "name");
         const fDesc = matchField(block, "desc");
         const img = matchField(block, "image");
-        const normalizedImg = img ? normalizeIpfsUrl(img) : undefined;
-        const safeImg =
-          normalizedImg && normalizedImg.startsWith("https://") ? normalizedImg : undefined;
+        const safeImg = img ? sanitizeMetadataImageUrl(img) : undefined;
         return {
           ...(fName ? { name: fName } : {}),
           ...(fDesc ? { description: fDesc } : {}),
@@ -711,7 +764,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
                     ? meta.url
                     : "";
               if (rawImg) {
-                image = normalizeIpfsUrl(rawImg);
+                image = sanitizeMetadataImageUrl(rawImg);
               }
               break;
             } catch {
@@ -1701,10 +1754,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
             ? rec.description.trim().slice(0, 1000)
             : undefined;
         const rawImage = typeof rec.image === "string" ? rec.image.trim() : "";
-        const normalizedImage = rawImage
-          ? normalizeIpfsUrl(rawImage) ??
-            (rawImage.startsWith("data:image/") ? rawImage.slice(0, 32_768) : undefined)
-          : undefined;
+        const normalizedImage = rawImage ? sanitizeMetadataImageUrl(rawImage) : undefined;
         const attributes = Array.isArray(rec.attributes) ? rec.attributes.slice(0, 32) : undefined;
 
         return {

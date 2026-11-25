@@ -135,8 +135,14 @@ export function buildCreateClaimOperation(input: {
   if (input.amountStroops <= 0n) {
     throw new Error("Claim escrow amount must be positive");
   }
+  if (!Number.isFinite(input.expiresAtUnix) || Math.trunc(input.expiresAtUnix) <= 0) {
+    throw new Error("Claim escrow expiresAtUnix must be a positive unix timestamp");
+  }
   const claimId = hexToBytes(input.claimIdHex, 32);
   const claimPubkey = hexToBytes(input.claimPubkeyHex, 32);
+  if (claimPubkey.every((b) => b === 0)) {
+    throw new Error("Claim escrow claimPubkey cannot be all-zero bytes");
+  }
 
   return Operation.invokeContractFunction({
     contract: input.escrowContractId,
@@ -184,6 +190,23 @@ export function buildCancelClaimOperation(input: {
     contract: input.escrowContractId,
     function: "cancel_claim",
     args: [nativeToScVal(claimId, { type: "bytes" })],
+  });
+}
+
+export function buildCancelClaimToOperation(input: {
+  escrowContractId: ContractAddress;
+  claimIdHex: string;
+  recipientAddress: StellarAddress;
+}): xdr.Operation {
+  assertValidEscrowContract(input.escrowContractId);
+  const claimId = hexToBytes(input.claimIdHex, 32);
+  return Operation.invokeContractFunction({
+    contract: input.escrowContractId,
+    function: "cancel_claim_to",
+    args: [
+      nativeToScVal(claimId, { type: "bytes" }),
+      new Address(input.recipientAddress).toScVal(),
+    ],
   });
 }
 

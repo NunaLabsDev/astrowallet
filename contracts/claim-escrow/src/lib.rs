@@ -58,6 +58,7 @@ pub enum DataKey {
     DepositsPaused,
     EscrowedBalance(Address),
     ReentrancyLock,
+    Initialized,
 }
 
 #[contracttype]
@@ -146,33 +147,37 @@ impl ClaimEscrowContract {
     /// Optional deploy-time initialization of the governance guardian (recommended:
     /// multisig/timelock) to eliminate any post-deploy `init()` front-running window.
     pub fn __constructor(env: Env, guardian: Option<Address>) {
+        env.storage().instance().set(&DataKey::Initialized, &true);
+        env.storage()
+            .instance()
+            .set(&DataKey::DepositsPaused, &false);
         if let Some(g) = guardian {
             if g == env.current_contract_address() {
                 panic_with_error!(&env, ClaimError::InvalidAddress);
             }
             env.storage().instance().set(&DataKey::Guardian, &g);
-            env.storage()
-                .instance()
-                .set(&DataKey::DepositsPaused, &false);
-            env.storage()
-                .instance()
-                .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
 
             env.events()
                 .publish((symbol_short!("escrow"), symbol_short!("init")), g);
         }
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
     }
 
     /// Initializes an optional governance guardian (recommended: multisig/timelock)
     /// that can pause *new deposits only* or rescue unrelated excess tokens sent by mistake.
     pub fn init(env: Env, guardian: Address) -> Result<(), ClaimError> {
-        if env.storage().instance().has(&DataKey::Guardian) {
+        if env.storage().instance().has(&DataKey::Initialized)
+            || env.storage().instance().has(&DataKey::Guardian)
+        {
             return Err(ClaimError::AlreadyInitialized);
         }
         if guardian == env.current_contract_address() {
             return Err(ClaimError::InvalidAddress);
         }
         guardian.require_auth();
+        env.storage().instance().set(&DataKey::Initialized, &true);
         env.storage().instance().set(&DataKey::Guardian, &guardian);
         env.storage()
             .instance()
@@ -567,6 +572,53 @@ impl ClaimEscrowContract {
         env.events().publish(
             (symbol_short!("claim"), symbol_short!("cancelled"), claim_id),
             (deposit.sender, deposit.token, deposit.amount),
+        );
+
+        Ok(())
+    }
+
+    /// Allows the original sender to cancel an open cancellable claim early and send funds
+    /// to an alternate `destination` (e.g. if the original sender account removed its trustline).
+    pub fn cancel_claim_to(
+        env: Env,
+        claim_id: BytesN<32>,
+        destination: Address,
+    ) -> Result<(), ClaimError> {
+        let key = DataKey::Claim(claim_id.clone());
+        let mut deposit: ClaimDeposit = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(ClaimError::NotFound)?;
+
+        deposit.sender.require_auth();
+        acquire_lock(&env)?;
+
+        let contract_addr = env.current_contract_address();
+        if destination == contract_addr {
+            release_lock(&env);
+            return Err(ClaimError::InvalidAddress);
+        }
+        if deposit.status != ClaimStatus::Open {
+            release_lock(&env);
+            return Err(ClaimError::NotOpen);
+        }
+        if !deposit.cancellable {
+            release_lock(&env);
+            return Err(ClaimError::NotCancellable);
+        }
+
+        deposit.status = ClaimStatus::Cancelled;
+        decrease_escrowed_balance(&env, &deposit.token, deposit.amount);
+        write_terminal_deposit(&env, &key, &deposit);
+
+        let token_client = token::Client::new(&env, &deposit.token);
+        token_client.transfer(&contract_addr, &destination, &deposit.amount);
+        release_lock(&env);
+
+        env.events().publish(
+            (symbol_short!("claim"), symbol_short!("cancelled"), claim_id),
+            (destination, deposit.token, deposit.amount),
         );
 
         Ok(())
@@ -1118,14 +1170,9 @@ mod test {
         let token = TokenClient::new(&env, &token_id);
         sac.mint(&sender, &1_000);
 
-        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
+        let escrow_id = env.register(ClaimEscrowContract, (Some(guardian.clone()),));
         let client = ClaimEscrowContractClient::new(&env, &escrow_id);
 
-        assert_eq!(
-            client.try_set_deposits_paused(&true),
-            Err(Ok(ClaimError::NotInitialized))
-        );
-        client.init(&guardian);
         assert_eq!(
             client.try_init(&guardian),
             Err(Ok(ClaimError::AlreadyInitialized))
@@ -1395,5 +1442,119 @@ mod test {
         client.refund_expired(&claim_past_boundary);
         assert_eq!(client.get_escrowed_balance(&token_id), 0);
         assert_eq!(token.balance(&escrow_id), 0);
+    }
+
+    #[test]
+    fn test_constructor_none_blocks_guardian_takeover_and_cancel_claim_to() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+
+        let admin = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let alt_dest = Address::generate(&env);
+
+        let token_contract = env.register_stellar_asset_contract_v2(admin);
+        let token_id = token_contract.address();
+        let sac = StellarAssetClient::new(&env, &token_id);
+        let token = TokenClient::new(&env, &token_id);
+        sac.mint(&sender, &500);
+
+        // Deploying with None::<Address> permanently seals init() against post-deploy takeover
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
+        let client = ClaimEscrowContractClient::new(&env, &escrow_id);
+
+        assert_eq!(
+            client.try_set_deposits_paused(&true),
+            Err(Ok(ClaimError::NotInitialized))
+        );
+        assert_eq!(
+            client.try_init(&attacker),
+            Err(Ok(ClaimError::AlreadyInitialized))
+        );
+
+        let signing_key = SigningKey::from_bytes(&[88u8; 32]);
+        let claim_pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+        let cancellable_id = BytesN::from_array(&env, &[94u8; 32]);
+        let locked_id = BytesN::from_array(&env, &[95u8; 32]);
+
+        client.create_claim(
+            &cancellable_id,
+            &sender,
+            &token_id,
+            &300,
+            &claim_pubkey,
+            &2_000,
+            &true,
+        );
+        client.create_claim(
+            &locked_id,
+            &sender,
+            &token_id,
+            &200,
+            &claim_pubkey,
+            &2_000,
+            &false,
+        );
+
+        assert_eq!(
+            client.try_cancel_claim_to(&cancellable_id, &escrow_id),
+            Err(Ok(ClaimError::InvalidAddress))
+        );
+        assert_eq!(
+            client.try_cancel_claim_to(&locked_id, &alt_dest),
+            Err(Ok(ClaimError::NotCancellable))
+        );
+
+        client.cancel_claim_to(&cancellable_id, &alt_dest);
+        assert_eq!(token.balance(&alt_dest), 300);
+        assert_eq!(client.get_escrowed_balance(&token_id), 200);
+        assert_eq!(
+            client.try_cancel_claim_to(&cancellable_id, &alt_dest),
+            Err(Ok(ClaimError::NotOpen))
+        );
+    }
+
+    #[test]
+    #[should_panic]
+    fn test_cancel_claim_to_requires_sender_auth() {
+        let env = Env::default();
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let alt_dest = Address::generate(&env);
+        let token_id = env.register_stellar_asset_contract_v2(admin).address();
+        let escrow_id = env.register(ClaimEscrowContract, (None::<Address>,));
+        let client = ClaimEscrowContractClient::new(&env, &escrow_id);
+
+        let signing_key = SigningKey::from_bytes(&[89u8; 32]);
+        let claim_pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+        let claim_id = BytesN::from_array(&env, &[96u8; 32]);
+
+        env.as_contract(&escrow_id, || {
+            env.storage().persistent().set(
+                &DataKey::Claim(claim_id.clone()),
+                &ClaimDeposit {
+                    sender: sender.clone(),
+                    token: token_id.clone(),
+                    amount: 100,
+                    claim_pubkey,
+                    expires_at: 2_000,
+                    cancellable: true,
+                    status: ClaimStatus::Open,
+                },
+            );
+            env.storage()
+                .persistent()
+                .set(&DataKey::EscrowedBalance(token_id), &100_i128);
+        });
+
+        client.cancel_claim_to(&claim_id, &alt_dest);
     }
 }

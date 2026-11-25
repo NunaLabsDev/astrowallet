@@ -547,7 +547,41 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
       }
 
       if (preimage !== null) {
+        if (
+          preimage.type !== "envelopeTypeSorobanAuthorization" &&
+          preimage.type !== "envelopeTypeSorobanAuthorizationWithAddress"
+        ) {
+          return c.json(
+            { error: `Refusing non-Soroban HashIdPreimage (${preimage.type})` },
+            400,
+          );
+        }
         try {
+          const rawNetId =
+            preimage.type === "envelopeTypeSorobanAuthorization"
+              ? preimage.sorobanAuthorization.networkId
+              : preimage.sorobanAuthorizationWithAddress.networkId;
+          const netBytes =
+            rawNetId instanceof Uint8Array
+              ? rawNetId
+              : (rawNetId as { toBytes(): Uint8Array }).toBytes();
+          const expectedNetworkId = new Uint8Array(
+            await crypto.subtle.digest(
+              "SHA-256",
+              new TextEncoder().encode(config.networkPassphrase),
+            ),
+          );
+          if (netBytes.length !== expectedNetworkId.length) {
+            return c.json({ error: "Cross-network Soroban HashIdPreimage rejected" }, 400);
+          }
+          let netDiff = 0;
+          for (let i = 0; i < expectedNetworkId.length; i += 1) {
+            netDiff |= (netBytes[i] ?? 0) ^ (expectedNetworkId[i] ?? 0);
+          }
+          if (netDiff !== 0) {
+            return c.json({ error: "Cross-network Soroban HashIdPreimage rejected" }, 400);
+          }
+
           const digest = new Uint8Array(
             await crypto.subtle.digest("SHA-256", new Uint8Array(preimage.toXDR())),
           );

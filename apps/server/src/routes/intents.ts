@@ -649,6 +649,9 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       const expected: ExpectedTxMatch = {
         minCreatedAtUnix: intent.createdAt,
         allowSorobanRpcFallback: true,
+        ...(stage === "funded" && parsedBody.senderAddress
+          ? { expectedSourceAccount: parsedBody.senderAddress }
+          : {}),
         sorobanInvoke: {
           contractId: escrowParsed.data,
           functionName: sorobanFn,

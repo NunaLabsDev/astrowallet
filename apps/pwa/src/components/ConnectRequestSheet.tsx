@@ -398,7 +398,9 @@ export function ConnectRequestSheet({
         if (scanReport?.verdict === "warning" && !warningAcknowledged) {
           throw new Error("Acknowledge the Scan & Shield warning before signing.");
         }
-        const signed = await signAuthEntryWithShield(authEntryXdr, true);
+        const allowWarningFlag =
+          scanReport?.verdict === "warning" ? warningAcknowledged : false;
+        const signed = await signAuthEntryWithShield(authEntryXdr, allowWarningFlag);
         returnUrl = await submitCompletion({
           status: "approved",
           address: signed.signerAddress,
@@ -484,12 +486,37 @@ export function ConnectRequestSheet({
     if (!completedMsg || autoReturnCancelled) return undefined;
     const statusToSend = completedStatus ?? "approved";
     if (typeof window !== "undefined" && window.opener && !window.opener.closed) {
+      const trustedOrigins = new Set<string>();
+      for (const candidate of [
+        config.pwaOrigin,
+        config.astrodexApiBaseUrl,
+        config.altNetworkProfile?.astrodexApiBaseUrl,
+      ]) {
+        if (!candidate) continue;
+        try {
+          const parsed = new URL(candidate);
+          if (parsed.protocol === "https:") {
+            trustedOrigins.add(parsed.origin);
+          }
+        } catch {
+          // Ignore malformed configured URL
+        }
+      }
       let targetOrigin: string | null = null;
       try {
-        if (request?.app.origin) {
-          targetOrigin = new URL(request.app.origin).origin;
+        if (
+          request?.app.origin &&
+          (request.trustTier === "official" || request.trustTier === "verified")
+        ) {
+          const appParsed = new URL(request.app.origin);
+          if (appParsed.protocol === "https:") {
+            targetOrigin = appParsed.origin;
+          }
         } else if (document.referrer) {
-          targetOrigin = new URL(document.referrer).origin;
+          const refOrigin = new URL(document.referrer).origin;
+          if (trustedOrigins.has(refOrigin)) {
+            targetOrigin = refOrigin;
+          }
         }
       } catch {
         targetOrigin = null;
@@ -529,6 +556,10 @@ export function ConnectRequestSheet({
     completedTxHash,
     completedReturnUrl,
     request?.app.origin,
+    request?.trustTier,
+    config.pwaOrigin,
+    config.astrodexApiBaseUrl,
+    config.altNetworkProfile?.astrodexApiBaseUrl,
   ]);
 
   const openBoomerang = (url: string) => {

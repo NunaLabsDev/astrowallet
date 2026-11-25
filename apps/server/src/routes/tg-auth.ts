@@ -404,6 +404,15 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
 
     const config = c.get("config");
     const repo = c.get("repo");
+    const rl = await repo.incrementRateLimit({
+      key: `tg_link_ch:${session.claims.telegramUserId}`,
+      windowSec: 60,
+      limit: 15,
+    });
+    if (!rl.allowed) {
+      c.header("Retry-After", String(rl.retryAfterSeconds));
+      return c.json({ error: "Too many link challenge requests" }, 429);
+    }
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = now + 300;
     const intentId = `it_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
@@ -464,6 +473,15 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
 
     const config = c.get("config");
     const repo = c.get("repo");
+    const rl = await repo.incrementRateLimit({
+      key: `tg_link_cf:${session.claims.telegramUserId}`,
+      windowSec: 60,
+      limit: 15,
+    });
+    if (!rl.allowed) {
+      c.header("Retry-After", String(rl.retryAfterSeconds));
+      return c.json({ error: "Too many link confirm attempts" }, 429);
+    }
     const intent = await repo.getSignedIntent(body.intentId);
     if (!intent) {
       return c.json({ error: "Link challenge intent not found" }, 404);
@@ -557,11 +575,23 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
     env: { CACHE?: KVNamespace };
     get(key: "config"): ServerConfig;
     get(key: "repo"): ServerRepository;
+    header(name: string, value: string): void;
     json(data: unknown, status?: number): Response;
   }) => {
     const session = await authenticateMiniAppSession(c);
     if (!session.ok) {
       return c.json({ error: session.error }, session.status);
+    }
+    const repo = c.get("repo");
+    const tgId = session.claims.telegramUserId;
+    const rl = await repo.incrementRateLimit({
+      key: `tg_pref:${tgId}`,
+      windowSec: 60,
+      limit: 20,
+    });
+    if (!rl.allowed) {
+      c.header("Retry-After", String(rl.retryAfterSeconds));
+      return c.json({ error: "Too many preference update requests" }, 429);
     }
     let body: z.infer<typeof EcosystemPreferencesSchema>;
     try {
@@ -569,8 +599,6 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
     } catch {
       return c.json({ error: "Invalid ecosystem preferences payload" }, 400);
     }
-    const repo = c.get("repo");
-    const tgId = session.claims.telegramUserId;
     if (body.activeAddress) {
       await repo.setDefaultLinkedAddress(tgId, body.activeAddress).catch(() => false);
     }

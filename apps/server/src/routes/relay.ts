@@ -1,8 +1,10 @@
 import { ClassicAddressSchema, type ServerConfig } from "@astrowallet/domain";
 import {
+  decodeAuthEntryXdr,
   decodeHostFunctionXdr,
   decodeTransactionEnvelope,
   evaluateDecodedTransaction,
+  evaluateSorobanInvocation,
 } from "@astrowallet/security-shield";
 import { verifyConnectSignature, verifyIntentToken } from "@astrowallet/tg-protocol";
 import type { DurableObjectNamespace, KVNamespace } from "@cloudflare/workers-types";
@@ -52,14 +54,14 @@ const WalletAuthSchema = z.object({
 const RelaySubmitSchema = z.discriminatedUnion("mode", [
   z.object({
     mode: z.literal("soroban"),
-    funcXdrBase64: z.string().min(8),
-    authEntriesXdrBase64: z.array(z.string().min(8)).default([]),
+    funcXdrBase64: z.string().min(8).max(65_536),
+    authEntriesXdrBase64: z.array(z.string().min(8).max(32_768)).max(16).default([]),
     intentAuth: IntentAuthSchema.optional(),
     walletAuth: WalletAuthSchema.optional(),
   }),
   z.object({
     mode: z.literal("feebump"),
-    signedTxXdrBase64: z.string().min(16),
+    signedTxXdrBase64: z.string().min(16).max(131_072),
     intentAuth: IntentAuthSchema.optional(),
     walletAuth: WalletAuthSchema.optional(),
   }),
@@ -199,16 +201,37 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       );
     }
 
+    const principalKey = intentAuthRecord?.intentId ?? body.walletAuth?.address;
+    if (principalKey) {
+      const principalLimit = await checkRateLimit({
+        repository: repo,
+        cache: c.env.CACHE,
+        scope: "relay_principal",
+        clientKey: principalKey,
+        limitPerMin: config.relayRateLimitPerMin,
+      });
+      if (!principalLimit.allowed) {
+        c.header("Retry-After", String(principalLimit.retryAfterSeconds));
+        return c.json({ error: "Relay principal rate limit exceeded" }, 429);
+      }
+    }
+
     // Payload policy gates
     let estimatedFeeStroops = config.relayMaxFeeStroops;
     const maxFeeAllowed = BigInt(config.relayMaxFeeStroops);
 
     let claimedStageKey: string | null = null;
-    const releaseStageKey = async () => {
+    let consumedBudget: { dayUtc: string; feeStroops: string } | null = null;
+    const rollbackRelayReservation = async () => {
       if (claimedStageKey && repo?.releaseAlertDedupKey) {
         const key = claimedStageKey;
         claimedStageKey = null;
         await repo.releaseAlertDedupKey(key).catch(() => undefined);
+      }
+      if (consumedBudget && repo?.refundRelayBudget) {
+        const budgetRef = consumedBudget;
+        consumedBudget = null;
+        await repo.refundRelayBudget(budgetRef).catch(() => undefined);
       }
     };
 
@@ -332,6 +355,41 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
           403,
         );
       }
+
+      const fnFindings = evaluateSorobanInvocation({
+        contractId: hostFn.contractId,
+        functionName: hostFn.functionName ?? "",
+        args: [],
+        subInvocations: [],
+      });
+      if (fnFindings.some((f) => f.severity === "malicious" || f.blocksSigning)) {
+        return c.json(
+          {
+            error: "Scan & Shield blocked relay of a dangerous Soroban function",
+            findings: fnFindings.map((f) => f.code),
+          },
+          403,
+        );
+      }
+
+      for (const rawAuthEntry of body.authEntriesXdrBase64) {
+        let decodedAuth;
+        try {
+          decodedAuth = decodeAuthEntryXdr(rawAuthEntry);
+        } catch {
+          return c.json({ error: "authEntriesXdrBase64 contains invalid Soroban auth XDR" }, 400);
+        }
+        const authFindings = evaluateSorobanInvocation(decodedAuth.invocation);
+        if (authFindings.some((f) => f.severity === "malicious" || f.blocksSigning)) {
+          return c.json(
+            {
+              error: "Scan & Shield blocked relay of a malicious Soroban auth entry",
+              findings: authFindings.map((f) => f.code),
+            },
+            403,
+          );
+        }
+      }
     }
 
     if (intentAuthRecord && repo) {
@@ -351,9 +409,10 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         dailyBudgetStroops: config.relayDailyBudgetStroops,
       });
       if (!budget.allowed) {
-        await releaseStageKey();
+        await rollbackRelayReservation();
         return c.json({ error: "Daily sponsored relay fee budget exceeded" }, 429);
       }
+      consumedBudget = { dayUtc, feeStroops: estimatedFeeStroops };
     }
 
     const upstreamPayload =
@@ -424,7 +483,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         const excluded: string[] = [];
         let lease = await acquireChannel(excluded);
         if (lease && "errorStatus" in lease) {
-          await releaseStageKey();
+          await rollbackRelayReservation();
           return c.json(
             { error: "All relay channel accounts are busy; retry shortly" },
             429,
@@ -445,14 +504,14 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
               if (lease && !("errorStatus" in lease)) {
                 res = await submitWithChannel(lease.channelAddress);
               } else {
-                await releaseStageKey();
+                await rollbackRelayReservation();
                 return c.json(
                   { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
                   502,
                 );
               }
             } else {
-              await releaseStageKey();
+              await rollbackRelayReservation();
               return c.json(
                 { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
                 502,
@@ -470,14 +529,14 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
 
       if (!res.ok) {
         const errText = await res.text();
-        await releaseStageKey();
+        await rollbackRelayReservation();
         return c.json(
           { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
           502,
         );
       }
     } catch (err) {
-      await releaseStageKey();
+      await rollbackRelayReservation();
       return c.json(
         {
           error: err instanceof Error ? `Relayer request failed: ${err.message}` : "Relayer unavailable",
@@ -534,6 +593,17 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       c.header("Retry-After", String(limit.retryAfterSeconds));
       return c.json({ error: "Bootstrap rate limit exceeded" }, 429);
     }
+    const userLimit = await checkRateLimit({
+      repository: repo,
+      cache: c.env.CACHE,
+      scope: "relay_bootstrap_user",
+      clientKey: session.claims.telegramUserId,
+      limitPerMin: 5,
+    });
+    if (!userLimit.allowed) {
+      c.header("Retry-After", String(userLimit.retryAfterSeconds));
+      return c.json({ error: "Bootstrap user rate limit exceeded" }, 429);
+    }
 
     let body: z.infer<typeof BootstrapBodySchema>;
     try {
@@ -588,35 +658,53 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
 
     const userDedupKey = `bootstrap:tg:${config.network}:${session.claims.telegramUserId}`;
     const addrDedupKey = `bootstrap:addr:${config.network}:${body.address}`;
+    const dayUtc = `bootstrap:${new Date(nowSec * 1000).toISOString().slice(0, 10)}`;
+    let claimedUser = false;
+    let claimedAddr = false;
+    let bootstrapBudgetConsumed = false;
+
+    const rollbackDedup = async () => {
+      if (!repo) return;
+      const tasks: Promise<unknown>[] = [];
+      if (claimedUser && repo.releaseAlertDedupKey) {
+        claimedUser = false;
+        tasks.push(repo.releaseAlertDedupKey(userDedupKey).catch(() => undefined));
+      }
+      if (claimedAddr && repo.releaseAlertDedupKey) {
+        claimedAddr = false;
+        tasks.push(repo.releaseAlertDedupKey(addrDedupKey).catch(() => undefined));
+      }
+      if (bootstrapBudgetConsumed && repo.refundRelayBudget) {
+        bootstrapBudgetConsumed = false;
+        tasks.push(
+          repo.refundRelayBudget({ dayUtc, feeStroops: "100000" }).catch(() => undefined),
+        );
+      }
+      await Promise.all(tasks);
+    };
+
     if (repo) {
-      const dayUtc = `bootstrap:${new Date(nowSec * 1000).toISOString().slice(0, 10)}`;
+      claimedUser = await repo.claimAlertDedupKey(userDedupKey);
+      if (!claimedUser) {
+        return c.json({ error: "This Telegram account has already used its sponsored activation" }, 409);
+      }
+      claimedAddr = await repo.claimAlertDedupKey(addrDedupKey);
+      if (!claimedAddr) {
+        await rollbackDedup();
+        return c.json({ error: "This Stellar address has already been bootstrapped" }, 409);
+      }
+
       const budget = await repo.tryConsumeRelayBudget({
         dayUtc,
         feeStroops: "100000",
         dailyBudgetStroops: String(BigInt(config.relayBootstrapDailyLimit) * 100_000n),
       });
       if (!budget.allowed) {
+        await rollbackDedup();
         return c.json({ error: "Daily sponsored bootstrap limit reached" }, 429);
       }
-
-      const claimedUser = await repo.claimAlertDedupKey(userDedupKey);
-      if (!claimedUser) {
-        return c.json({ error: "This Telegram account has already used its sponsored activation" }, 409);
-      }
-      const claimedAddr = await repo.claimAlertDedupKey(addrDedupKey);
-      if (!claimedAddr) {
-        await repo.releaseAlertDedupKey?.(userDedupKey);
-        return c.json({ error: "This Stellar address has already been bootstrapped" }, 409);
-      }
+      bootstrapBudgetConsumed = true;
     }
-
-    const rollbackDedup = async () => {
-      if (!repo?.releaseAlertDedupKey) return;
-      await Promise.all([
-        repo.releaseAlertDedupKey(userDedupKey).catch(() => undefined),
-        repo.releaseAlertDedupKey(addrDedupKey).catch(() => undefined),
-      ]);
-    };
 
     let sponsorKeypair: Keypair;
     let sponsorAddress: string;

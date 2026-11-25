@@ -26,7 +26,8 @@ import type {
   TelegramUserRecord,
 } from "./db/repository.js";
 import { ChainWatcherDO } from "./durable-objects/chain-watcher.js";
-import { resetMemoryRateLimits } from "./rate-limit.js";
+import { resetMemoryRateLimits, clientKeyFromHeaders } from "./rate-limit.js";
+import { computeTelegramInitDataHash } from "@astrowallet/tg-protocol";
 import { isSafePublicDomain } from "./routes/proxy.js";
 
 const TEST_ENV = {
@@ -55,6 +56,9 @@ function createD1FaithfulRepo() {
   const connectRequests = new Map<string, ConnectRequestRecord>();
   const events = new Map<string, number>();
   const verifiedTxs: string[] = [];
+  const dedupKeys = new Set<string>();
+  const relaySpent = new Map<string, bigint>();
+  const relayTxCount = new Map<string, number>();
 
   const repo: ServerRepository = {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -152,8 +156,13 @@ function createD1FaithfulRepo() {
     async listSplitPaymentTxHashes(intentId) {
       return (splitPayments.get(intentId) ?? []).map((p) => p.txHash);
     },
-    async claimAlertDedupKey() {
+    async claimAlertDedupKey(key) {
+      if (dedupKeys.has(key)) return false;
+      dedupKeys.add(key);
       return true;
+    },
+    async releaseAlertDedupKey(key) {
+      dedupKeys.delete(key);
     },
     async findRecentPendingIntent() {
       return null;
@@ -161,8 +170,23 @@ function createD1FaithfulRepo() {
     async incrementRateLimit() {
       return { allowed: true, count: 1, retryAfterSeconds: 60 };
     },
-    async tryConsumeRelayBudget() {
-      return { allowed: true, spentStroops: "100" };
+    async tryConsumeRelayBudget({ dayUtc, feeStroops, dailyBudgetStroops }) {
+      const prev = relaySpent.get(dayUtc) ?? 0n;
+      const fee = BigInt(feeStroops);
+      const cap = BigInt(dailyBudgetStroops);
+      if (prev + fee > cap) {
+        return { allowed: false, spentStroops: prev.toString() };
+      }
+      const next = prev + fee;
+      relaySpent.set(dayUtc, next);
+      relayTxCount.set(dayUtc, (relayTxCount.get(dayUtc) ?? 0) + 1);
+      return { allowed: true, spentStroops: next.toString() };
+    },
+    async refundRelayBudget({ dayUtc, feeStroops }) {
+      const prev = relaySpent.get(dayUtc) ?? 0n;
+      const fee = BigInt(feeStroops);
+      relaySpent.set(dayUtc, prev > fee ? prev - fee : 0n);
+      relayTxCount.set(dayUtc, Math.max(0, (relayTxCount.get(dayUtc) ?? 0) - 1));
     },
     async claimTelegramUpdateId() {
       return true;
@@ -227,7 +251,7 @@ function createD1FaithfulRepo() {
     },
   };
 
-  return { repo, events, verifiedTxs };
+  return { repo, events, verifiedTxs, relaySpent, relayTxCount };
 }
 
 describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Front 4 & Closure)", () => {
@@ -1038,5 +1062,248 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     const ipfsJson = (await okIpfs.json()) as { name?: string; image?: string };
     expect(ipfsJson.name).toBe("IPFS Collectible #9");
     expect(ipfsJson.image).toBe("https://cdn.example.org/art/9.png");
+  });
+
+  it("enforces Red Team Audit #2 defenses: relay budget refund, Soroban upgrade block, bootstrap dedup-before-budget, non-Soroban HashIdPreimage block, SVG XSS filter, and trusted CF-Connecting-IP", async () => {
+    // 1. clientKeyFromHeaders ignores spoofed X-Forwarded-For
+    expect(
+      clientKeyFromHeaders(new Headers({ "X-Forwarded-For": "1.2.3.4" })),
+    ).toBe("anonymous");
+    expect(
+      clientKeyFromHeaders(
+        new Headers({ "CF-Connecting-IP": "203.0.113.5", "X-Forwarded-For": "1.2.3.4" }),
+      ),
+    ).toBe("203.0.113.5");
+
+    const { repo, relaySpent, relayTxCount } = createD1FaithfulRepo();
+    const now = Math.floor(Date.now() / 1000);
+    const escrowId = TEST_ENV.CLAIM_ESCROW_CONTRACT_ID;
+    const relayEnv = {
+      ...TEST_ENV,
+      OZ_CHANNELS_API_URL: "https://channels.example.org/testnet",
+      RELAY_ALLOWED_CONTRACTS: escrowId,
+      RELAY_DAILY_BUDGET_STROOPS: "2000000",
+      RELAY_MAX_FEE_STROOPS: "1000000",
+    };
+
+    const kp = Keypair.random();
+    const acc = new Account(kp.publicKey(), "100");
+    const escrowContract = new Contract(escrowId);
+    const claimIdBytes = new Uint8Array(32).fill(5);
+    const sigBytes = new Uint8Array(64).fill(6);
+
+    const claimTx = new TransactionBuilder(acc, {
+      fee: BASE_FEE,
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        escrowContract.call(
+          "claim",
+          nativeToScVal(claimIdBytes, { type: "bytes" }),
+          new Address(kp.publicKey()).toScVal(),
+          nativeToScVal(sigBytes, { type: "bytes" }),
+        ),
+      )
+      .setTimeout(60)
+      .build();
+    claimTx.sign(kp);
+
+    const dangerousHostFn = xdr.HostFunction.hostFunctionTypeInvokeContract(
+      new xdr.InvokeContractArgs({
+        contractAddress: new Address(escrowId).toScAddress(),
+        functionName: "upgrade",
+        args: [],
+      }),
+    );
+
+    const intentId = "it_audit2_relay";
+    const intentSig = await signIntentToken(
+      { intentId, network: "testnet", telegramUserId: "999111", expiresAt: now + 300 },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId,
+      network: "testnet",
+      creatorTelegramUserId: "999111",
+      actionType: "claim",
+      payloadJson: JSON.stringify({ amount: "10", assetCode: "XLM" }),
+      hmacSig: intentSig,
+      status: "signed",
+      expiresAt: now + 300,
+      createdAt: now,
+    });
+
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url === relayEnv.OZ_CHANNELS_API_URL) {
+          return new Response("upstream error", { status: 500 });
+        }
+        if (url === "https://evil-svg.example.org/meta.json") {
+          const xssSvg = Buffer.from(
+            '<svg xmlns="http://www.w3.org/2000/svg"><script/xlink:href="https://evil.com/x.js"/></svg>',
+            "utf8",
+          ).toString("base64");
+          return new Response(
+            JSON.stringify({
+              name: "Evil Art",
+              image: `data:image/svg+xml;base64,${xssSvg}`,
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url.includes(`/accounts/${kp.publicKey()}`)) {
+          return new Response(JSON.stringify({ sequence: "1" }), { status: 200 });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    // 2. Upstream 500 from OZ Channels refunds relay_daily_usage
+    const failedRelay = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: claimTx.toXDR(),
+          intentAuth: { intentId, sig: intentSig },
+        }),
+      },
+      relayEnv,
+    );
+    expect(failedRelay.status).toBe(502);
+    const dayUtc = new Date(now * 1000).toISOString().slice(0, 10);
+    expect(relaySpent.get(dayUtc) ?? 0n).toBe(0n);
+    expect(relayTxCount.get(dayUtc) ?? 0).toBe(0);
+
+    // 3. mode="soroban" blocks dangerous functions like upgrade()
+    const dangerousSorobanRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "soroban",
+          funcXdrBase64: dangerousHostFn.toXDR("base64"),
+          intentAuth: { intentId, sig: intentSig },
+        }),
+      },
+      relayEnv,
+    );
+    expect(dangerousSorobanRes.status).toBe(403);
+
+    // 4. Repeated 409 /v1/relay/bootstrap requests do NOT consume daily bootstrap budget
+    const sponsorKp = Keypair.random();
+    const bootEnv = { ...TEST_ENV, RELAY_SPONSOR_SECRET: sponsorKp.secret() };
+    const initPairs: Array<[string, string]> = [
+      ["auth_date", String(now - 2)],
+      ["user", JSON.stringify({ id: 999222, username: "boot_tester" })],
+    ];
+    initPairs.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const initHash = await computeTelegramInitDataHash(
+      initPairs.map(([k, v]) => `${k}=${v}`).join("\n"),
+      TEST_ENV.TG_BOT_TOKEN,
+    );
+    const initParams = new URLSearchParams(Object.fromEntries(initPairs));
+    initParams.set("hash", initHash);
+    const tgAuthRes = await app.request(
+      "/v1/tg/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: initParams.toString() }),
+      },
+      TEST_ENV,
+    );
+    const { sessionToken } = (await tgAuthRes.json()) as { sessionToken: string };
+    const newBootKp = Keypair.random();
+    const makeBootSig = async (targetKp: Keypair, nonce: string) => {
+      const msg = `astrowallet-bootstrap:v1:testnet:${targetKp.publicKey()}:${now}:${nonce}`;
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(`Stellar Signed Message:\n${msg}`),
+      );
+      return Buffer.from(targetKp.sign(Buffer.from(digest))).toString("base64");
+    };
+
+    // Unfunded user fails at sponsor sequence lookup (Horizon returns 404 for sponsor) -> 502 + refund
+    const failBoot = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+        body: JSON.stringify({
+          address: newBootKp.publicKey(),
+          mode: "sponsored_reserve",
+          timestamp: now,
+          nonce: "boot_nonce_01",
+          signatureBase64: await makeBootSig(newBootKp, "boot_nonce_01"),
+        }),
+      },
+      bootEnv,
+    );
+    expect(failBoot.status).toBe(502);
+    expect(relaySpent.get(`bootstrap:${dayUtc}`) ?? 0n).toBe(0n);
+
+    // 5. /v1/connect/requests/:id/complete rejects non-Soroban HashIdPreimage (envelopeTypeOpId)
+    const opIdPreimage = xdr.HashIdPreimage.envelopeTypeOpId(
+      new xdr.HashIdPreimageOperationId({
+        sourceAccount: xdr.AccountId.publicKeyTypeEd25519(kp.rawPublicKey()),
+        seqNum: 1n,
+        opNum: 0,
+      }),
+    );
+    const opIdXdr = opIdPreimage.toXDR("base64");
+    const opIdHash = Array.from(
+      new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(opIdXdr))),
+      (b) => b.toString(16).padStart(2, "0"),
+    ).join("");
+    const createAuthEntry = await app.request(
+      "/v1/connect/requests",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "sign_auth_entry",
+          app: { name: "Evil", botUsername: "EvilTestBot" },
+          payload: { authEntryXdr: opIdXdr, entrySha256: opIdHash },
+        }),
+      },
+      TEST_ENV,
+    );
+    const createdReq = (await createAuthEntry.json()) as { requestId: string; sig: string };
+    const opDigest = new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new Uint8Array(opIdPreimage.toXDR())),
+    );
+    const opSig = Buffer.from(kp.sign(Buffer.from(opDigest))).toString("base64");
+    const rejectNonSorobanPreimage = await app.request(
+      `/v1/connect/requests/${createdReq.requestId}/complete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: createdReq.sig,
+          status: "approved",
+          address: kp.publicKey(),
+          signedAuthEntry: opSig,
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(rejectNonSorobanPreimage.status).toBe(400);
+
+    // 6. /v1/proxy/sep50-meta strips malicious SVG image from JSON metadata
+    const svgMetaRes = await app.request(
+      `/v1/proxy/sep50-meta?url=${encodeURIComponent("https://evil-svg.example.org/meta.json")}`,
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(svgMetaRes.status).toBe(200);
+    const svgMetaJson = (await svgMetaRes.json()) as { name?: string; image?: string };
+    expect(svgMetaJson.name).toBe("Evil Art");
+    expect(svgMetaJson.image).toBeUndefined();
   });
 });

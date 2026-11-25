@@ -320,29 +320,37 @@ export function SendSheet({
     if (/^web\+stellar:(pay|tx)\?/i.test(trimmed)) {
       try {
         const parsed = parseSep7Uri(trimmed);
-        if (parsed.destination) setDestination(parsed.destination);
-        if (parsed.amount) setAmount(parsed.amount);
+        let nextAssetKey: string | null = null;
         if (parsed.assetCode) {
           const isNativeParsed =
             parsed.assetCode.toUpperCase() === "XLM" && !parsed.assetIssuer;
           if (isNativeParsed) {
-            setSelectedAssetKey(assetKeyOf("XLM", undefined));
-          } else if (parsed.assetIssuer) {
+            nextAssetKey = assetKeyOf("XLM", undefined);
+          } else if (!parsed.assetIssuer) {
+            setError(
+              `SEP-0007 request for ${parsed.assetCode} is missing required asset_issuer.`,
+            );
+            return;
+          } else {
             const match = availableAssets.find(
               (b) =>
                 b.assetCode.toUpperCase() === parsed.assetCode?.toUpperCase() &&
                 b.assetIssuer === parsed.assetIssuer,
             );
-            if (match) {
-              setSelectedAssetKey(assetKeyOf(match.assetCode, match.assetIssuer));
-            } else {
+            if (!match) {
               setError(
                 `SEP-0007 request asks for ${parsed.assetCode} (${parsed.assetIssuer.slice(0, 6)}…${parsed.assetIssuer.slice(-4)}), which is not held in your wallet yet.`,
               );
               return;
             }
+            nextAssetKey = assetKeyOf(match.assetCode, match.assetIssuer);
           }
         }
+        if (nextAssetKey) {
+          setSelectedAssetKey(nextAssetKey);
+        }
+        if (parsed.destination) setDestination(parsed.destination);
+        if (parsed.amount) setAmount(parsed.amount);
         if (parsed.memo) {
           setMemoKind(mapSep7MemoKind(parsed.memoType));
           setMemoValue(parsed.memo);

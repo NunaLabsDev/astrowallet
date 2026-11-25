@@ -229,6 +229,66 @@ export async function fetchLiveAccountReserveInfo(
   return { funded: true, summary };
 }
 
+const CANONICAL_ISSUERS_MAINNET: Record<string, string> = {
+  USDC: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+  EURC: "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2",
+  USDT0: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q",
+  USDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+  SUSDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
+  AQUA: "GBNZILSTVQZ4R7IKQDGHYGY2QXL5QOFJYQMXPKWRRM5PAV7Y4M67AQUA",
+  LIBRE: "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY",
+  XLMNR: "GDKA6WVMFSA73BMEVKPO6WXSSWP4MPRBDJVSXLLSEVIEVH226L5RJ7NL",
+  SVR: "GAGORNGHVJP5X2QO2NNIIDXKLNHVWJWXC5S73EZNCHOALGFTB2V25YGF",
+};
+
+const CANONICAL_ISSUERS_TESTNET: Record<string, string> = {
+  USDC: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+};
+
+const PROTECTED_ASSET_CODES = new Set([
+  "USDC",
+  "EURC",
+  "PYUSD",
+  "AQUA",
+  "BTC",
+  "ETH",
+  "USDT",
+  "USDT0",
+  "USDE",
+  "SUSDE",
+]);
+
+function resolveCanonicalIssuer(assetCode: string, networkPassphrase?: string): string | undefined {
+  if (!networkPassphrase) return undefined;
+  const upper = assetCode.trim().toUpperCase();
+  if (/\bpublic\b/i.test(networkPassphrase)) {
+    return CANONICAL_ISSUERS_MAINNET[upper];
+  }
+  if (/\btest\b/i.test(networkPassphrase)) {
+    return CANONICAL_ISSUERS_TESTNET[upper];
+  }
+  return undefined;
+}
+
+function tryResolveExpectedSacId(
+  assetCode: string,
+  assetIssuer: string | undefined,
+  networkPassphrase: string,
+): string | undefined {
+  const upper = assetCode.trim().toUpperCase();
+  try {
+    if (upper === "XLM" && !assetIssuer) {
+      return resolveSwapAssetSacId("XLM", networkPassphrase);
+    }
+    const resolvedIssuer = assetIssuer ?? resolveCanonicalIssuer(upper, networkPassphrase);
+    if (!resolvedIssuer) return undefined;
+    const codeForAsset = upper === "XLMNR" ? "xLMNR" : assetCode.trim();
+    return resolveSwapAssetSacId(`${codeForAsset}:${resolvedIssuer}`, networkPassphrase);
+  } catch {
+    return undefined;
+  }
+}
+
 function decimalToStroops(amount: string): bigint | null {
   const cleaned = amount.trim();
   if (!/^\d+(?:\.\d{1,7})?$/.test(cleaned)) return null;
@@ -236,7 +296,11 @@ function decimalToStroops(amount: string): bigint | null {
   return BigInt(whole ?? "0") * 10_000_000n + BigInt(frac.padEnd(7, "0"));
 }
 
-function opMatchesExpectation(op: HorizonOpRecordJson, expected: ExpectedTxMatch): boolean {
+function opMatchesExpectation(
+  op: HorizonOpRecordJson,
+  expected: ExpectedTxMatch,
+  networkPassphrase?: string,
+): boolean {
   const wantedDest = expected.destination ? extractBaseDestination(expected.destination) : undefined;
   const wantedStroops = expected.amount ? decimalToStroops(expected.amount) : null;
   const wantedCode = (expected.assetCode ?? "XLM").toUpperCase();
@@ -272,10 +336,72 @@ function opMatchesExpectation(op: HorizonOpRecordJson, expected: ExpectedTxMatch
   } else {
     if (native) return false;
     if ((code ?? "").toUpperCase() !== wantedCode) return false;
-    if (expected.assetIssuer && issuer !== expected.assetIssuer) return false;
+    if (expected.assetIssuer) {
+      if (issuer !== expected.assetIssuer) return false;
+    } else {
+      const canonicalIssuer = resolveCanonicalIssuer(wantedCode, networkPassphrase);
+      if (canonicalIssuer) {
+        if (issuer !== canonicalIssuer) return false;
+      } else if (PROTECTED_ASSET_CODES.has(wantedCode)) {
+        return false;
+      }
+    }
   }
   if (wantedStroops !== null) {
     const got = amount ? decimalToStroops(amount) : null;
+    if (got === null || got < wantedStroops) return false;
+  }
+  return true;
+}
+
+function decodedOpMatchesExpectation(
+  op: ReturnType<typeof decodeTransactionEnvelope>["operations"][number],
+  expected: ExpectedTxMatch,
+  networkPassphrase?: string,
+): boolean {
+  const wantedDest = expected.destination ? extractBaseDestination(expected.destination) : undefined;
+  const wantedStroops = expected.amount ? decimalToStroops(expected.amount) : null;
+  const wantedCode = (expected.assetCode ?? "XLM").toUpperCase();
+  const isNativeWanted = wantedCode === "XLM" && !expected.assetIssuer;
+
+  let assetCode: string | undefined;
+  let assetIssuer: string | undefined;
+  if (op.type === "createAccount") {
+    assetCode = "XLM";
+  } else if (
+    op.type === "payment" ||
+    op.type === "pathPaymentStrictSend" ||
+    op.type === "pathPaymentStrictReceive"
+  ) {
+    const ref = op.destAsset ?? op.asset;
+    assetCode = ref?.code ?? "XLM";
+    assetIssuer = ref?.issuer;
+  } else {
+    return false;
+  }
+
+  const dest = op.destination ? extractBaseDestination(op.destination) : undefined;
+  if (wantedDest && dest !== wantedDest) return false;
+
+  const isNativeOp = assetCode.toUpperCase() === "XLM" && !assetIssuer;
+  if (isNativeWanted) {
+    if (!isNativeOp) return false;
+  } else {
+    if (isNativeOp) return false;
+    if (assetCode.toUpperCase() !== wantedCode) return false;
+    if (expected.assetIssuer) {
+      if (assetIssuer !== expected.assetIssuer) return false;
+    } else {
+      const canonicalIssuer = resolveCanonicalIssuer(wantedCode, networkPassphrase);
+      if (canonicalIssuer) {
+        if (assetIssuer !== canonicalIssuer) return false;
+      } else if (PROTECTED_ASSET_CODES.has(wantedCode)) {
+        return false;
+      }
+    }
+  }
+  if (wantedStroops !== null) {
+    const got = op.amount ? decimalToStroops(op.amount) : null;
     if (got === null || got < wantedStroops) return false;
   }
   return true;
@@ -421,14 +547,11 @@ export async function verifyTransactionConfirmed(
     const invokeSpec = expected.sorobanInvoke;
     const expectedTokenId =
       invokeSpec.expectedTokenContractId ??
-      (invokeSpec.expectedAssetCode
-        ? resolveSwapAssetSacId(
-            invokeSpec.expectedAssetIssuer
-              ? `${invokeSpec.expectedAssetCode}:${invokeSpec.expectedAssetIssuer}`
-              : invokeSpec.expectedAssetCode,
-            config.networkPassphrase,
-          )
-        : undefined);
+      tryResolveExpectedSacId(
+        invokeSpec.expectedAssetCode ?? "XLM",
+        invokeSpec.expectedAssetIssuer,
+        config.networkPassphrase,
+      );
     const expectedStroops = invokeSpec.expectedAmount
       ? decimalToStroops(invokeSpec.expectedAmount)
       : null;
@@ -442,7 +565,9 @@ export async function verifyTransactionConfirmed(
         const fnMatched =
           invokeSpec.functionName === "refund_expired"
             ? s.functionName === "refund_expired" || s.functionName === "refund_expired_to"
-            : s.functionName === invokeSpec.functionName;
+            : invokeSpec.functionName === "cancel_claim"
+              ? s.functionName === "cancel_claim" || s.functionName === "cancel_claim_to"
+              : s.functionName === invokeSpec.functionName;
         if (s.contractId !== invokeSpec.contractId || !fnMatched) {
           return false;
         }
@@ -453,7 +578,13 @@ export async function verifyTransactionConfirmed(
           return false;
         }
         if (invokeSpec.functionName === "create_claim") {
-          if (expectedTokenId && s.args[2] !== expectedTokenId) {
+          if (expected.expectedSourceAccount) {
+            const expectedSender = extractBaseDestination(expected.expectedSourceAccount);
+            if (s.args[1] !== expectedSender) {
+              return false;
+            }
+          }
+          if (!expectedTokenId || s.args[2] !== expectedTokenId) {
             return false;
           }
           if (expectedStroops !== null) {
@@ -608,30 +739,44 @@ export async function verifyTransactionConfirmed(
     }
   }
 
-  const checkOps =
-    horizonSourced &&
+  const wantsClassicDestinationCheck =
     expected?.destination !== undefined &&
     expected.amount !== undefined &&
     !expected.destination.startsWith("C");
-  if (checkOps && expected) {
-    const opsRes = await fetchFromHorizonFailover(
-      config.horizonUrls,
-      `/transactions/${encodeURIComponent(txHash)}/operations?limit=50`,
-      fetchFn,
-      { retryOn404: true },
-    );
-    if (opsRes.status === 404) {
-      return { confirmed: false, reason: "Transaction operations not found" };
-    }
-    const opsBody = (await opsRes.json()) as {
-      _embedded?: { records?: HorizonOpRecordJson[] };
-    };
-    const records = opsBody._embedded?.records ?? [];
-    if (!records.some((op) => opMatchesExpectation(op, expected))) {
-      return {
-        confirmed: false,
-        reason: "Transaction does not pay the destination, asset and amount required by this intent",
+  if (wantsClassicDestinationCheck && expected) {
+    if (horizonSourced) {
+      const opsRes = await fetchFromHorizonFailover(
+        config.horizonUrls,
+        `/transactions/${encodeURIComponent(txHash)}/operations?limit=50`,
+        fetchFn,
+        { retryOn404: true },
+      );
+      if (opsRes.status === 404) {
+        return { confirmed: false, reason: "Transaction operations not found" };
+      }
+      const opsBody = (await opsRes.json()) as {
+        _embedded?: { records?: HorizonOpRecordJson[] };
       };
+      const records = opsBody._embedded?.records ?? [];
+      if (!records.some((op) => opMatchesExpectation(op, expected, config.networkPassphrase))) {
+        return {
+          confirmed: false,
+          reason: "Transaction does not pay the destination, asset and amount required by this intent",
+        };
+      }
+    } else {
+      const decoded = getDecodedEnvelope();
+      if (
+        !decoded ||
+        !decoded.operations.some((op) =>
+          decodedOpMatchesExpectation(op, expected, config.networkPassphrase),
+        )
+      ) {
+        return {
+          confirmed: false,
+          reason: "Transaction does not pay the destination, asset and amount required by this intent",
+        };
+      }
     }
   }
 

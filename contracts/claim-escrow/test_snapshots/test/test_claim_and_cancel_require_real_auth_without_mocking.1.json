@@ -302,6 +302,18 @@
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "Initialized"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "bool": true
+                        }
                       }
                     ]
                   }
@@ -310,7 +322,7 @@
             },
             "ext": "v0"
           },
-          4095
+          864000
         ]
       ],
       [
@@ -443,7 +455,7 @@
             },
             "ext": "v0"
           },
-          4095
+          864000
         ]
       ]
     ]

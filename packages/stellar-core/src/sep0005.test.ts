@@ -97,11 +97,35 @@ describe("SEP-0005 BIP-39 / SLIP-0010 Ed25519 derivation", () => {
         }),
       }),
     );
-    const signed = await signSorobanAuthEntry(kp, preimage.toXDR("base64"));
+    const signed = await signSorobanAuthEntry(kp, preimage.toXDR("base64"), {
+      networkPassphrase: "Test SDF Network ; September 2015",
+    });
     expect(signed.kind).toBe("hash_id_preimage");
     expect(signed.signerAddress).toBe(account.publicKey);
     const sigBytes = Uint8Array.from(atob(signed.signedAuthEntry), (c) => c.charCodeAt(0));
     expect(kp.verify(Buffer.from(sha256(preimage.toXDR())), Buffer.from(sigBytes))).toBe(true);
+
+    // Reject cross-network HashIdPreimage
+    await expect(
+      signSorobanAuthEntry(kp, preimage.toXDR("base64"), {
+        networkPassphrase: "Public Global Stellar Network ; September 2015",
+      }),
+    ).rejects.toThrow(/networkId mismatch/i);
+
+    // Reject non-Soroban HashIdPreimage (e.g. envelopeTypeTx)
+    const txPreimage = xdr.HashIdPreimage.envelopeTypeOpId(
+      new xdr.HashIdPreimageOperationId({
+        sourceAccount: xdr.AccountId.publicKeyTypeEd25519(kp.rawPublicKey()),
+        seqNum: 1n,
+        opNum: 0,
+      }),
+    );
+    await expect(
+      signSorobanAuthEntry(kp, txPreimage.toXDR("base64"), {
+        networkPassphrase: "Test SDF Network ; September 2015",
+      }),
+    ).rejects.toThrow(/non-Soroban HashIdPreimage/i);
+
     account.zeroize();
   });
 });

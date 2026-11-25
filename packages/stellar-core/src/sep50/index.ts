@@ -42,12 +42,58 @@ function readonlySimAddress(): string {
   return StrKey.encodeEd25519PublicKey(new Uint8Array(32));
 }
 
+const BLOCKED_IMAGE_HOST_SUFFIXES = [
+  ".local",
+  ".internal",
+  ".localhost",
+  ".arpa",
+  ".home",
+  ".lan",
+  ".corp",
+  ".test",
+  ".invalid",
+];
+
+function isSafePublicImageHttpsUrl(raw: string): boolean {
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "https:" || parsed.port || parsed.username || parsed.password) {
+      return false;
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (
+      !host ||
+      host === "localhost" ||
+      BLOCKED_IMAGE_HOST_SUFFIXES.some((s) => host.endsWith(s)) ||
+      /^\d+(?:\.\d+){3}$/.test(host) ||
+      host.includes(":")
+    ) {
+      return false;
+    }
+    return host.includes(".");
+  } catch {
+    return false;
+  }
+}
+
+const SVG_XSS_PATTERN =
+  /(?:<\s*\/?\s*(?:script|foreignobject|iframe|object|embed|animate|animatemotion|animatetransform|set|meta|link|style|a|use|feimage|image|handler|listener)(?=[\s/>]|$)|on[a-z0-9_-]+\s*=|javascript:|vbscript:|data:\s*(?:text|application)\/|&#|<!entity|<!\[cdata\[|@import|url\(\s*["']?\s*(?!#)|(?:xlink:)?href\s*=\s*["']?\s*(?!#))/i;
+
+function decodeBase64Bytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
 function normalizeCollectibleImageUrl(raw: string | undefined): string | undefined {
   if (!raw || typeof raw !== "string") return undefined;
   const trimmed = raw.trim();
   if (!trimmed) return undefined;
   if (trimmed.startsWith("https://")) {
-    return trimmed;
+    return isSafePublicImageHttpsUrl(trimmed) ? trimmed : undefined;
   }
   if (trimmed.startsWith("ipfs://")) {
     const cidPath = trimmed.slice(7).replace(/^ipfs\//i, "").replace(/^\/+/, "");
@@ -56,14 +102,23 @@ function normalizeCollectibleImageUrl(raw: string | undefined): string | undefin
   if (
     /^data:image\/(svg\+xml|png|jpeg|webp);(?:utf8|charset=utf-8|base64),/i.test(trimmed)
   ) {
-    // Strip/reject script tags & inline event handlers inside SVG data URIs (raw or base64)
+    // Strip/reject script tags, style/use/external refs & UTF-16 BOM/null-byte evasion inside SVG data URIs
     if (/data:image\/svg\+xml/i.test(trimmed)) {
       let decodedSvg = trimmed;
       const b64Marker = ";base64,";
       const idx = trimmed.toLowerCase().indexOf(b64Marker);
       if (idx !== -1) {
         try {
-          decodedSvg = decodeBase64ToUtf8(trimmed.slice(idx + b64Marker.length));
+          const rawBytes = decodeBase64Bytes(trimmed.slice(idx + b64Marker.length));
+          if (
+            (rawBytes.length >= 2 &&
+              ((rawBytes[0] === 0xfe && rawBytes[1] === 0xff) ||
+                (rawBytes[0] === 0xff && rawBytes[1] === 0xfe))) ||
+            rawBytes.includes(0)
+          ) {
+            return undefined;
+          }
+          decodedSvg = new TextDecoder().decode(rawBytes);
         } catch {
           return undefined;
         }
@@ -73,12 +128,11 @@ function normalizeCollectibleImageUrl(raw: string | undefined): string | undefin
         } catch {
           decodedSvg = trimmed;
         }
+        if (decodedSvg.includes("\0")) {
+          return undefined;
+        }
       }
-      if (
-        /<script[\s>]|<foreignobject[\s>]|<iframe[\s>]|<object[\s>]|<embed[\s>]|<animate[\s>]|<set[\s>]|<meta[\s>]|on[a-z]+\s*=|javascript:|vbscript:|data:text\/html|data:application\/|&#x|&#\d|(?:xlink:)?href\s*=\s*["']?\s*(?:https?:|\/\/|javascript:|vbscript:|data:)/i.test(
-          decodedSvg,
-        )
-      ) {
+      if (SVG_XSS_PATTERN.test(decodedSvg)) {
         return undefined;
       }
     }

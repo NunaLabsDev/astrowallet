@@ -161,6 +161,10 @@ export interface ServerRepository {
     feeStroops: string;
     dailyBudgetStroops: string;
   }): Promise<{ allowed: boolean; spentStroops: string }>;
+  refundRelayBudget?(input: {
+    dayUtc: string;
+    feeStroops: string;
+  }): Promise<void>;
   claimTelegramUpdateId(updateId: number, nowSec?: number): Promise<boolean>;
   purgeExpiredRecords(nowSec: number): Promise<void>;
 
@@ -958,6 +962,22 @@ export function createD1Repository(db: D1Database): ServerRepository {
         allowed: false,
         spentStroops: current?.spent_stroops ?? dailyBudgetStroops,
       };
+    },
+
+    async refundRelayBudget({ dayUtc, feeStroops }) {
+      if (!/^\d+$/.test(feeStroops)) return;
+      const feeInt = Number(BigInt(feeStroops));
+      if (!Number.isSafeInteger(feeInt) || feeInt <= 0) return;
+
+      await db
+        .prepare(
+          `UPDATE relay_daily_usage
+           SET spent_stroops = CAST(MAX(0, CAST(spent_stroops AS INTEGER) - ?) AS TEXT),
+               tx_count = MAX(0, tx_count - 1)
+           WHERE day_utc = ?`,
+        )
+        .bind(feeInt, dayUtc)
+        .run();
     },
 
     async claimTelegramUpdateId(updateId, nowSec) {

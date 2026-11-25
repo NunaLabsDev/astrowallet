@@ -19,9 +19,6 @@ export function clientKeyFromHeaders(headers: {
 }): string {
   const cf = headers.get("CF-Connecting-IP");
   if (cf && cf.trim()) return cf.trim();
-  const xff = headers.get("X-Forwarded-For");
-  const first = xff?.split(",")[0]?.trim();
-  if (first) return first;
   return "anonymous";
 }
 

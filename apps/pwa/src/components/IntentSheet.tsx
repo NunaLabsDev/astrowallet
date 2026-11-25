@@ -550,10 +550,16 @@ export function IntentSheet({
     try {
       let txHash: string;
       if (intent.payload.unsignedXdr) {
-        const res = await signAndSubmitRawXdrWithShield(intent.payload.unsignedXdr, true, {
-          intentId: route.intentId,
-          sig: route.sig,
-        });
+        const allowWarningFlag =
+          destScanReport?.verdict === "warning" ? warningAcknowledged : false;
+        const res = await signAndSubmitRawXdrWithShield(
+          intent.payload.unsignedXdr,
+          allowWarningFlag,
+          {
+            intentId: route.intentId,
+            sig: route.sig,
+          },
+        );
         txHash = res.hash;
       } else {
         const { fromAsset, toAsset, amount } = intent.payload;
@@ -842,10 +848,29 @@ export function IntentSheet({
   useEffect(() => {
     if (!completedMsg || autoReturnCancelled || shareClaimUrl) return undefined;
     if (typeof window !== "undefined" && window.opener && !window.opener.closed) {
+      const allowedOrigins = new Set<string>();
+      for (const candidate of [
+        config.pwaOrigin,
+        config.astrodexApiBaseUrl,
+        config.altNetworkProfile?.astrodexApiBaseUrl,
+      ]) {
+        if (!candidate) continue;
+        try {
+          const parsed = new URL(candidate);
+          if (parsed.protocol === "https:") {
+            allowedOrigins.add(parsed.origin);
+          }
+        } catch {
+          // Ignore malformed configured URL
+        }
+      }
       let targetOrigin: string | null = null;
       try {
         if (document.referrer) {
-          targetOrigin = new URL(document.referrer).origin;
+          const refOrigin = new URL(document.referrer).origin;
+          if (allowedOrigins.has(refOrigin)) {
+            targetOrigin = refOrigin;
+          }
         }
       } catch {
         targetOrigin = null;
@@ -876,7 +901,16 @@ export function IntentSheet({
       return () => window.clearTimeout(timer);
     }
     return undefined;
-  }, [completedMsg, autoReturnCancelled, shareClaimUrl, route.intentId, boomerangReturn]);
+  }, [
+    completedMsg,
+    autoReturnCancelled,
+    shareClaimUrl,
+    route.intentId,
+    boomerangReturn,
+    config.pwaOrigin,
+    config.astrodexApiBaseUrl,
+    config.altNetworkProfile?.astrodexApiBaseUrl,
+  ]);
 
   const handleCopyClaimUrl = async () => {
     if (!shareClaimUrl) return;

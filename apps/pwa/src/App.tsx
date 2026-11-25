@@ -347,6 +347,27 @@ function RevealSeedModalContent({ onDone }: { onDone: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    const clearRevealed = () => {
+      if (document.hidden) {
+        setRevealed(null);
+        setUnblurred(false);
+      }
+    };
+    const clearOnHide = () => {
+      setRevealed(null);
+      setUnblurred(false);
+    };
+    document.addEventListener("visibilitychange", clearRevealed);
+    window.addEventListener("pagehide", clearOnHide);
+    return () => {
+      document.removeEventListener("visibilitychange", clearRevealed);
+      window.removeEventListener("pagehide", clearOnHide);
+      setRevealed(null);
+      setUnblurred(false);
+    };
+  }, []);
+
   const handleReveal = async (e: FormEvent) => {
     e.preventDefault();
     if (!pin) return;
@@ -387,6 +408,7 @@ function RevealSeedModalContent({ onDone }: { onDone: () => void }) {
           <input
             id="reveal-seed-pin"
             type="password"
+            autoComplete="off"
             className="aw-input"
             placeholder="Enter Vault PIN"
             value={pin}

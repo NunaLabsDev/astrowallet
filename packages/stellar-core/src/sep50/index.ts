@@ -229,7 +229,12 @@ export function parseSep50TokenUri(
   }
 
   const soulboundAttr = traits.find((t) => t.traitType.toLowerCase() === "soulbound");
-  const soulbound = soulboundAttr ? soulboundAttr.value.toLowerCase() === "true" : undefined;
+  const soulbound =
+    typeof parsed?.soulbound === "boolean"
+      ? parsed.soulbound
+      : soulboundAttr
+        ? soulboundAttr.value.toLowerCase() === "true"
+        : undefined;
 
   return {
     contractId,
@@ -362,18 +367,18 @@ export async function fetchSep50Holdings(input: {
               method: "token_uri",
               args: [nativeToScVal(tokenId, { type: "u32" })],
             });
-            const item = parseSep50TokenUri(
+            let resolvedItem = parseSep50TokenUri(
               input.contractId,
               tokenId,
               typeof rawUri === "string" ? rawUri : "",
             );
-            if (item.metadataUrl && !item.image && !item.description) {
+            if (resolvedItem.metadataUrl && !resolvedItem.image && !resolvedItem.description) {
               try {
                 const fetchImpl = input.fetchFn ?? fetch;
                 const cleanApiBase = input.apiBaseUrl?.trim().replace(/\/+$/, "");
                 let metaRes: Response | null = null;
                 if (cleanApiBase) {
-                  const proxyUrl = `${cleanApiBase}/v1/proxy/sep50-meta?url=${encodeURIComponent(item.metadataUrl)}`;
+                  const proxyUrl = `${cleanApiBase}/v1/proxy/sep50-meta?url=${encodeURIComponent(resolvedItem.metadataUrl)}`;
                   metaRes = await fetchImpl(proxyUrl, {
                     headers: {
                       Accept: "application/json",
@@ -383,16 +388,16 @@ export async function fetchSep50Holdings(input: {
                   });
                   if (
                     metaRes.status === 404 &&
-                    (item.metadataUrl.startsWith("https://ipfs.io/") ||
-                      item.metadataUrl.startsWith("https://dweb.link/"))
+                    (resolvedItem.metadataUrl.startsWith("https://ipfs.io/") ||
+                      resolvedItem.metadataUrl.startsWith("https://dweb.link/"))
                   ) {
-                    metaRes = await fetchImpl(item.metadataUrl, {
+                    metaRes = await fetchImpl(resolvedItem.metadataUrl, {
                       headers: { Accept: "application/json" },
                       signal: AbortSignal.timeout(5000),
                     });
                   }
                 } else {
-                  metaRes = await fetchImpl(item.metadataUrl, {
+                  metaRes = await fetchImpl(resolvedItem.metadataUrl, {
                     headers: { Accept: "application/json" },
                     signal: AbortSignal.timeout(5000),
                   });
@@ -404,15 +409,15 @@ export async function fetchSep50Holdings(input: {
                     const hydratedName =
                       typeof rec.name === "string" && rec.name.trim()
                         ? rec.name.trim()
-                        : item.name;
+                        : resolvedItem.name;
                     const hydratedDesc =
                       typeof rec.description === "string" && rec.description.trim()
                         ? rec.description.trim()
-                        : item.description;
+                        : resolvedItem.description;
                     const hydratedImage = normalizeCollectibleImageUrl(
-                      typeof rec.image === "string" ? rec.image : item.image,
+                      typeof rec.image === "string" ? rec.image : resolvedItem.image,
                     );
-                    const hydratedTraits: Sep50Trait[] = [...item.traits];
+                    const hydratedTraits: Sep50Trait[] = [...resolvedItem.traits];
                     if (hydratedTraits.length === 0 && Array.isArray(rec.attributes)) {
                       for (const rawAttr of rec.attributes) {
                         if (!rawAttr || typeof rawAttr !== "object") continue;
@@ -433,15 +438,18 @@ export async function fetchSep50Holdings(input: {
                     const sbAttr = hydratedTraits.find(
                       (t) => t.traitType.toLowerCase() === "soulbound",
                     );
-                    return {
-                      ...item,
+                    resolvedItem = {
+                      ...resolvedItem,
                       name: hydratedName,
                       description: hydratedDesc,
                       image: hydratedImage,
                       traits: hydratedTraits,
-                      soulbound: sbAttr
-                        ? sbAttr.value.toLowerCase() === "true"
-                        : item.soulbound,
+                      soulbound:
+                        typeof rec.soulbound === "boolean"
+                          ? rec.soulbound
+                          : sbAttr
+                            ? sbAttr.value.toLowerCase() === "true"
+                            : resolvedItem.soulbound,
                     };
                   }
                 }
@@ -449,7 +457,26 @@ export async function fetchSep50Holdings(input: {
                 // Non-fatal if off-chain NFT metadata URL is unreachable
               }
             }
-            return item;
+            if (resolvedItem.soulbound === undefined) {
+              try {
+                const sorobitState = await simulateSep50Read({
+                  server,
+                  contractId: input.contractId,
+                  networkPassphrase: input.networkPassphrase,
+                  method: "get_sorobit",
+                  args: [nativeToScVal(tokenId, { type: "u32" })],
+                });
+                if (sorobitState && typeof sorobitState === "object" && !Array.isArray(sorobitState)) {
+                  const rec = sorobitState as Record<string, unknown>;
+                  if (typeof rec.soulbound === "boolean") {
+                    resolvedItem = { ...resolvedItem, soulbound: rec.soulbound };
+                  }
+                }
+              } catch {
+                // Standard SEP-50 contracts without get_sorobit omit this enrichment
+              }
+            }
+            return resolvedItem;
           } catch {
             return null;
           }
@@ -528,6 +555,11 @@ export async function buildSep50TransferXdr(input: {
         throw new Error("SEP-50 contract entry requires state restore before transfer");
       }
       if (rpc.Api.isSimulationError(sim)) {
+        if (/Error\(Contract,\s*#302\)|soulbound/i.test(sim.error)) {
+          throw new Error(
+            `SEP-50 token #${input.tokenId} is soulbound on-chain and cannot be transferred (#302)`,
+          );
+        }
         throw new Error(`SEP-50 transfer simulation failed: ${sim.error}`);
       }
       const assembled = rpc.assembleTransaction(tx, sim).build();

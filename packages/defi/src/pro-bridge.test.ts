@@ -1,4 +1,4 @@
-import { StrKey, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { Asset, Networks, StrKey, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it, vi } from "vitest";
 import {
   buildCctpDepositForBurnXdr,
@@ -8,6 +8,7 @@ import {
   buildSep40AssetScVal,
   contractStrkeyToBytes32Hex,
   evmAddressToBytes32,
+  fetchSep40OraclePrices,
   formatSep40FixedPrice,
   parseSep40PriceDataScVal,
   quoteLayerZeroOftBridge,
@@ -102,6 +103,9 @@ describe("SEP-40 Oracle ScVal helpers & Pro Bridge builders (CCTP V2 + LayerZero
     const lowerAsset = buildSep40AssetScVal({ kind: "other", symbol: "btc" });
     expect(scValToNative(lowerAsset)).toEqual(["Other", "BTC"]);
 
+    const mixedCaseAsset = buildSep40AssetScVal({ kind: "other", symbol: "earnUSDC_PPS" });
+    expect(scValToNative(mixedCaseAsset)).toEqual(["Other", "earnUSDC_PPS"]);
+
     const futurePrice = xdr.ScVal.scvMap([
       new xdr.ScMapEntry({
         key: xdr.ScVal.scvSymbol("price"),
@@ -192,6 +196,103 @@ describe("SEP-40 Oracle ScVal helpers & Pro Bridge builders (CCTP V2 + LayerZero
       ).rejects.toThrow(/not a valid LayerZero V2 OFT deployment/i);
     } finally {
       fetchSpy.mockRestore();
+    }
+  });
+
+  it("auto-resolves canonical Mainnet Asset::Stellar SACs in fetchSep40OraclePrices and preserves mixed-case Asset::Other", async () => {
+    const { TransactionBuilder } = await import("@stellar/stellar-sdk");
+    const oracleId = StrKey.encodeContract(new Uint8Array(32).fill(11)) as `C${string}`;
+    const expectedXlmSac = Asset.native().contractId(Networks.PUBLIC);
+    const expectedUsdcSac = new Asset(
+      "USDC",
+      "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    ).contractId(Networks.PUBLIC);
+    const seenArgs: Array<{ kind: string; id: string }> = [];
+    const now = Math.floor(Date.now() / 1000);
+
+    const rpcSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const rawBody = init?.body
+        ? String(init.body)
+        : input instanceof Request
+          ? await input.clone().text()
+          : "{}";
+      const body = JSON.parse(rawBody) as {
+        id?: number;
+        method?: string;
+        params?: { transaction?: string };
+      };
+      if (body.method === "simulateTransaction" && body.params?.transaction) {
+        const tx = TransactionBuilder.fromXDR(body.params.transaction, Networks.PUBLIC);
+        const op = tx.operations[0] as unknown as {
+          func?: {
+            invokeContract?: { functionName?: { toString(): string }; args?: xdr.ScVal[] };
+          };
+        };
+        const invoke = op.func?.invokeContract;
+        const fn = invoke?.functionName?.toString();
+        if (fn === "decimals") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: { latestLedger: 1000, results: [{ xdr: nativeToScVal(8, { type: "u32" }).toXDR("base64") }] },
+            }),
+            { status: 200 },
+          );
+        }
+        if (fn === "lastprice") {
+          const desc = scValToNative(invoke!.args![0]!) as [string, string];
+          seenArgs.push({ kind: desc[0], id: desc[1] });
+          const matched =
+            (desc[0] === "Stellar" && (desc[1] === expectedXlmSac || desc[1] === expectedUsdcSac)) ||
+            (desc[0] === "Other" && desc[1] === "earnUSDC_PPS");
+          const retval = matched
+            ? xdr.ScVal.scvMap([
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("price"),
+                  val: nativeToScVal(desc[1] === "earnUSDC_PPS" ? 102_000_000n : 50_000_000n, {
+                    type: "i128",
+                  }),
+                }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("timestamp"),
+                  val: nativeToScVal(BigInt(now - 20), { type: "u64" }),
+                }),
+              ])
+            : xdr.ScVal.scvVoid();
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: { latestLedger: 1001, results: [{ xdr: retval.toXDR("base64") }] },
+            }),
+            { status: 200 },
+          );
+        }
+      }
+      return new Response("{}", { status: 404 });
+    });
+
+    try {
+      const snap = await fetchSep40OraclePrices({
+        oracleContractId: oracleId,
+        rpcUrls: ["https://rpc-test.example"],
+        networkPassphrase: Networks.PUBLIC,
+        assets: [
+          { key: "XLM", symbol: "XLM" },
+          { key: "USDC", symbol: "USDC" },
+          { key: "earnUSDC_PPS", symbol: "earnUSDC_PPS" },
+        ],
+      });
+      expect(snap.prices.XLM?.sourceKind).toBe("stellar");
+      expect(snap.prices.USDC?.sourceKind).toBe("stellar");
+      expect(snap.prices.earnUSDC_PPS?.sourceKind).toBe("other");
+      expect(snap.prices.earnUSDC_PPS?.priceUsd).toBeCloseTo(1.02, 4);
+      expect(seenArgs).toContainEqual({ kind: "Stellar", id: expectedXlmSac });
+      expect(seenArgs).toContainEqual({ kind: "Stellar", id: expectedUsdcSac });
+      expect(seenArgs).toContainEqual({ kind: "Other", id: "earnUSDC_PPS" });
+    } finally {
+      rpcSpy.mockRestore();
     }
   });
 });

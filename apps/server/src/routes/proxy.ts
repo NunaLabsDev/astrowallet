@@ -1554,19 +1554,32 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
     }
 
     const rawAssets = (c.req.query("assets") ?? "XLM,USDC,USDT0,USDE,SUSDE,EURC,BTC,ETH").trim();
-    const CANONICAL_ORACLE_ISSUERS: Record<"mainnet" | "testnet", Record<string, string>> = {
+    const CANONICAL_ORACLE_ASSETS: Record<
+      "mainnet" | "testnet",
+      Record<string, { code: string; issuer: string }>
+    > = {
       mainnet: {
-        USDC: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
-        EURC: "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2",
-        USDT0: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q",
-        USDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
-        SUSDE: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47",
-        LIBRE: "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY",
-        XLMNR: "GDKA6WVMFSA73BMEVKPO6WXSSWP4MPRBDJVSXLLSEVIEVH226L5RJ7NL",
-        SVR: "GAGORNGHVJP5X2QO2NNIIDXKLNHVWJWXC5S73EZNCHOALGFTB2V25YGF",
+        USDC: { code: "USDC", issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
+        EURC: { code: "EURC", issuer: "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2" },
+        USDT0: { code: "USDT0", issuer: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q" },
+        USDT: { code: "USDT0", issuer: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q" },
+        PYUSD: { code: "PYUSD", issuer: "GDQE7IXJ4HUHV6RQHIUPRJSEZE4DRS5WY577O2FY6YQ5LVWZ7JZTU2V5" },
+        USDY: { code: "USDY", issuer: "GAJMPX5NBOG6TQFPQGRABJEEB2YE7RFRLUKJDZAZGAD5GFX4J7TADAZ6" },
+        USDE: { code: "USDE", issuer: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47" },
+        SUSDE: { code: "SUSDE", issuer: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47" },
+        CETES: { code: "CETES", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+        USTRY: { code: "USTRY", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+        TESOURO: { code: "TESOURO", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+        KTB: { code: "KTB", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+        EUROB: { code: "EUROB", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+        GILTS: { code: "GILTS", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+        MXNE: { code: "MXNe", issuer: "GCQCNWT22JDLENQAVIE6DRJGHWAQ6EX2H5ABGPV55EJUPPZM5UA7KHZR" },
+        LIBRE: { code: "LIBRE", issuer: "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY" },
+        XLMNR: { code: "xLMNR", issuer: "GDKA6WVMFSA73BMEVKPO6WXSSWP4MPRBDJVSXLLSEVIEVH226L5RJ7NL" },
+        SVR: { code: "SVR", issuer: "GAGORNGHVJP5X2QO2NNIIDXKLNHVWJWXC5S73EZNCHOALGFTB2V25YGF" },
       },
       testnet: {
-        USDC: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+        USDC: { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
       },
     };
     const parsedAssets: Sep40PriceRequestAsset[] = [];
@@ -1575,8 +1588,11 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       const clean = part.trim();
       if (!clean) continue;
       const [symPart, contractPart] = clean.split(":");
-      const symbol = (symPart ?? "").trim().slice(0, 16);
-      const upperSym = symbol.toUpperCase();
+      const rawSymbol = (symPart ?? "").trim().slice(0, 32);
+      const upperSym = rawSymbol.toUpperCase();
+      const isMixedCase =
+        rawSymbol !== upperSym && rawSymbol !== rawSymbol.toLowerCase();
+      const normalizedSymbol = isMixedCase ? rawSymbol : upperSym;
       let contractId =
         contractPart && /^C[A-Z2-7]{55}$/.test(contractPart.trim())
           ? contractPart.trim()
@@ -1586,22 +1602,23 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
           if (upperSym === "XLM" || upperSym === "NATIVE") {
             contractId = Asset.native().contractId(config.networkPassphrase);
           } else {
-            const issuer = CANONICAL_ORACLE_ISSUERS[config.network][upperSym];
-            if (issuer) {
-              const assetCode = upperSym === "XLMNR" ? "xLMNR" : upperSym;
-              contractId = new Asset(assetCode, issuer).contractId(config.networkPassphrase);
+            const canonical = CANONICAL_ORACLE_ASSETS[config.network][upperSym];
+            if (canonical) {
+              contractId = new Asset(canonical.code, canonical.issuer).contractId(
+                config.networkPassphrase,
+              );
             }
           }
         } catch {
           // Leave contractId undefined and fall back to Asset::Other(symbol)
         }
       }
-      const key = symbol ? upperSym : contractId;
+      const key = normalizedSymbol || contractId;
       if (!key || seenKeys.has(key)) continue;
       seenKeys.add(key);
       parsedAssets.push({
         key,
-        symbol: upperSym || undefined,
+        symbol: normalizedSymbol || undefined,
         contractId,
       });
     }

@@ -1,6 +1,6 @@
-import { TransactionBuilder, nativeToScVal, type xdr } from "@stellar/stellar-sdk";
+import { Keypair, TransactionBuilder, nativeToScVal, xdr } from "@stellar/stellar-sdk";
 import { describe, expect, it, vi } from "vitest";
-import { fetchSep50Holdings, parseSep50TokenUri } from "./sep50/index.js";
+import { buildSep50TransferXdr, fetchSep50Holdings, parseSep50TokenUri } from "./sep50/index.js";
 
 const SAMPLE_CONTRACT = "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM";
 
@@ -192,6 +192,120 @@ describe("SEP-50 Soroban NFT token_uri parser", () => {
       expect(snap.items[0]?.soulbound).toBe(true);
       expect(seenNetworkHeaders).toEqual(["mainnet"]);
       expect(requestedUrls.some((u) => u.startsWith("https://pinata.example.com"))).toBe(false);
+    } finally {
+      rpcSpy.mockRestore();
+    }
+  });
+
+  it("enriches Sorobits soulbound flag via get_sorobit(token_id) and maps #302 transfer errors", async () => {
+    const owner = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+    const dest = "GDQJTJJ2ZABBNEAJ2CF6EQB6ATR2P2J3336TWQG57SE3QMKB3DRKAP2J";
+    const passphrase = "Test SDF Network ; September 2015";
+    const safeSvg = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg'></svg>";
+
+    const rpcSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const rawBody = init?.body
+        ? String(init.body)
+        : input instanceof Request
+          ? await input.clone().text()
+          : "{}";
+      const body = JSON.parse(rawBody) as {
+        id?: number;
+        method?: string;
+        params?: { transaction?: string; keys?: string[] };
+      };
+      if (body.method === "getLedgerEntries") {
+        const accountXdr = xdr.LedgerEntryData.account(
+          new xdr.AccountEntry({
+            accountId: Keypair.fromPublicKey(owner).xdrAccountId(),
+            balance: 100_000_000n,
+            seqNum: 10n,
+            numSubEntries: 0,
+            inflationDest: null,
+            flags: 0,
+            homeDomain: "",
+            thresholds: Buffer.from([1, 0, 0, 0]),
+            signers: [],
+            ext: xdr.AccountEntryExt.v0(),
+          }),
+        ).toXDR("base64");
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              latestLedger: 123,
+              entries: [{ key: body.params?.keys?.[0], xdr: accountXdr, lastModifiedLedgerSeq: 123 }],
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      if (body.method === "simulateTransaction" && body.params?.transaction) {
+        const tx = TransactionBuilder.fromXDR(body.params.transaction, passphrase);
+        const op = tx.operations[0] as unknown as { func?: xdr.HostFunction };
+        const fnName = (
+          op?.func as unknown as { invokeContract?: { functionName?: { toString(): string } } }
+        )?.invokeContract?.functionName?.toString();
+        if (fnName === "transfer") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: body.id,
+              result: { latestLedger: 123, error: "HostError: Error(Contract, #302)" },
+            }),
+            { status: 200 },
+          );
+        }
+        let retval: xdr.ScVal = nativeToScVal(null, { type: "void" });
+        if (fnName === "balance") retval = nativeToScVal(1, { type: "u32" });
+        else if (fnName === "name") retval = nativeToScVal("Sorobits", { type: "string" });
+        else if (fnName === "symbol") retval = nativeToScVal("SBIT", { type: "string" });
+        else if (fnName === "get_owner_token_id") retval = nativeToScVal(0, { type: "u32" });
+        else if (fnName === "token_uri") {
+          retval = nativeToScVal(
+            `data:application/json;utf8,${JSON.stringify({ name: "Sorobit #0", image: safeSvg, attributes: [] })}`,
+            { type: "string" },
+          );
+        } else if (fnName === "get_sorobit") {
+          retval = xdr.ScVal.scvMap([
+            new xdr.ScMapEntry({
+              key: xdr.ScVal.scvSymbol("soulbound"),
+              val: nativeToScVal(true, { type: "bool" }),
+            }),
+          ]);
+        }
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { latestLedger: 123, results: [{ xdr: retval.toXDR("base64") }] },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("Not Found", { status: 404 });
+    });
+
+    try {
+      const snap = await fetchSep50Holdings({
+        contractId: SAMPLE_CONTRACT,
+        ownerAddress: owner,
+        rpcUrls: ["https://rpc.example.org"],
+        networkPassphrase: passphrase,
+      });
+      expect(snap.items[0]?.soulbound).toBe(true);
+
+      await expect(
+        buildSep50TransferXdr({
+          contractId: SAMPLE_CONTRACT,
+          from: owner,
+          to: dest,
+          tokenId: 0,
+          rpcUrls: ["https://rpc.example.org"],
+          networkPassphrase: passphrase,
+        }),
+      ).rejects.toThrow(/soulbound on-chain/i);
     } finally {
       rpcSpy.mockRestore();
     }

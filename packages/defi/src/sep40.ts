@@ -1,8 +1,10 @@
 import {
   Account,
   Address,
+  Asset,
   BASE_FEE,
   Contract,
+  Networks,
   StrKey,
   TransactionBuilder,
   rpc,
@@ -40,6 +42,62 @@ export interface Sep40OracleSnapshot {
   prices: Record<string, Sep40PriceQuote>;
 }
 
+const CANONICAL_SEP40_ASSETS_PUBLIC: Record<string, { code: string; issuer: string }> = {
+  USDC: { code: "USDC", issuer: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN" },
+  EURC: { code: "EURC", issuer: "GDHU6WRG4IEQXM5NZ4BMPKOXHW76MZM4Y2IEMFDVXBSDP6SJY4ITNPP2" },
+  USDT0: { code: "USDT0", issuer: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q" },
+  USDT: { code: "USDT0", issuer: "GATISXX6BZ6NC7IKQBY37CJD4SOZL3CYZJWXEDG6JVIY4WBS6KXJHN6Q" },
+  PYUSD: { code: "PYUSD", issuer: "GDQE7IXJ4HUHV6RQHIUPRJSEZE4DRS5WY577O2FY6YQ5LVWZ7JZTU2V5" },
+  USDY: { code: "USDY", issuer: "GAJMPX5NBOG6TQFPQGRABJEEB2YE7RFRLUKJDZAZGAD5GFX4J7TADAZ6" },
+  USDE: { code: "USDE", issuer: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47" },
+  SUSDE: { code: "SUSDE", issuer: "GDJ5BNU5NN6NQ54D7OX6NQTUYNBZ42CAT33QGM5BIQ2QIYADAC5ICH47" },
+  CETES: { code: "CETES", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+  USTRY: { code: "USTRY", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+  TESOURO: { code: "TESOURO", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+  KTB: { code: "KTB", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+  EUROB: { code: "EUROB", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+  GILTS: { code: "GILTS", issuer: "GCRYUGD5NVARGXT56XEZI5CIFCQETYHAPQQTHO2O3IQZTHDH4LATMYWC" },
+  MXNE: { code: "MXNe", issuer: "GCQCNWT22JDLENQAVIE6DRJGHWAQ6EX2H5ABGPV55EJUPPZM5UA7KHZR" },
+  LIBRE: { code: "LIBRE", issuer: "GAYCCWKECNGDRHYU3UTREBD2XLC3CUQN6FV22TKM4WCQER3IWR7TF5CY" },
+  XLMNR: { code: "xLMNR", issuer: "GDKA6WVMFSA73BMEVKPO6WXSSWP4MPRBDJVSXLLSEVIEVH226L5RJ7NL" },
+  SVR: { code: "SVR", issuer: "GAGORNGHVJP5X2QO2NNIIDXKLNHVWJWXC5S73EZNCHOALGFTB2V25YGF" },
+};
+
+const CANONICAL_SEP40_ASSETS_TESTNET: Record<string, { code: string; issuer: string }> = {
+  USDC: { code: "USDC", issuer: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5" },
+};
+
+function isMixedCaseSymbol(sym: string): boolean {
+  return sym !== sym.toUpperCase() && sym !== sym.toLowerCase();
+}
+
+/**
+ * Resolves a canonical Stellar Asset Contract (`C...`) ID for well-known SEP-40 feed symbols.
+ */
+export function resolveCanonicalSep40ContractId(
+  symbol: string,
+  networkPassphrase: string,
+): string | undefined {
+  const upper = symbol.trim().toUpperCase();
+  if (!upper) return undefined;
+  if (upper === "XLM" || upper === "NATIVE") {
+    return Asset.native().contractId(networkPassphrase);
+  }
+  const table =
+    networkPassphrase === Networks.PUBLIC
+      ? CANONICAL_SEP40_ASSETS_PUBLIC
+      : networkPassphrase === Networks.TESTNET
+        ? CANONICAL_SEP40_ASSETS_TESTNET
+        : undefined;
+  const entry = table?.[upper];
+  if (!entry) return undefined;
+  try {
+    return new Asset(entry.code, entry.issuer).contractId(networkPassphrase);
+  } catch {
+    return undefined;
+  }
+}
+
 function readonlyOracleAddress(): string {
   return StrKey.encodeEd25519PublicKey(new Uint8Array(32));
 }
@@ -55,8 +113,9 @@ export function buildSep40AssetScVal(asset: Sep40AssetDescriptor): xdr.ScVal {
     }
     return xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Stellar"), new Address(clean).toScVal()]);
   }
-  const sym = asset.symbol.trim().toUpperCase();
-  if (!sym || sym.length > 32) {
+  const trimmed = asset.symbol.trim();
+  const sym = isMixedCaseSymbol(trimmed) ? trimmed : trimmed.toUpperCase();
+  if (!sym || !/^[A-Za-z0-9_]{1,32}$/.test(sym)) {
     throw new Error(`Invalid SEP-40 Asset::Other symbol: ${asset.symbol}`);
   }
   return xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Other"), xdr.ScVal.scvSymbol(sym)]);
@@ -202,17 +261,29 @@ export async function fetchSep40OraclePrices(input: {
       const entries = await Promise.all(
         uniqueAssets.map(async (item): Promise<Sep40PriceQuote | null> => {
           const candidates: Array<{ desc: Sep40AssetDescriptor; kind: "stellar" | "other" }> = [];
-          if (item.contractId && StrKey.isValidContract(item.contractId.trim())) {
+          const explicitContractId =
+            item.contractId && StrKey.isValidContract(item.contractId.trim())
+              ? item.contractId.trim()
+              : item.symbol && item.symbol.trim()
+                ? resolveCanonicalSep40ContractId(item.symbol, input.networkPassphrase)
+                : undefined;
+          if (explicitContractId) {
             candidates.push({
-              desc: { kind: "stellar", contractId: item.contractId.trim() },
+              desc: { kind: "stellar", contractId: explicitContractId },
               kind: "stellar",
             });
           }
           if (item.symbol && item.symbol.trim()) {
-            candidates.push({
-              desc: { kind: "other", symbol: item.symbol.trim() },
-              kind: "other",
-            });
+            const rawSym = item.symbol.trim();
+            const upperSym = rawSym.toUpperCase();
+            if (isMixedCaseSymbol(rawSym)) {
+              candidates.push({ desc: { kind: "other", symbol: rawSym }, kind: "other" });
+              if (upperSym !== rawSym) {
+                candidates.push({ desc: { kind: "other", symbol: upperSym }, kind: "other" });
+              }
+            } else {
+              candidates.push({ desc: { kind: "other", symbol: upperSym }, kind: "other" });
+            }
           }
           for (const candidate of candidates) {
             try {

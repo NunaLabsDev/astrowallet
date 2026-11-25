@@ -14,6 +14,7 @@
     "lint": "eslint . && turbo run lint",
     "test": "vitest run",
     "secret-scan": "node scripts/secret-scan.mjs",
+    "verify:live-abis": "node scripts/verify-live-abis.mjs",
     "check": "pnpm typecheck && pnpm lint && pnpm test && pnpm secret-scan"
   },
   "devDependencies": {

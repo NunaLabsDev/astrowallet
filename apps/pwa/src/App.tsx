@@ -1730,6 +1730,10 @@ function WalletShell({
                                 />
                               </div>
                             </div>
+                          ) : loadingChain && !accountState ? (
+                            <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
+                              Syncing {config.network.toUpperCase()} ledger…
+                            </div>
                           ) : (
                             <div style={{ fontSize: 12, color: "var(--aw-ink-secondary)" }}>
                               Unfunded account on {config.network.toUpperCase()} ledger

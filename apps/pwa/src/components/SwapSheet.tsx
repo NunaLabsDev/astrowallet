@@ -228,15 +228,22 @@ export function SwapSheet({
     if (balances.length === 0) {
       return [{ id: "XLM", label: "XLM", balance: "0", spendableBalance: "0" }];
     }
-    return balances.map((b) => ({
-      id: tokenSwapIdentifier(b.assetCode, b.assetIssuer),
-      label: b.assetCode,
-      balance: b.balance,
-      spendableBalance: formatStroops7Trimmed(
-        computeMaxSpendableStroops7(b.balance, b.sellingLiabilities ?? "0", "0"),
-      ),
-    }));
-  }, [accountState?.balances]);
+    return balances.map((b) => {
+      const isNativeXlm = b.assetCode.toUpperCase() === "XLM" && !b.assetIssuer;
+      return {
+        id: tokenSwapIdentifier(b.assetCode, b.assetIssuer),
+        label: b.assetCode,
+        balance: b.balance,
+        spendableBalance: formatStroops7Trimmed(
+          computeMaxSpendableStroops7(
+            b.balance,
+            b.sellingLiabilities ?? "0",
+            isNativeXlm ? (accountState?.minReserveXlm ?? "0") : "0",
+          ),
+        ),
+      };
+    });
+  }, [accountState?.balances, accountState?.minReserveXlm]);
 
   const [liquidAssets, setLiquidAssets] = useState<TokenCatalogItem[]>([]);
   const [fromAsset, setFromAsset] = useState(() => initialFromAsset || "XLM");
@@ -1049,7 +1056,12 @@ export function SwapSheet({
         ) : error ? (
           <div className="aw-banner aw-banner--danger" style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 8 }}>
             <div>{error}</div>
-            <button type="button" className="aw-chip-btn" onClick={() => void fetchLiveQuote()}>
+            <button
+              type="button"
+              className="aw-chip-btn"
+              disabled={quoting}
+              onClick={() => void fetchLiveQuote()}
+            >
               <IconRefresh size={13} />
               <span>Retry Quote</span>
             </button>
@@ -1093,7 +1105,7 @@ export function SwapSheet({
               const gate = requiresHighValueReauth({
                 amount: quote.inputAmount,
                 assetCode: fromParsed?.code ?? "XLM",
-                spendableBalance: Number(fromHolding?.balance ?? 0),
+                spendableBalance: fromHolding?.spendableBalance ?? fromHolding?.balance ?? "0",
                 thresholdXlm: config.highValueReauthXlm,
                 network: config.network,
               });

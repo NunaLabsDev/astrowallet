@@ -316,6 +316,28 @@ export function evaluateDecodedTransaction(
       });
     }
 
+    if (op.type === "beginSponsoringFutureReserves") {
+      if (op.sponsoredId) {
+        const sponsoredEntry = context.directoryEntries?.get(op.sponsoredId);
+        if (sponsoredEntry?.tags.some((t) => t === "malicious" || t === "unsafe")) {
+          findings.push({
+            code: "DIRECTORY_MALICIOUS_SPONSORED_ACCOUNT",
+            severity: "malicious",
+            title: "Malicious Sponsored Account Blocked",
+            description: `Sponsored target ${op.sponsoredId} is flagged as ${sponsoredEntry.tags.join(", ")} in StellarExpert Open Directory.`,
+            blocksSigning: true,
+          });
+        }
+      }
+      findings.push({
+        code: "SPONSORED_RESERVE_COMMITMENT",
+        severity: "warning",
+        title: "Account Reserve Sponsorship Commitment",
+        description: `Transaction commits your account to pay XLM base/subentry reserves for ${op.sponsoredId ?? "another account"}.`,
+        blocksSigning: false,
+      });
+    }
+
     // 3. Directory & SEP-29 Exchange Memo checks on destination (resolving M... -> base G...)
     if (op.destination) {
       const baseDest = extractBaseDestination(op.destination);

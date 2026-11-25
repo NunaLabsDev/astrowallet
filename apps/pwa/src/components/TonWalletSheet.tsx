@@ -28,6 +28,7 @@ export function TonWalletSheet({
     tonState,
     loadingTonChain,
     tonChainError,
+    ensureTonAccount,
     refreshTonState,
     sendTonPayment,
     showToast,
@@ -75,7 +76,21 @@ export function TonWalletSheet({
     };
   }, [showQr, tonAccount]);
 
-  if (!tonAccount) return null;
+  useEffect(() => {
+    if (!tonAccount) {
+      void ensureTonAccount();
+    }
+  }, [tonAccount, ensureTonAccount]);
+
+  if (!tonAccount) {
+    return (
+      <section className="glass-card" aria-label="TON Wallet" style={{ display: "grid", gap: 10 }}>
+        <div className="aw-banner" style={{ fontSize: 13 }}>
+          Deriving TON Wallet keys…
+        </div>
+      </section>
+    );
+  }
 
   const formattedBalance = tonState ? formatNanoTon(tonState.balanceNano) : "0.0";
 

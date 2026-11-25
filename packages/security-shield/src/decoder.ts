@@ -38,6 +38,7 @@ export interface DecodedOperation {
   medThreshold?: number | undefined;
   highThreshold?: number | undefined;
   homeDomain?: string | undefined;
+  sponsoredId?: string | undefined;
   soroban?: DecodedSorobanInvocation | undefined;
 }
 
@@ -244,6 +245,7 @@ export function decodeTransactionEnvelope(
       medThreshold: numOrUndef(rec.medThreshold),
       highThreshold: numOrUndef(rec.highThreshold),
       homeDomain: typeof rec.homeDomain === "string" ? rec.homeDomain : undefined,
+      sponsoredId: typeof rec.sponsoredId === "string" ? rec.sponsoredId : undefined,
       soroban: type === "invokeHostFunction" ? extractSorobanOp(rec) : undefined,
     };
   });

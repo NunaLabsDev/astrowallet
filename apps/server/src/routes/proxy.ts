@@ -1546,7 +1546,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       seenKeys.add(key);
       parsedAssets.push({
         key,
-        symbol: symbol || undefined,
+        symbol: upperSym || undefined,
         contractId,
       });
     }
@@ -1564,6 +1564,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
           rpcUrls: config.rpcUrls,
           networkPassphrase: config.networkPassphrase,
           assets: parsedAssets,
+          maxStalenessSec: 86_400,
         });
         return {
           configured: true,

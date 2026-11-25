@@ -1,6 +1,7 @@
 import { StrKey, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  buildCctpDepositForBurnXdr,
   buildCctpForwarderHookData,
   buildLayerZeroMessagingFeeScVal,
   buildLayerZeroSendParamScVal,
@@ -9,6 +10,7 @@ import {
   evmAddressToBytes32,
   formatSep40FixedPrice,
   parseSep40PriceDataScVal,
+  quoteLayerZeroOftBridge,
 } from "./index.js";
 
 describe("SEP-40 Oracle ScVal helpers & Pro Bridge builders (CCTP V2 + LayerZero V2 OFT)", () => {
@@ -94,5 +96,102 @@ describe("SEP-40 Oracle ScVal helpers & Pro Bridge builders (CCTP V2 + LayerZero
     const nativeFee = scValToNative(feeScVal) as { native_fee: bigint; zro_fee: bigint };
     expect(nativeFee.native_fee).toBe(2_500_000n);
     expect(nativeFee.zro_fee).toBe(0n);
+  });
+
+  it("normalizes SEP-40 Asset::Other to uppercase, rejects future timestamps, and validates CCTP maxFee & LZ OFT errors", async () => {
+    const lowerAsset = buildSep40AssetScVal({ kind: "other", symbol: "btc" });
+    expect(scValToNative(lowerAsset)).toEqual(["Other", "BTC"]);
+
+    const futurePrice = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("price"),
+        val: nativeToScVal(100_000_000n, { type: "i128" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("timestamp"),
+        val: nativeToScVal(2_000_000_000n, { type: "u64" }),
+      }),
+    ]);
+    expect(
+      parseSep40PriceDataScVal(futurePrice, 8, { nowSec: 1_760_000_000, maxStalenessSec: 3600 }),
+    ).toBeNull();
+
+    const validPrice = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("price"),
+        val: nativeToScVal(100_000_000n, { type: "i128" }),
+      }),
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("timestamp"),
+        val: nativeToScVal(1_759_990_000n, { type: "u64" }),
+      }),
+    ]);
+    const staleDecoded = parseSep40PriceDataScVal(validPrice, 8, {
+      nowSec: 1_760_000_000,
+      maxStalenessSec: 3600,
+    });
+    expect(staleDecoded?.ageSec).toBe(10_000);
+    expect(staleDecoded?.stale).toBe(true);
+
+    const caller = StrKey.encodeEd25519PublicKey(new Uint8Array(32).fill(1));
+    const sac = StrKey.encodeContract(new Uint8Array(32).fill(2));
+    const tmm = StrKey.encodeContract(new Uint8Array(32).fill(3));
+    const to = new Uint8Array(32).fill(4);
+    await expect(
+      buildCctpDepositForBurnXdr({
+        from: caller as `G${string}`,
+        usdcSacContractId: sac as `C${string}`,
+        tokenMessengerMinterContractId: tmm as `C${string}`,
+        destinationDomain: 6,
+        mintRecipientBytes32: to,
+        amountStroops7: 100_000n,
+        maxFeeStroops7: 100_000n,
+        rpcUrls: ["https://rpc-test.example"],
+        networkPassphrase: "Test SDF Network ; September 2015",
+      }),
+    ).rejects.toThrow(/exceed maxFee/i);
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { id?: number; method?: string };
+      if (body.method === "getAccount") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: { id: caller, sequence: "1" },
+          }),
+          { status: 200 },
+        );
+      }
+      if (body.method === "simulateTransaction") {
+        return new Response(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id,
+            result: {
+              error: "HostError: Error(Contract, #0): Function peer does not exist",
+            },
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    });
+
+    try {
+      await expect(
+        quoteLayerZeroOftBridge({
+          oftContractId: sac as `C${string}`,
+          from: caller,
+          dstEid: 30110,
+          toBytes32: to,
+          amountLdStroops7: 10_000_000n,
+          rpcUrls: ["https://rpc-test.example"],
+          networkPassphrase: "Test SDF Network ; September 2015",
+        }),
+      ).rejects.toThrow(/not a valid LayerZero V2 OFT deployment/i);
+    } finally {
+      fetchSpy.mockRestore();
+    }
   });
 });

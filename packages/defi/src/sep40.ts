@@ -28,6 +28,8 @@ export interface Sep40PriceQuote {
   priceRaw: string;
   decimals: number;
   timestamp: number;
+  ageSec?: number | undefined;
+  stale?: boolean | undefined;
   sourceKind: "stellar" | "other";
 }
 
@@ -53,7 +55,7 @@ export function buildSep40AssetScVal(asset: Sep40AssetDescriptor): xdr.ScVal {
     }
     return xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Stellar"), new Address(clean).toScVal()]);
   }
-  const sym = asset.symbol.trim();
+  const sym = asset.symbol.trim().toUpperCase();
   if (!sym || sym.length > 32) {
     throw new Error(`Invalid SEP-40 Asset::Other symbol: ${asset.symbol}`);
   }
@@ -81,7 +83,15 @@ export function formatSep40FixedPrice(rawPrice: bigint, decimals: number): strin
 export function parseSep40PriceDataScVal(
   retval: xdr.ScVal | undefined,
   decimals: number,
-): { priceUsd: number; priceFormatted: string; priceRaw: string; timestamp: number } | null {
+  options?: { nowSec?: number | undefined; maxStalenessSec?: number | undefined },
+): {
+  priceUsd: number;
+  priceFormatted: string;
+  priceRaw: string;
+  timestamp: number;
+  ageSec: number;
+  stale: boolean;
+} | null {
   if (!retval) {
     return null;
   }
@@ -102,7 +112,8 @@ export function parseSep40PriceDataScVal(
   }
   const priceBig = typeof rawPriceVal === "bigint" ? rawPriceVal : BigInt(String(rawPriceVal));
   const tsNum = typeof rawTsVal === "bigint" ? Number(rawTsVal) : Number(rawTsVal);
-  if (priceBig <= 0n || !Number.isFinite(tsNum) || tsNum < 0) {
+  const effectiveNow = options?.nowSec ?? Math.floor(Date.now() / 1000);
+  if (priceBig <= 0n || !Number.isFinite(tsNum) || tsNum < 0 || tsNum > effectiveNow + 300) {
     return null;
   }
   const priceFormatted = formatSep40FixedPrice(priceBig, decimals);
@@ -110,11 +121,17 @@ export function parseSep40PriceDataScVal(
   if (!Number.isFinite(priceUsd) || priceUsd <= 0) {
     return null;
   }
+  const timestamp = Math.trunc(tsNum);
+  const ageSec = Math.max(0, effectiveNow - timestamp);
+  const stale =
+    options?.maxStalenessSec !== undefined ? ageSec > options.maxStalenessSec : false;
   return {
     priceUsd,
     priceFormatted,
     priceRaw: priceBig.toString(),
-    timestamp: Math.trunc(tsNum),
+    timestamp,
+    ageSec,
+    stale,
   };
 }
 
@@ -154,6 +171,8 @@ export async function fetchSep40OraclePrices(input: {
   rpcUrls: readonly string[];
   networkPassphrase: string;
   assets: readonly Sep40PriceRequestAsset[];
+  nowSec?: number | undefined;
+  maxStalenessSec?: number | undefined;
 }): Promise<Sep40OracleSnapshot> {
   if (!StrKey.isValidContract(input.oracleContractId)) {
     throw new Error("Invalid SEP-40 oracle contract ID");
@@ -207,7 +226,10 @@ export async function fetchSep40OraclePrices(input: {
               if (sim.latestLedger && (!latestLedger || sim.latestLedger > latestLedger)) {
                 latestLedger = sim.latestLedger;
               }
-              const parsed = parseSep40PriceDataScVal(sim.retval, decimals);
+              const parsed = parseSep40PriceDataScVal(sim.retval, decimals, {
+                nowSec: input.nowSec,
+                maxStalenessSec: input.maxStalenessSec,
+              });
               if (parsed) {
                 return {
                   key: item.key,

@@ -266,6 +266,13 @@ impl ClaimEscrowContract {
         }
 
         token_client.transfer(&contract_addr, &to, &amount);
+        if escrowed > 0 {
+            env.storage().persistent().extend_ttl(
+                &DataKey::EscrowedBalance(token.clone()),
+                CLAIM_TTL_MAX_LEDGERS / 2,
+                CLAIM_TTL_MAX_LEDGERS,
+            );
+        }
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_TTL_THRESHOLD, INSTANCE_TTL_EXTEND_TO);
@@ -1250,5 +1257,143 @@ mod test {
 
         client.set_deposits_paused(&true);
         assert!(client.is_deposits_paused());
+    }
+
+    #[test]
+    fn test_red_team_boundary_and_rescue_invariants() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+        });
+
+        let admin = Address::generate(&env);
+        let guardian = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let treasury = Address::generate(&env);
+
+        let token_contract = env.register_stellar_asset_contract_v2(admin);
+        let token_id = token_contract.address();
+        let sac = StellarAssetClient::new(&env, &token_id);
+        let token = TokenClient::new(&env, &token_id);
+        sac.mint(&sender, &1_000);
+
+        let escrow_id = env.register(ClaimEscrowContract, (Some(guardian),));
+        let client = ClaimEscrowContractClient::new(&env, &escrow_id);
+
+        let signing_key = SigningKey::from_bytes(&[77u8; 32]);
+        let claim_pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+        let zero_pubkey = BytesN::from_array(&env, &[0u8; 32]);
+
+        // Reject zero pubkey, contract-as-sender, and excessive duration without leaking ReentrancyLock
+        let bad_id = BytesN::from_array(&env, &[91u8; 32]);
+        assert_eq!(
+            client.try_create_claim(
+                &bad_id,
+                &sender,
+                &token_id,
+                &100,
+                &zero_pubkey,
+                &2_000,
+                &true
+            ),
+            Err(Ok(ClaimError::InvalidClaimKey))
+        );
+        assert_eq!(
+            client.try_create_claim(
+                &bad_id,
+                &escrow_id,
+                &token_id,
+                &100,
+                &claim_pubkey,
+                &2_000,
+                &true
+            ),
+            Err(Ok(ClaimError::InvalidAddress))
+        );
+        assert_eq!(
+            client.try_create_claim(
+                &bad_id,
+                &sender,
+                &token_id,
+                &100,
+                &claim_pubkey,
+                &(1_000 + MAX_CLAIM_DURATION_SECS + 1),
+                &true
+            ),
+            Err(Ok(ClaimError::DurationTooLong))
+        );
+
+        let claim_at_boundary = BytesN::from_array(&env, &[92u8; 32]);
+        let claim_past_boundary = BytesN::from_array(&env, &[93u8; 32]);
+        client.create_claim(
+            &claim_at_boundary,
+            &sender,
+            &token_id,
+            &200,
+            &claim_pubkey,
+            &2_000,
+            &true,
+        );
+        client.create_claim(
+            &claim_past_boundary,
+            &sender,
+            &token_id,
+            &250,
+            &claim_pubkey,
+            &2_000,
+            &false,
+        );
+
+        // Stray direct transfer of 50 tokens: rescue_excess cannot touch 1 stroop of escrowed 450
+        token.transfer(&sender, &escrow_id, &50);
+        assert_eq!(
+            client.try_rescue_excess(&token_id, &treasury, &51),
+            Err(Ok(ClaimError::InsufficientExcess))
+        );
+        client.rescue_excess(&token_id, &treasury, &50);
+        assert_eq!(token.balance(&treasury), 50);
+        assert_eq!(
+            client.try_rescue_excess(&token_id, &treasury, &1),
+            Err(Ok(ClaimError::InsufficientExcess))
+        );
+
+        // Exact boundary timestamp now == expires_at: claim allowed, refund_expired still blocked
+        env.ledger().with_mut(|li| {
+            li.timestamp = 2_000;
+        });
+        assert_eq!(
+            client.try_refund_expired(&claim_at_boundary),
+            Err(Ok(ClaimError::NotExpiredYet))
+        );
+        let sig_boundary = sign_claim_for_recipient(
+            &env,
+            &escrow_id,
+            &claim_at_boundary,
+            &recipient,
+            &signing_key,
+        );
+        client.claim(&claim_at_boundary, &recipient, &sig_boundary);
+        assert_eq!(token.balance(&recipient), 200);
+
+        // Past boundary now == expires_at + 1: claim rejected Expired, refund_expired returns to sender
+        env.ledger().with_mut(|li| {
+            li.timestamp = 2_001;
+        });
+        let sig_past = sign_claim_for_recipient(
+            &env,
+            &escrow_id,
+            &claim_past_boundary,
+            &recipient,
+            &signing_key,
+        );
+        assert_eq!(
+            client.try_claim(&claim_past_boundary, &recipient, &sig_past),
+            Err(Ok(ClaimError::Expired))
+        );
+        client.refund_expired(&claim_past_boundary);
+        assert_eq!(client.get_escrowed_balance(&token_id), 0);
+        assert_eq!(token.balance(&escrow_id), 0);
     }
 }

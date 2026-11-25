@@ -1,13 +1,14 @@
-title = "AstroWallet Gitleaks Config"
-
 [extend]
 useDefault = true
 
-[allowlist]
-description = "Allow documentation, example templates, and deterministic unit test fixtures"
+[[allowlists]]
+description = "Allow public Stellar SEP-10 client-domain signing key (non-secret G... public address) in docs and tests"
+regexes = [
+  '''GBFRJ6WMZJ37EQBA34RUEZBDSGZBKRY5T2JIVPG7EHJXZZUSKKQD6YRT''',
+]
+
+[[allowlists]]
+description = "Allow synthetic non-production test fixture secrets inside *.test.ts files"
 paths = [
-  '''\.env\.example$''',
-  '''\.dev\.vars\.example$''',
   '''\.test\.ts$''',
-  '''\.test\.tsx$''',
 ]

@@ -384,6 +384,12 @@ export async function buildCctpDepositForBurnXdr(input: {
     throw new Error("CCTP destination_caller must be 32 bytes");
   }
   const maxFee = input.maxFeeStroops7 ?? 100_000n; // Default ~$0.01 USDC in 7-dec stroops
+  if (maxFee < 0n) {
+    throw new Error("CCTP maxFee must be non-negative");
+  }
+  if (input.amountStroops7 <= maxFee) {
+    throw new Error("CCTP burn amount must exceed maxFee");
+  }
   const finality = input.minFinalityThreshold ?? 2000; // Standard finality on Stellar
 
   return withBridgeRpcFailover(input.rpcUrls, async (server) => {
@@ -495,7 +501,15 @@ export async function quoteLayerZeroOftBridge(input: {
         method: "peer",
         args: [nativeToScVal(input.dstEid, { type: "u32" })],
       }).catch((err) => {
-        if (isSimError(err)) return undefined;
+        if (isSimError(err)) {
+          const msg = err.message;
+          if (/Missing contract|Function|not found|InvalidAction/i.test(msg)) {
+            throw new Error(
+              "Contract is not a valid LayerZero V2 OFT deployment on this network",
+            );
+          }
+          return undefined;
+        }
         throw err;
       }),
     ]);

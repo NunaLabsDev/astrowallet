@@ -2094,7 +2094,7 @@ select:focus-visible {
 }
 
 .aw-quiz-option {
-  min-height: 40px;
+  min-height: 44px;
   padding: 8px 10px;
   border-radius: 12px;
   border: 1px solid rgba(165, 139, 224, 0.28);
@@ -2542,8 +2542,8 @@ select:focus-visible {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
+  width: 44px;
+  height: 44px;
   border-radius: 999px;
   border: none;
   background: rgba(165, 139, 224, 0.2);
@@ -2978,6 +2978,11 @@ select:focus-visible {
   select,
   textarea {
     font-size: max(16px, 1rem);
+  }
+
+  .aw-mini-chip {
+    min-height: 44px;
+    padding: 6px 12px;
   }
 }
 

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { formatNanoTon } from "@astrowallet/ton-core";
 import { useWallet } from "../state/wallet-context.js";
 import {
@@ -15,6 +15,7 @@ export function TonConnectSheet() {
     tonAccount,
     tonConnectSessions,
     pendingTonConnectTx,
+    ensureTonAccount,
     pairTonConnectUri,
     disconnectTonConnectSession,
     resolvePendingTonConnectTx,
@@ -26,7 +27,21 @@ export function TonConnectSheet() {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [statusMsg, setStatusMsg] = useState<string | null>(null);
 
-  if (!tonAccount) return null;
+  useEffect(() => {
+    if (!tonAccount) {
+      void ensureTonAccount();
+    }
+  }, [tonAccount, ensureTonAccount]);
+
+  if (!tonAccount) {
+    return (
+      <section className="glass-card" aria-label="TON Connect" style={{ display: "grid", gap: 10 }}>
+        <div className="aw-banner" style={{ fontSize: 13 }}>
+          Initializing TON Connect wallet…
+        </div>
+      </section>
+    );
+  }
 
   const handleResolvePendingTx = async (approved: boolean) => {
     if (txBusy) return;

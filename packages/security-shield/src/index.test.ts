@@ -829,4 +829,43 @@ describe("Scan & Shield deterministic pre-sign rules", () => {
       mainnetScan.report.findings.some((f) => f.code === "SPOOFED_PROTECTED_ASSET"),
     ).toBe(false);
   });
+
+  it("flags beginSponsoringFutureReserves as a reserve commitment warning and blocks malicious sponsored targets", () => {
+    const sponsorTx = buildTestTxXdr((b) => {
+      b.addOperation(
+        Operation.beginSponsoringFutureReserves({
+          sponsoredId: DEST_KP.publicKey(),
+        }),
+      );
+      b.addOperation(
+        Operation.endSponsoringFutureReserves({
+          source: DEST_KP.publicKey(),
+        }),
+      );
+    });
+
+    const cleanScan = scanTransactionEnvelopeXdr(sponsorTx, {
+      networkPassphrase: TESTNET_PASSPHRASE,
+    });
+    expect(cleanScan.report.verdict).toBe("warning");
+    expect(
+      cleanScan.report.findings.some((f) => f.code === "SPONSORED_RESERVE_COMMITMENT"),
+    ).toBe(true);
+
+    const maliciousScan = scanTransactionEnvelopeXdr(sponsorTx, {
+      networkPassphrase: TESTNET_PASSPHRASE,
+      directoryEntries: new Map([
+        [
+          DEST_KP.publicKey(),
+          { address: DEST_KP.publicKey(), name: "Scam Account", tags: ["malicious"] },
+        ],
+      ]),
+    });
+    expect(maliciousScan.report.verdict).toBe("malicious");
+    expect(
+      maliciousScan.report.findings.some(
+        (f) => f.code === "DIRECTORY_MALICIOUS_SPONSORED_ACCOUNT" && f.blocksSigning,
+      ),
+    ).toBe(true);
+  });
 });

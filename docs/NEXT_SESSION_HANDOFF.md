@@ -164,5 +164,8 @@ Secrets stay in `~/.secrets/` (never print). Scratch E2E scripts: `~/.gemini/ant
 
 ## Session checkpoint — 2026-11-25
 
-- Saved full Pre-Mainnet 5-audit dossier and live Cloudflare/on-chain diagnosis in [`MAINNET_READINESS_5_AUDITS_2026-11-25.md`](./MAINNET_READINESS_5_AUDITS_2026-11-25.md).
-- Resume execution from **Auditoría #1 (Paso 1 → Paso 7)** in that dossier.
+- Completed and deployed **all 5 Pre-Mainnet Audits (#1–#5)** documented in [`MAINNET_READINESS_5_AUDITS_2026-11-25.md`](./MAINNET_READINESS_5_AUDITS_2026-11-25.md):
+  - **Testnet / Mainnet Workers:** `astrowallet-server` (`a9d974ca-2ddc-4082-ba98-22c9174e4565`) & `astrowallet-server-mainnet` (`6bb16c84-9184-4e70-b6a5-342f617be648`).
+  - **Pages Production (`--branch main`, with `./functions`):** `https://237bba00.astrowallet-soroban.pages.dev` (`https://astrowallet-soroban.pages.dev`).
+  - **Checks:** `12/12` Rust tests + `clippy` + `wasm32v1-none`, `38/38` files / `208/208` Vitest tests, `gitleaks` 0 leaks, `pnpm audit --prod` 0 vulnerabilities, Playwright mobile `4/4` (`390x844` & `360x740`), and `8/8` live JSON smoke tests.
+  - **Next:** Closed Beta live testing ($5–$20 real TXs) and external audit of `ClaimEscrowContract` before enabling `CLAIM_ESCROW_CONTRACT_ID` / `RELAY_SPONSOR_SECRET` on Mainnet.

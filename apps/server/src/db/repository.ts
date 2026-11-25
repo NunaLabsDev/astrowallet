@@ -1257,7 +1257,9 @@ export function createD1Repository(db: D1Database): ServerRepository {
           "SELECT COUNT(*) AS cnt FROM connect_requests WHERE network = ? AND status = 'approved'",
           network,
         ),
-        safeFirst<{ cnt: number }>("SELECT COALESCE(SUM(tx_count), 0) AS cnt FROM relay_daily_usage"),
+        safeFirst<{ cnt: number }>(
+          "SELECT COALESCE(SUM(tx_count), 0) AS cnt FROM relay_daily_usage WHERE day_utc NOT LIKE 'bootstrap:%'",
+        ),
         safeFirst<{ cnt: number }>(
           "SELECT COUNT(DISTINCT user_hash) AS cnt FROM daily_user_activity WHERE network = ? AND day_utc = ?",
           network,

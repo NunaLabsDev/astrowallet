@@ -125,11 +125,13 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       status: string;
       payloadJson: string;
     } | null = null;
+    let intentAuthExpiredClaim = false;
 
     if (body.intentAuth) {
       const intent = repo ? await repo.getSignedIntent(body.intentAuth.intentId) : null;
       const allowSignedClaim =
         intent?.actionType === "claim" && intent.status === "signed";
+      const isExpiredSignedClaim = Boolean(allowSignedClaim && nowSec > intent.expiresAt);
       if (
         intent &&
         intent.actionType !== "connect" &&
@@ -145,6 +147,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
           },
           body.intentAuth.sig,
           config.intentHmacSecret,
+          isExpiredSignedClaim ? intent.expiresAt - 1 : undefined,
         );
         if (check.valid) {
           if (intent.actionType === "claim") {
@@ -158,6 +161,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
           }
           if (authorized) {
             intentAuthRecord = intent;
+            intentAuthExpiredClaim = isExpiredSignedClaim;
           }
         }
       }
@@ -214,6 +218,12 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         decoded = decodeTransactionEnvelope(body.signedTxXdrBase64, config.networkPassphrase);
       } catch {
         return c.json({ error: "signedTxXdrBase64 is not a valid transaction envelope" }, 400);
+      }
+      if (decoded.isFeeBump) {
+        return c.json({ error: "Nested FeeBumpTransaction is not permitted in feebump mode" }, 400);
+      }
+      if (decoded.operations.length === 0) {
+        return c.json({ error: "Transaction must contain at least one operation" }, 400);
       }
       if (decoded.operations.length > config.relayMaxOperations) {
         return c.json(
@@ -273,6 +283,23 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         if (!hasEscrowOp) {
           return c.json({ error: "Relay payload does not invoke ClaimEscrow contract" }, 403);
         }
+        if (intentAuthExpiredClaim) {
+          const allRefundOps = decoded.operations.every(
+            (op) =>
+              Boolean(
+                op.soroban &&
+                  op.soroban.contractId === config.claimEscrowContractId &&
+                  (op.soroban.functionName === "refund_expired" ||
+                    op.soroban.functionName === "refund_expired_to"),
+              ),
+          );
+          if (!allRefundOps) {
+            return c.json(
+              { error: "Expired signed claim intents may only relay refund_expired operations" },
+              403,
+            );
+          }
+        }
       }
     } else {
       let hostFn;
@@ -294,6 +321,16 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         hostFn.contractId !== config.claimEscrowContractId
       ) {
         return c.json({ error: "Relay payload does not invoke ClaimEscrow contract" }, 403);
+      }
+      if (
+        intentAuthExpiredClaim &&
+        hostFn.functionName !== "refund_expired" &&
+        hostFn.functionName !== "refund_expired_to"
+      ) {
+        return c.json(
+          { error: "Expired signed claim intents may only relay refund_expired operations" },
+          403,
+        );
       }
     }
 

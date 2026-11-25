@@ -113,6 +113,7 @@ export function RampSheet() {
     accountState,
     verifiedAssets,
     tonAccount,
+    ensureTonAccount,
     signSep10ChallengeXdr,
     signAndSubmitRawXdrWithShield,
     showToast,
@@ -231,15 +232,25 @@ export function RampSheet() {
     config.lzOftContractId,
   ]);
 
+  const CANONICAL_CIRCLE_USDC_ISSUER: Record<"testnet" | "mainnet", string> = {
+    mainnet: "GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN",
+    testnet: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+  };
+
   const resolvedUsdcSacContractId = useMemo(() => {
-    const match = verifiedAssets.find((v) => v.code.trim().toUpperCase() === "USDC");
-    if (!match) return null;
+    const canonicalIssuer = CANONICAL_CIRCLE_USDC_ISSUER[config.network];
     try {
-      return deriveAssetContractId("USDC", match.issuer, config.networkPassphrase);
+      return deriveAssetContractId("USDC", canonicalIssuer, config.networkPassphrase);
     } catch {
-      return null;
+      const match = verifiedAssets.find((v) => v.code.trim().toUpperCase() === "USDC");
+      if (!match) return null;
+      try {
+        return deriveAssetContractId("USDC", match.issuer, config.networkPassphrase);
+      } catch {
+        return null;
+      }
     }
-  }, [verifiedAssets, config.networkPassphrase]);
+  }, [config.network, config.networkPassphrase, verifiedAssets]);
 
   const cctpInboundHookPreview = useMemo(() => {
     if (!activeAccount) return null;
@@ -304,8 +315,23 @@ export function RampSheet() {
 
   if (!activeAccount) return null;
 
+  useEffect(() => {
+    if (
+      activeTab === "any_chain" &&
+      (originAsset === "nep141:ton.omft.near" || destAsset === "nep141:ton.omft.near") &&
+      !tonAccount
+    ) {
+      void ensureTonAccount();
+    }
+  }, [activeTab, originAsset, destAsset, tonAccount, ensureTonAccount]);
+
+  const cashBusyRef = useRef(false);
+  const nearBusyRef = useRef(false);
+
   const handleBuildMoneyGramSession = async (e: FormEvent) => {
     e.preventDefault();
+    if (cashBusyRef.current) return;
+    cashBusyRef.current = true;
     setCashBusy(true);
     setCashError(null);
     setCashSessionUrl(null);
@@ -376,11 +402,14 @@ export function RampSheet() {
     } catch (err) {
       setCashError(err instanceof Error ? err.message : "Failed to prepare MoneyGram SEP-24 session");
     } finally {
+      cashBusyRef.current = false;
       setCashBusy(false);
     }
   };
 
   const requestNearQuote = async (dry: boolean) => {
+    if (nearBusyRef.current) return;
+    nearBusyRef.current = true;
     setNearBusy(true);
     setNearError(null);
     if (dry) {
@@ -433,6 +462,7 @@ export function RampSheet() {
     } catch (err) {
       setNearError(err instanceof Error ? err.message : "Failed to fetch NEAR Intents quote");
     } finally {
+      nearBusyRef.current = false;
       setNearBusy(false);
     }
   };
@@ -637,7 +667,7 @@ export function RampSheet() {
           role="tab"
           aria-selected={activeTab === "cash"}
           className={activeTab === "cash" ? "aw-btn-primary" : "aw-chip-btn"}
-          style={{ minHeight: 38, padding: "6px 12px", fontSize: 12 }}
+          style={{ minHeight: 44, padding: "6px 12px", fontSize: 12 }}
           onClick={() => setActiveTab("cash")}
         >
           Cash (MoneyGram)
@@ -647,7 +677,7 @@ export function RampSheet() {
           role="tab"
           aria-selected={activeTab === "any_chain"}
           className={activeTab === "any_chain" ? "aw-btn-primary" : "aw-chip-btn"}
-          style={{ minHeight: 38, padding: "6px 12px", fontSize: 12 }}
+          style={{ minHeight: 44, padding: "6px 12px", fontSize: 12 }}
           onClick={() => setActiveTab("any_chain")}
         >
           Any Chain (1-Click)
@@ -657,7 +687,7 @@ export function RampSheet() {
           role="tab"
           aria-selected={activeTab === "pro_bridge"}
           className={activeTab === "pro_bridge" ? "aw-btn-primary" : "aw-chip-btn"}
-          style={{ minHeight: 38, padding: "6px 12px", fontSize: 12 }}
+          style={{ minHeight: 44, padding: "6px 12px", fontSize: 12 }}
           onClick={() => setActiveTab("pro_bridge")}
         >
           Pro Bridge (CCTP / OFT)
@@ -894,11 +924,13 @@ export function RampSheet() {
                 <button
                   type="button"
                   className="aw-btn-secondary"
-                  onClick={async () => {
+                    onClick={async () => {
                     const ok = await copyTextToClipboard(nearLockedQuote.depositAddress!);
                     if (ok) {
                       setCopiedAddr(true);
                       setTimeout(() => setCopiedAddr(false), 1800);
+                    } else {
+                      showToast("Clipboard copy blocked by WebView", "error");
                     }
                   }}
                 >
@@ -1008,7 +1040,7 @@ export function RampSheet() {
                         id="cctp-evm-dest"
                         type="text"
                         className="aw-input"
-                        style={{ fontFamily: "monospace", fontSize: 12 }}
+                        style={{ fontFamily: "monospace" }}
                         placeholder="0x..."
                         value={evmDestAddress}
                         onChange={(e) => {
@@ -1021,7 +1053,7 @@ export function RampSheet() {
                   <input
                     type="text"
                     className="aw-input"
-                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                    style={{ fontFamily: "monospace" }}
                     placeholder="TokenMessengerMinter C..."
                     value={cctpTmmId}
                     onChange={(e) => setCctpTmmId(e.target.value)}
@@ -1047,7 +1079,7 @@ export function RampSheet() {
                   <input
                     type="text"
                     className="aw-input"
-                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                    style={{ fontFamily: "monospace" }}
                     placeholder="CctpForwarder Contract C..."
                     value={forwarderId}
                     onChange={(e) => setForwarderId(e.target.value)}
@@ -1068,7 +1100,7 @@ export function RampSheet() {
                   <input
                     type="text"
                     className="aw-input"
-                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                    style={{ fontFamily: "monospace" }}
                     placeholder="Circle Iris Message Hex (0x...)"
                     value={cctpMessageHex}
                     onChange={(e) => setCctpMessageHex(e.target.value)}
@@ -1076,7 +1108,7 @@ export function RampSheet() {
                   <input
                     type="text"
                     className="aw-input"
-                    style={{ fontFamily: "monospace", fontSize: 12 }}
+                    style={{ fontFamily: "monospace" }}
                     placeholder="Circle Iris Attestation Hex (0x...)"
                     value={cctpAttestationHex}
                     onChange={(e) => setCctpAttestationHex(e.target.value)}
@@ -1131,7 +1163,7 @@ export function RampSheet() {
                 <input
                   type="text"
                   className="aw-input"
-                  style={{ fontFamily: "monospace", fontSize: 12 }}
+                  style={{ fontFamily: "monospace" }}
                   placeholder="EVM Recipient (0x...)"
                   value={evmDestAddress}
                   onChange={(e) => {
@@ -1156,7 +1188,7 @@ export function RampSheet() {
               <input
                 type="text"
                 className="aw-input"
-                style={{ fontFamily: "monospace", fontSize: 12 }}
+                style={{ fontFamily: "monospace" }}
                 placeholder="LayerZero V2 OFT Contract C... (Mainnet USDT0 prefilled)"
                 value={lzOftContractId}
                 onChange={(e) => {

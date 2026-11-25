@@ -6,7 +6,17 @@ import type {
   TelegramUserBinding,
 } from "@astrowallet/domain";
 import { signIntentToken } from "@astrowallet/tg-protocol";
-import { Address, Keypair, xdr } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Address,
+  BASE_FEE,
+  Contract,
+  Keypair,
+  TransactionBuilder,
+  nativeToScVal,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk";
 import type { DurableObjectState } from "@cloudflare/workers-types";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type WorkerBindings } from "./app.js";
@@ -719,5 +729,229 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     expect(res.status).toBe(200);
     expect(requestedChallengeUrl).toContain(`account=${kp.publicKey()}`);
     expect(requestedChallengeUrl).not.toContain("client_domain=");
+  });
+
+  it("enforces Red Team relay feebump guards (no nested FeeBump, only refund_expired on expired signed claim) and normalizes SEP-40 lowercase assets", async () => {
+    const { repo } = createD1FaithfulRepo();
+    const now = Math.floor(Date.now() / 1000);
+    const expiredAt = now - 300;
+    const escrowId = TEST_ENV.CLAIM_ESCROW_CONTRACT_ID;
+    const relayEnv = {
+      ...TEST_ENV,
+      OZ_CHANNELS_API_URL: "https://channels.example.org/testnet",
+      RELAY_ALLOWED_CONTRACTS: escrowId,
+      REDSTONE_ORACLE_CONTRACT_ID: escrowId,
+    };
+
+    const expiredSig = await signIntentToken(
+      {
+        intentId: "int_relay_expired_claim",
+        network: "testnet",
+        telegramUserId: "222",
+        expiresAt: expiredAt,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId: "int_relay_expired_claim",
+      network: "testnet",
+      actionType: "claim",
+      creatorTelegramUserId: "222",
+      creatorUsername: "bob",
+      payloadJson: JSON.stringify({ amount: "5", assetCode: "XLM", to: "anyone" }),
+      signatureHex: expiredSig,
+      status: "signed",
+      expiresAt: expiredAt,
+      createdAt: expiredAt - 3600,
+    });
+
+    const kp = Keypair.random();
+    const acc = new Account(kp.publicKey(), "100");
+    const escrowContract = new Contract(escrowId);
+    const claimIdBytes = new Uint8Array(32).fill(1);
+    const sigBytes = new Uint8Array(64).fill(2);
+
+    const claimTx = new TransactionBuilder(acc, {
+      fee: BASE_FEE,
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        escrowContract.call(
+          "claim",
+          nativeToScVal(claimIdBytes, { type: "bytes" }),
+          new Address(kp.publicKey()).toScVal(),
+          nativeToScVal(sigBytes, { type: "bytes" }),
+        ),
+      )
+      .setTimeout(60)
+      .build();
+    claimTx.sign(kp);
+
+    const nestedFeeBump = TransactionBuilder.buildFeeBumpTransaction(
+      kp.publicKey(),
+      "200",
+      claimTx,
+      TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    );
+    nestedFeeBump.sign(kp);
+
+    const refundTx = new TransactionBuilder(acc, {
+      fee: BASE_FEE,
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        escrowContract.call(
+          "refund_expired",
+          nativeToScVal(claimIdBytes, { type: "bytes" }),
+        ),
+      )
+      .setTimeout(60)
+      .build();
+    refundTx.sign(kp);
+
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url === relayEnv.OZ_CHANNELS_API_URL) {
+          return new Response(
+            JSON.stringify({ hash: "a".repeat(64), status: "submitted" }),
+            { status: 200 },
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    // 1. Nested FeeBump rejected with 400
+    const nestedRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: nestedFeeBump.toXDR(),
+          intentAuth: { intentId: "int_relay_expired_claim", sig: expiredSig },
+        }),
+      },
+      relayEnv,
+    );
+    expect(nestedRes.status).toBe(400);
+
+    // 2. Expired signed claim intent rejects `claim` with 403
+    const claimAfterExpiryRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: claimTx.toXDR(),
+          intentAuth: { intentId: "int_relay_expired_claim", sig: expiredSig },
+        }),
+      },
+      relayEnv,
+    );
+    expect(claimAfterExpiryRes.status).toBe(403);
+
+    // 3. Expired signed claim intent allows `refund_expired` (200)
+    const refundAfterExpiryRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: refundTx.toXDR(),
+          intentAuth: { intentId: "int_relay_expired_claim", sig: expiredSig },
+        }),
+      },
+      relayEnv,
+    );
+    expect(refundAfterExpiryRes.status).toBe(200);
+
+    // 4. Lowercase ?assets=btc normalizes to Asset::Other("BTC") in SEP-40 oracle lookup
+    const seenOracleSymbols: string[] = [];
+    const rpcSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => {
+      const rpcReq = JSON.parse(String(init?.body ?? "{}")) as {
+        id?: number;
+        method?: string;
+        params?: { transaction?: string };
+      };
+      if (rpcReq.method === "simulateTransaction" && rpcReq.params?.transaction) {
+        const tx = TransactionBuilder.fromXDR(
+          rpcReq.params.transaction,
+          TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+        );
+        const op = tx.operations[0] as unknown as {
+          func?: xdr.HostFunction;
+        };
+        const invoke = op?.func?.invokeContract;
+        const fnName = invoke?.functionName?.toString();
+        if (fnName === "decimals") {
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: rpcReq.id,
+              result: {
+                latestLedger: 123,
+                results: [{ xdr: nativeToScVal(8, { type: "u32" }).toXDR("base64") }],
+              },
+            }),
+            { status: 200 },
+          );
+        }
+        if (fnName === "lastprice" && invoke?.args[0]) {
+          const nativeArg = scValToNative(invoke.args[0]) as unknown;
+          if (
+            Array.isArray(nativeArg) &&
+            nativeArg[0] === "Other" &&
+            typeof nativeArg[1] === "string"
+          ) {
+            seenOracleSymbols.push(nativeArg[1]);
+          }
+          const priceMap = xdr.ScVal.scvMap([
+            new xdr.ScMapEntry({
+              key: xdr.ScVal.scvSymbol("price"),
+              val: nativeToScVal(9_500_000_000_000n, { type: "i128" }),
+            }),
+            new xdr.ScMapEntry({
+              key: xdr.ScVal.scvSymbol("timestamp"),
+              val: nativeToScVal(BigInt(now - 60), { type: "u64" }),
+            }),
+          ]);
+          return new Response(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: rpcReq.id,
+              result: {
+                latestLedger: 124,
+                results: [{ xdr: priceMap.toXDR("base64") }],
+              },
+            }),
+            { status: 200 },
+          );
+        }
+      }
+      return new Response("{}", { status: 404 });
+    });
+
+    try {
+      const oracleRes = await app.request(
+        "/v1/proxy/oracle/prices?assets=btc",
+        { method: "GET" },
+        relayEnv,
+      );
+      expect(oracleRes.status).toBe(200);
+      const oracleJson = (await oracleRes.json()) as {
+        prices: Record<string, { stale?: boolean; priceUsd?: number }>;
+      };
+      expect(seenOracleSymbols).toContain("BTC");
+      expect(oracleJson.prices.BTC?.priceUsd).toBeGreaterThan(0);
+      expect(oracleJson.prices.BTC?.stale).toBe(false);
+    } finally {
+      rpcSpy.mockRestore();
+    }
   });
 });

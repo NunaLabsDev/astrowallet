@@ -46,58 +46,53 @@
 
 ---
 
-## Sección C — Auditoría #2: Red Team & Contrato Rust (Estado Base y Checklist Pendiente)
+## Sección C — Auditoría #2: Red Team & Contrato Rust (Estado: **✅ CERRADA Y DESPLEGADA — `2026-11-25`**)
 
-- **Checks base ya ejecutados:**
-  - `cargo clippy --manifest-path contracts/claim-escrow/Cargo.toml --all-targets -- -D warnings` → **0 warnings**.
-  - `cargo test --manifest-path contracts/claim-escrow/Cargo.toml` → **11/11 tests OK**.
-  - `pnpm secret-scan` → **0 hallazgos** en 132 archivos fuente.
-  - `gitleaks git` → solo 2 falsos positivos sobre la clave pública `SIGNING_KEY = "GBFRJ6WMZJ37EQBA34RUEZBDSGZBKRY5T2JIVPG7EHJXZZUSKKQD6YRT"` (pendiente añadir `.gitleaks.toml` allowlist para `G[A-Z2-7]{55}` públicas).
-- **Pendiente para ejecutar en Fase #2:**
-  1. Revisión ofensiva línea por línea de `contracts/claim-escrow/src/lib.rs` vs `packages/stellar-core/src/claim-escrow/index.ts` (auth, TTL, aritmética checked, edge cases de `refund_expired_to` / `cancel_claim` / `rescue_excess`).
-  2. Pruebas ofensivas de drenaje, replay y bypass en `apps/server/src/routes/relay.ts`, `tg-auth.ts` y `proxy.ts`.
-  3. Auditoría XSS/SVG en `packages/stellar-core/src/sep50/index.ts:57-81` (entidades HTML / `<foreignObject>` si se renderizara fuera de `<img>`) y bypasses de `packages/security-shield`.
+- **Contrato Rust (`contracts/claim-escrow/src/lib.rs`):**
+  - `rescue_excess` extiende también el TTL de `DataKey::EscrowedBalance` cuando `escrowed > 0`.
+  - Nuevo test Red Team `test_red_team_boundary_and_rescue_invariants`: **12/12 tests Rust**, `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` (0 warnings) y `cargo build --release --target wasm32v1-none` en verde.
+- **Red Team Relay, Métricas, SVG XSS, Shield & Gitleaks:**
+  - `apps/server/src/routes/relay.ts`: rechaza `FeeBumpTransaction` anidado (`400`), 0 operaciones (`400`), y restringe `intentAuth` de Claim Links `signed` expirados exclusivamente a `refund_expired` / `refund_expired_to` (`403` para `claim`/`create_claim`).
+  - `apps/server/src/db/repository.ts`: `relayTxCount` filtra `WHERE day_utc NOT LIKE 'bootstrap:%'`.
+  - `packages/stellar-core/src/sep50/index.ts`: bloquea `<foreignObject>`, `<iframe>`, `<object>`, `<embed>`, `<animate>`, `<set>`, `<meta>`, `vbscript:`, `data:text/html`, entidades `&#x`/`&#\d`, y `xlink:href`/`href` externos en SVGs.
+  - `packages/security-shield/src/{decoder.ts,rules.ts}`: inspecciona `beginSponsoringFutureReserves` (`SPONSORED_RESERVE_COMMITMENT` + bloqueo si `sponsoredId` es malicioso).
+  - `.gitleaks.toml`: allowlist estricto para la clave pública SEP-10 y fixtures `*.test.ts`; `gitleaks git --redact` → **0 leaks** en 62 commits.
 
 ---
 
-## Sección D — Auditoría #3: Verificación On-Chain Real (Sin Mocks) y Fixes Pendientes
+## Sección D — Auditoría #3: Verificación On-Chain Real (Estado: **✅ CERRADA Y DESPLEGADA — `2026-11-25`**)
 
 - **Verificado en vivo contra nodos reales (`2026-11-25`):**
-  1. **RedStone SEP-40 Mainnet (`CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF`):** ledger `65655638`, `decimals = 8`, `XLM = $0.12419086` (`sourceKind: "stellar"`), `USDC = $0.99990421` (`sourceKind: "stellar"`).
-  2. **LayerZero V2 USDT0 OFT Mainnet (`CBOWOLFSDM5PZXNFIVDMP5NZ7U2GSIHED6H6R446QOHF266XINKUMMF6`):** `quoteLayerZeroOftBridge` hacia Arbitrum (`dstEid: 30110`, `10_000_000` stroops) devolvió `amountReceivedLdStroops7 = 10000000`, `minAmountLdStroops7 = 9950000`, `nativeFeeStroops = 6168763` (~`0.617 XLM`); orden alfabético `scvMap` de `SendParam` aceptado por el contrato real.
-  3. **Sorobits SEP-50 Testnet (`CBVETCPLVAMNUUQRUJGH54XHVQT5ZOVB4FGGP2IGOGAZLUIYBBV7G3I3`):** `total_supply = 3`; `fetchSep50Holdings` decodificó en vivo `Sorobit #0` (`GB6CIS...`) y `Sorobit #1` + `Sorobit #6` (`GDQJTJ...`, confirmando `get_owner_token_id` cuando `tokenId !== index`).
-- **Pendiente para cerrar en Fase #3:**
-  1. `apps/pwa/src/components/RampSheet.tsx:256-264`: `resolvedUsdcSacContractId` toma el primer `"USDC"` de `verifiedAssets` en vez de fijar el SAC canónico de Circle (`CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA` Testnet / `CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75` Mainnet).
-  2. `apps/server/src/routes/proxy.ts:1483-1511` & `packages/defi/src/sep40.ts:104-107`: normalizar `symbol.toUpperCase()` en `Asset::Other` (`?assets=btc` falla por minúsculas) y añadir umbral de frescura (`maxStalenessSec`) sobre `timestamp`.
-  3. `packages/stellar-core/src/sep50/index.ts:297-313`: hidratar `metadataUrl` off-chain (`ipfs://`/`https://`) con timeout acotado *(adelantado en Auditoría #1)*.
-  4. `packages/defi/src/pro-bridge.ts:386,497-500`: validar `amountStroops7 > maxFee` en CCTP y distinguir contrato/SAC inválido de `"No LayerZero peer wired..."` en `peer()`.
+  1. **RedStone SEP-40 Mainnet (`CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF`):** ledger `65660625`, `decimals = 8`, `XLM = $0.12380639`, `ageSec: 506`, `stale: false`.
+  2. **LayerZero V2 USDT0 OFT Mainnet (`CBOWOLFSDM5PZXNFIVDMP5NZ7U2GSIHED6H6R446QOHF266XINKUMMF6`):** `quoteLayerZeroOftBridge` hacia Arbitrum (`dstEid: 30110`, `10_000_000` stroops) verificado en vivo (`nativeFeeStroops = 6168763`).
+  3. **Sorobits SEP-50 Testnet (`CBVETCPLVAMNUUQRUJGH54XHVQT5ZOVB4FGGP2IGOGAZLUIYBBV7G3I3`):** `total_supply = 3`, decodificados `Sorobit #0`, `#1` y `#6` en vivo.
+- **Fixes cerrados:**
+  1. `RampSheet.tsx`: fijado el SAC canónico de Circle USDC (`GA5Z...` Mainnet / `GBBD...` Testnet) para CCTP V2.
+  2. `packages/defi/src/sep40.ts` y `apps/server/src/routes/proxy.ts`: normalización `symbol.toUpperCase()` en `Asset::Other` (`?assets=xlm,usdc,btc`), rechazo de timestamps futuros, y `ageSec`/`stale` (`maxStalenessSec: 86_400`).
+  3. `packages/stellar-core/src/sep50/index.ts`: hidratación acotada de `metadataUrl` off-chain.
+  4. `packages/defi/src/pro-bridge.ts`: validación `amountStroops7 > maxFee` en CCTP y distinción entre contrato no-OFT y peer ausente en LayerZero `peer()`.
 
 ---
 
-## Sección E — Auditoría #4: Cascada de Bundle, Bugs UX Móvil y Playwright
+## Sección E — Auditoría #4: Bundle, UX Móvil y Playwright (Estado: **✅ CERRADA Y DESPLEGADA — `2026-11-25`**)
 
-- **Cascada actual observada (`apps/pwa/dist/assets`):**
-  - Boot bloqueado descarga ~`1.36 MB` (`vendor-stellar` `650 kB`, `App` `255 kB`, `vendor-react` `224 kB`, `token-catalog/zod` `123 kB`, `vendor-crypto` `78 kB`) antes de pintar `TelegramOnlyGate` / `UnlockSheet`.
-  - Al desbloquear, `apps/pwa/src/state/wallet-context.tsx:766-799` dispara inmediatamente `vendor-ton` (`512 kB`) aunque el usuario esté en Wallet Home Stellar (`TonConnectSheet.tsx:2` también arrastra `@astrowallet/ton-core` en `DevLabSheet.tsx:22`). `Activity` (511L) y `Accounts` (746L) siguen inline en `App.tsx` (4,083L).
-- **Bugs UX/Interacción pendientes de Fase #4:**
-  1. **[HIGH]** `SwapSheet.tsx:1094` vs `:1118`: `<HighValueReauthGate>` usa `balance` total mientras el botón usa `spendableBalance`, bloqueando el swap con `sellingLiabilities` activas; `heldIdentifiers` (`:235-237`) no resta `minReserveXlm` en XLM.
-  2. **[HIGH]** `ReceiveSheet.tsx:54-56,289-307`: con Muxed ID inválido, el botón habilitado `"Copy M... Address"` copia silenciosamente la cuenta `G...` plana.
-  3. **[MEDIUM]** `App.tsx:1685-1710,2129-2137`: flash falso de `"Unfunded account"` mientras `loadingChain && !accountState`.
-  4. **[MEDIUM]** `PublicStatsPage.tsx:185,295-314`: muestra `0` en todos los KPIs en lugar de estado `loading`.
-  5. **[MEDIUM]** Controles sin `disabled`/lock o sin feedback de error (`App.tsx:3055,3126,3444,3481,3582`; `CollectiblesSheet.tsx:504` Transfer SEP-50 sin `disabled={!transferTo.trim()}` ni Clear-Sign review; `SwapSheet.tsx:1050`; `RampSheet.tsx:913` y `AgentBudgetSheet.tsx:273` clipboard fail silencioso; `OnboardingSheet.tsx` y `RampSheet.tsx` sin `useRef` lock).
-  6. **Touch targets `< 44px` e iOS Auto-Zoom (`< 16px`):** `.aw-mini-chip` (`glass.css:1747`, `30px`), inline `minHeight: 38/34` (`RampSheet.tsx:659-679`, `AgentBudgetSheet.tsx:252,272`), `.aw-quiz-option` (`40px`), `.aw-toast-close` (`40px`), pill de red (`~22px`); e inline `style={{ fontSize: 12 }}` en `RampSheet.tsx:1027-1175` y `CollectiblesSheet.tsx:364,499` que anulan `font-size: max(16px, 1rem)`.
-  7. **Playwright E2E (`390x844` y `360x740`):** ejecutar suite automatizada tras aplicar fixes UX.
+- **Lazy-load real de `vendor-ton`:** `ensureTonAccount()` en `wallet-context.tsx` difiere la descarga de `@astrowallet/ton-core` fuera del arranque de Wallet Home hasta abrir `TonWalletSheet`, `TonConnectSheet`, `RampSheet` (TON) o tener sesiones TON Connect previas.
+- **Fixes UX cerrados:**
+  1. `SwapSheet.tsx`: `heldIdentifiers` resta `minReserveXlm` en XLM nativo; `<HighValueReauthGate>` usa `spendableBalance` consistente con el botón; `"Retry Quote"` deshabilitado mientras `quoting`.
+  2. `ReceiveSheet.tsx`: con Muxed ID inválido, muestra error en rojo y deshabilita los botones de copia/compartir sin filtrar `G...`.
+  3. `App.tsx`: muestra `"Syncing ... ledger…"` mientras `loadingChain && !accountState` en vez de `"Unfunded account"`.
+  4. `PublicStatsPage.tsx`: muestra `"…"` y estado de carga inicial en lugar de `"0"`.
+  5. `CollectiblesSheet.tsx`, `RampSheet.tsx`, `AgentBudgetSheet.tsx`, `glass.css`: `disabled` en transfer vacío, `useRef` submit locks, feedback de error al copiar, targets `>= 44px` en móvil, y eliminados `fontSize: 12` inline en `<input>` (anti-zoom iOS).
+- **Playwright E2E (`390x844` y `360x740` en `/` y `/stats`):** **4/4 en verde** (`hasOverflow: false`, `loadedVendorTon: false`, `pageErrors: []`).
 
 ---
 
-## Sección F — Auditoría #5: Supply Chain (`pnpm audit` / `cargo audit`) y Runbook de Deploy
+## Sección F — Auditoría #5: Supply Chain y Despliegue Final (Estado: **✅ CERRADA Y DESPLEGADA — `2026-11-25`**)
 
-- **`pnpm audit --prod`:** **1 High** real en producción: `zod <4.6.6` (`GHSA-mrhx-c7xc-m3w5`, agotamiento de memoria en colecciones restringidas) vía `packages__ton-core > @ton/ton > zod`. Fix planificado: `"pnpm": { "overrides": { "zod": ">=4.6.6" } }` en `package.json` raíz.
-- **`pnpm audit` (dev):** **2 Critical + 3 Moderate** en `tinypool <2.1.2` (`GHSA-5gmw-xhrv-c9v3`, `GHSA-85c8-ppgw-ccpr`) y `vitest` / `@vitest/mocker <4.1.12` (`GHSA-82fw-gwwq-j7x9`, `GHSA-qxg6-89mg-rqv8`).
-- **`cargo audit`:** `RUSTSEC-2026-0387` en `crypto-bigint 0.5.5` (transitivo de `soroban-env-host 22.1.3` — solo entorno de test/host, excluido del binario WASM `#![no_std]`) + 3 avisos `unmaintained` (`chrono`, `derivative`, `paste`).
-- **Runbook de despliegue sin caídas y Rollback `< 1 min`:**
-  1. Migraciones D1: `pnpm --dir apps/server exec wrangler d1 migrations apply astrowallet --remote` y `--env mainnet --remote`.
-  2. Workers: `pnpm --dir apps/server exec wrangler deploy` y `--env mainnet`.
-  3. PWA + Functions (**siempre desde `apps/pwa`** con `--branch main`): `(cd apps/pwa && pnpm exec wrangler pages deploy dist --project-name astrowallet-soroban --branch main)`.
-  4. Smoke tests JSON (Mainnet sin cabecera y Testnet con `X-Astro-Network: testnet`): `GET /health`, `GET /openapi.json`, `GET /v1/metrics/public`, `GET /v1/proxy/oracle/prices?assets=XLM,USDC`.
-  5. Rollback inmediato: `pnpm --dir apps/server exec wrangler rollback` / `--env mainnet` y promoción del deployment previo sano en Cloudflare Pages.
+- **`pnpm audit --prod`:** añadido `"pnpm": { "overrides": { "zod": ">=4.6.6" } }` en `package.json` raíz (`zod@4.6.7` activo) → **`No known vulnerabilities found`** (`0` High / `0` Critical).
+- **`pnpm audit` (dev) / `cargo audit`:** `vitest`/`tinypool` en devDependencies y `RUSTSEC-2026-0387` en `crypto-bigint 0.5.5` (exclusivo de `soroban-env-host` de tests, fuera del WASM `#![no_std]`).
+- **Despliegue final verificado (`2026-11-25`):**
+  - Workers: `astrowallet-server` (`a9d974ca-2ddc-4082-ba98-22c9174e4565`) y `astrowallet-server-mainnet` (`6bb16c84-9184-4e70-b6a5-342f617be648`).
+  - Pages Producción (`--branch main` desde `apps/pwa` con `./functions`): `https://237bba00.astrowallet-soroban.pages.dev` (`https://astrowallet-soroban.pages.dev`).
+  - Smoke Tests en vivo: **8/8 `200 application/json`** en Mainnet y Testnet (`/health`, `/openapi.json`, `/v1/metrics/public`, `/v1/proxy/oracle/prices?assets=xlm,usdc,btc`).
+  - **Checklist Fase Beta Cerrada:** probar con 5–10 testers usando montos pequeños ($5–$20), mantener límites conservadores en `RELAY_DAILY_BUDGET_STROOPS`, y provisionar `CLAIM_ESCROW_CONTRACT_ID`, `RELAY_ALLOWED_CONTRACTS`, `RELAY_SPONSOR_SECRET`, `OZ_CHANNELS_API_KEY` y `SOROSWAP_API_KEY` únicamente tras completar la auditoría externa de `ClaimEscrowContract`.

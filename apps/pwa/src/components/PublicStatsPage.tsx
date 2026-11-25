@@ -455,47 +455,66 @@ export function PublicStatsPage() {
         {error && <div className="aw-banner aw-banner--warn">{error}</div>}
 
         <section className="aw-token-stats-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(175px, 1fr))" }}>
+          {(() => {
+            const isInitialLoading = loading && !mainnetData && !testnetData;
+            return (
+              <>
           <div className="glass-card aw-stat-tile">
             <span className="aw-stat-label">Verified Telegram Users</span>
             <strong className="aw-stat-value tabular-nums" style={{ fontSize: 22 }}>
-              {formatCompactNumber(summary.registeredUsers)}
+              {isInitialLoading ? "…" : formatCompactNumber(summary.registeredUsers)}
             </strong>
             <span style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }} className="tabular-nums">
-              DAU {summary.dau} · WAU {summary.wau} · MAU {summary.mau}
+              {isInitialLoading
+                ? "Loading live telemetry…"
+                : `DAU ${summary.dau} · WAU ${summary.wau} · MAU ${summary.mau}`}
             </span>
           </div>
 
           <div className="glass-card aw-stat-tile">
             <span className="aw-stat-label">Linked Stellar Wallets</span>
             <strong className="aw-stat-value tabular-nums" style={{ fontSize: 22 }}>
-              {formatCompactNumber(summary.linkedWallets)}
+              {isInitialLoading ? "…" : formatCompactNumber(summary.linkedWallets)}
             </strong>
             <span style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }} className="tabular-nums">
-              {summary.classicWallets} Classic G… · {summary.smartWallets} Smart C…
+              {isInitialLoading
+                ? "Loading wallet breakdown…"
+                : `${summary.classicWallets} Classic G… · ${summary.smartWallets} Smart C…`}
             </span>
           </div>
 
           <div className="glass-card aw-stat-tile">
             <span className="aw-stat-label">Verified On-Chain TXs</span>
             <strong className="aw-stat-value tabular-nums" style={{ fontSize: 22 }}>
-              {formatCompactNumber(summary.verifiedTxs)}
+              {isInitialLoading ? "…" : formatCompactNumber(summary.verifiedTxs)}
             </strong>
             <span style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }} className="tabular-nums">
-              Connect Approvals: {summary.connectApprovals} · Vault Sync: {summary.vaultBackups}
+              {isInitialLoading
+                ? "Loading transaction telemetry…"
+                : `Connect Approvals: ${summary.connectApprovals} · Vault Sync: ${summary.vaultBackups}`}
             </span>
           </div>
 
           <div className="glass-card aw-stat-tile">
             <span className="aw-stat-label">AstroDex Markets</span>
             <strong className="aw-stat-value tabular-nums" style={{ fontSize: 22 }}>
-              {activeDexSources[0] ? `${activeDexSources[0].metrics.totalPairs} Pairs` : "—"}
+              {isInitialLoading
+                ? "…"
+                : activeDexSources[0]
+                  ? `${activeDexSources[0].metrics.totalPairs} Pairs`
+                  : "—"}
             </strong>
             <span style={{ fontSize: 11, color: "var(--aw-ink-secondary)" }} className="tabular-nums">
-              {activeDexSources[0]
-                ? `${activeDexSources[0].metrics.totalTokens} Tokens · ${activeDexSources[0].metrics.mau} MAU`
-                : "No DEX metrics for selected network scope"}
+              {isInitialLoading
+                ? "Loading AstroDex telemetry…"
+                : activeDexSources[0]
+                  ? `${activeDexSources[0].metrics.totalTokens} Tokens · ${activeDexSources[0].metrics.mau} MAU`
+                  : "No DEX metrics for selected network scope"}
             </span>
           </div>
+              </>
+            );
+          })()}
         </section>
 
         <section className="glass-card" style={{ display: "grid", gap: 10 }}>

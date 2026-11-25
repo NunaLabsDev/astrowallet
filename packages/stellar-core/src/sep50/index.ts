@@ -74,7 +74,11 @@ function normalizeCollectibleImageUrl(raw: string | undefined): string | undefin
           decodedSvg = trimmed;
         }
       }
-      if (/<script[\s>]|on[a-z]+\s*=|javascript:/i.test(decodedSvg)) {
+      if (
+        /<script[\s>]|<foreignobject[\s>]|<iframe[\s>]|<object[\s>]|<embed[\s>]|<animate[\s>]|<set[\s>]|<meta[\s>]|on[a-z]+\s*=|javascript:|vbscript:|data:text\/html|data:application\/|&#x|&#\d|(?:xlink:)?href\s*=\s*["']?\s*(?:https?:|\/\/|javascript:|vbscript:|data:)/i.test(
+          decodedSvg,
+        )
+      ) {
         return undefined;
       }
     }

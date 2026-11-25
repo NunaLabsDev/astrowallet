@@ -361,7 +361,7 @@ export function CollectiblesSheet({
           <input
             type="text"
             className="aw-input"
-            style={{ flex: "1 1 220px", fontFamily: "monospace", fontSize: 12 }}
+            style={{ flex: "1 1 220px", fontFamily: "monospace" }}
             placeholder="SEP-50 Contract ID C... (VITE_SOROBITS_CONTRACT_ID)"
             value={sep50ContractInput}
             onChange={(e) => setSep50ContractInput(e.target.value)}
@@ -496,12 +496,16 @@ export function CollectiblesSheet({
                     id="sep50-transfer-to"
                     type="text"
                     className="aw-input"
-                    style={{ flex: "1 1 200px", fontFamily: "monospace", fontSize: 12 }}
+                    style={{ flex: "1 1 200px", fontFamily: "monospace" }}
                     placeholder="G... or C..."
                     value={transferTo}
                     onChange={(e) => setTransferTo(e.target.value)}
                   />
-                  <button type="submit" className="aw-btn-primary" disabled={transferBusy}>
+                  <button
+                    type="submit"
+                    className="aw-btn-primary"
+                    disabled={transferBusy || !transferTo.trim()}
+                  >
                     {transferBusy ? "Signing Transfer..." : "Transfer SEP-50"}
                   </button>
                 </div>

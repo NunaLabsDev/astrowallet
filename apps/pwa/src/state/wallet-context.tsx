@@ -240,6 +240,7 @@ export interface WalletContextValue {
   storageScopeId: string | undefined;
 
   setActiveIndex(index: number): void;
+  ensureTonAccount(): Promise<TonAccountSummary | null>;
   showToast(message: string, kind?: "success" | "info" | "error"): void;
   dismissToast(): void;
   createOrImportVault(
@@ -762,41 +763,62 @@ export function WalletProvider({
   stellarClientRef.current = stellarClient;
 
   const [tonAccount, setTonAccount] = useState<TonAccountSummary | null>(null);
+  const tonEnabledRef = useRef(false);
+  const tonDeriveInflightRef = useRef<Promise<TonAccountSummary | null> | null>(null);
 
-  useEffect(() => {
+  const ensureTonAccount = useCallback(async (): Promise<TonAccountSummary | null> => {
     if (vaultStatus !== "unlocked" || !sessionVault.has()) {
-      setTonAccount(null);
-      return undefined;
+      return null;
     }
-    let cancelled = false;
-    void loadTonCore()
+    tonEnabledRef.current = true;
+    if (tonDeriveInflightRef.current) {
+      return tonDeriveInflightRef.current;
+    }
+    const gen = vaultGenerationRef.current;
+    const tonNet = config.tonNetwork;
+    const acc = activeAccount;
+    const idx = activeIndex;
+    const promise = loadTonCore()
       .then(({ deriveTonAccount }) => {
-        if (cancelled || !sessionVault.has()) return;
+        if (gen !== vaultGenerationRef.current || !sessionVault.has()) {
+          return null;
+        }
         const summary = sessionVault.withMnemonic((mnemonic) => {
-          const tonDerivationIndex = resolveTonDerivationIndex(activeAccount, activeIndex);
-          const derived = deriveTonAccount(
-            mnemonic,
-            tonDerivationIndex,
-            config.tonNetwork,
-            "v4r2",
-          );
+          const tonDerivationIndex = resolveTonDerivationIndex(acc, idx);
+          const derived = deriveTonAccount(mnemonic, tonDerivationIndex, tonNet, "v4r2");
           try {
             return derived.toSummary();
           } finally {
             derived.zeroize();
           }
         });
-        if (!cancelled) {
+        if (gen === vaultGenerationRef.current) {
           setTonAccount(summary);
         }
+        return summary;
       })
-      .catch(() => {
-        if (!cancelled) setTonAccount(null);
+      .catch(() => null)
+      .finally(() => {
+        if (tonDeriveInflightRef.current === promise) {
+          tonDeriveInflightRef.current = null;
+        }
       });
-    return () => {
-      cancelled = true;
-    };
+    tonDeriveInflightRef.current = promise;
+    return promise;
   }, [vaultStatus, activeAccount, activeIndex, config.tonNetwork]);
+
+  useEffect(() => {
+    if (vaultStatus !== "unlocked" || !sessionVault.has()) {
+      tonEnabledRef.current = false;
+      setTonAccount(null);
+      return undefined;
+    }
+    if (!tonEnabledRef.current && tonConnectSessions.length === 0) {
+      return undefined;
+    }
+    void ensureTonAccount();
+    return undefined;
+  }, [vaultStatus, tonConnectSessions.length, ensureTonAccount]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2255,6 +2277,8 @@ export function WalletProvider({
     vaultGenerationRef.current += 1;
     chainFetchSeqRef.current += 1;
     tonFetchSeqRef.current += 1;
+    tonEnabledRef.current = false;
+    setTonAccount(null);
     setPendingTonConnectTx(null);
     sessionVault.clear();
     clearCachedClaimSecret();
@@ -2338,6 +2362,8 @@ export function WalletProvider({
     vaultGenerationRef.current += 1;
     chainFetchSeqRef.current += 1;
     tonFetchSeqRef.current += 1;
+    tonEnabledRef.current = false;
+    setTonAccount(null);
     setPendingTonConnectTx(null);
     clearSessionLease();
     clearCachedClaimSecret();
@@ -3109,6 +3135,7 @@ export function WalletProvider({
       localVaultUpdatedAt,
       storageScopeId: cleanScopeId,
       setActiveIndex,
+      ensureTonAccount,
       showToast,
       dismissToast,
       createOrImportVault,
@@ -3198,6 +3225,7 @@ export function WalletProvider({
       localVaultUpdatedAt,
       cleanScopeId,
       setActiveIndex,
+      ensureTonAccount,
       showToast,
       dismissToast,
       createOrImportVault,

@@ -52,7 +52,7 @@ export function ReceiveSheet({
       return activeAccount.address;
     }
     if (mode === "muxed") {
-      return muxedResult.value ?? activeAccount.address;
+      return muxedResult.value ?? "";
     }
     const cleanAmt = reqAmount.trim() ? normalizeDecimalAmountInput(reqAmount, 7) : null;
     try {
@@ -282,7 +282,13 @@ export function ReceiveSheet({
               textAlign: "left",
             }}
           >
-            <code>{activePayload}</code>
+            {activePayload ? (
+              <code>{activePayload}</code>
+            ) : (
+              <span style={{ color: "#FCA5A5" }}>
+                {muxedResult.error ?? "Enter a valid unsigned 64-bit Muxed ID above."}
+              </span>
+            )}
           </div>
 
           <div style={{ display: "flex", gap: 8, width: "100%", flexWrap: "wrap" }}>
@@ -290,6 +296,7 @@ export function ReceiveSheet({
               type="button"
               className="aw-btn-primary"
               style={{ flex: 1 }}
+              disabled={!activePayload}
               onClick={() => void handleCopy()}
             >
               {copied ? <IconCheck size={15} /> : <IconCopy size={15} />}
@@ -309,6 +316,7 @@ export function ReceiveSheet({
             <button
               type="button"
               className="aw-btn-secondary"
+              disabled={!activePayload}
               onClick={() => void handleShare()}
             >
               <IconExternalLink size={15} />

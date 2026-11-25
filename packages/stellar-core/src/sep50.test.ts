@@ -51,4 +51,32 @@ describe("SEP-50 Soroban NFT token_uri parser", () => {
     expect(parsed.name).toBe("Event Handler Attack");
     expect(parsed.image).toBeUndefined();
   });
+
+  it("blocks SVG XSS vectors (<foreignObject>, numeric entities, external xlink:href, data:text/html) while allowing internal #id refs", () => {
+    const vectors = [
+      '<svg xmlns="http://www.w3.org/2000/svg"><foreignObject><div>xss</div></foreignObject></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><a href="&#x6a;avascript:alert(1)"><rect/></a></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="https://evil.com/track.png"/></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg"><a href="data:text/html,<script>alert(1)</script>"><rect/></a></svg>',
+    ];
+    for (const svg of vectors) {
+      const b64 = Buffer.from(svg, "utf8").toString("base64");
+      const parsed = parseSep50TokenUri(
+        SAMPLE_CONTRACT,
+        11,
+        JSON.stringify({ name: "Evil", image: `data:image/svg+xml;base64,${b64}` }),
+      );
+      expect(parsed.image).toBeUndefined();
+    }
+
+    const safeSvg =
+      '<svg xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="grad1"/></defs><rect fill="url(#grad1)"/></svg>';
+    const safeB64 = Buffer.from(safeSvg, "utf8").toString("base64");
+    const safeParsed = parseSep50TokenUri(
+      SAMPLE_CONTRACT,
+      12,
+      JSON.stringify({ name: "Safe Gradient", image: `data:image/svg+xml;base64,${safeB64}` }),
+    );
+    expect(safeParsed.image).toMatch(/^data:image\/svg\+xml;base64,/);
+  });
 });

@@ -300,7 +300,7 @@ export function AgentBudgetSheet() {
         <button
           type="button"
           className={policy.enabled ? "aw-btn-primary" : "aw-chip-btn"}
-          style={{ minHeight: 38, padding: "6px 12px", fontSize: 12 }}
+          style={{ minHeight: 44, padding: "6px 12px", fontSize: 12 }}
           onClick={() => savePolicy({ ...policy, enabled: !policy.enabled })}
         >
           {policy.enabled ? "Active" : "Paused"}
@@ -320,12 +320,14 @@ export function AgentBudgetSheet() {
           <button
             type="button"
             className="aw-chip-btn"
-            style={{ minHeight: 34, padding: "4px 10px", fontSize: 11 }}
+            style={{ minHeight: 44, padding: "4px 12px", fontSize: 12 }}
             onClick={async () => {
               const ok = await copyTextToClipboard(agentAddress);
               if (ok) {
                 setCopiedKey(true);
                 setTimeout(() => setCopiedKey(false), 1800);
+              } else {
+                setProbeError("Clipboard copy blocked by WebView");
               }
             }}
           >

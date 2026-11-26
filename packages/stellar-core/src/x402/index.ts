@@ -1,7 +1,19 @@
 import type { Keypair } from "@stellar/stellar-sdk";
+import { z } from "zod";
 import { signChallengeMessage } from "../sep0005.js";
 
 export const AGENT_DERIVATION_INDEX = 99;
+
+export const AgentBudgetPolicySchema = z.object({
+  enabled: z.boolean(),
+  dailyCapStroops: z.string().regex(/^\d+$/),
+  maxPerRequestStroops: z.string().regex(/^\d+$/),
+  allowedNetworks: z.array(z.enum(["stellar:testnet", "stellar:pubnet"])).min(1),
+  allowedDomains: z.array(z.string().trim().min(1)),
+  allowedAssets: z.array(z.string().trim().min(1)).optional(),
+  spentTodayStroops: z.string().regex(/^\d+$/),
+  lastResetDayUtc: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+});
 
 export interface AgentBudgetPolicy {
   enabled: boolean;
@@ -9,6 +21,7 @@ export interface AgentBudgetPolicy {
   maxPerRequestStroops: string;
   allowedNetworks: readonly ("stellar:testnet" | "stellar:pubnet")[];
   allowedDomains: readonly string[];
+  allowedAssets?: readonly string[] | undefined;
   spentTodayStroops: string;
   lastResetDayUtc: string;
 }
@@ -54,6 +67,11 @@ export function createDefaultAgentBudgetPolicy(
     allowedDomains: options?.allowedDomains
       ? [...options.allowedDomains]
       : ["astrodex-testnet.pages.dev", "astrodex.pages.dev"],
+    allowedAssets: [
+      "USDC",
+      "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA", // Testnet USDC SAC
+      "CCW67TSZV3SSS2HXMBQ5JFGCKJNXKZM7UQUWUZPUTHXSTZLEO7SJMI75", // Mainnet USDC SAC
+    ],
     spentTodayStroops: "0",
     lastResetDayUtc: getUtcDayString(nowMs),
   };
@@ -90,6 +108,7 @@ export function evaluateAgentSpendRequest(
     domain: string;
     network: string;
     amountStroops: string;
+    asset?: string | undefined;
   },
   nowMs = Date.now(),
 ): { allowed: true; effectiveSpentTodayStroops: string } | { allowed: false; reason: string } {
@@ -113,6 +132,20 @@ export function evaluateAgentSpendRequest(
       allowed: false,
       reason: `Network "${req.network}" is not permitted by this agent policy.`,
     };
+  }
+
+  if (req.asset && policy.allowedAssets && policy.allowedAssets.length > 0) {
+    const cleanAsset = req.asset.trim().toUpperCase();
+    const assetAllowed = policy.allowedAssets.some((a) => {
+      const upper = a.trim().toUpperCase();
+      return cleanAsset === upper || cleanAsset.startsWith(`${upper}:`);
+    });
+    if (!assetAllowed) {
+      return {
+        allowed: false,
+        reason: `Asset "${req.asset}" is not permitted by this agent budget policy.`,
+      };
+    }
   }
 
   if (!/^\d+$/.test(req.amountStroops) || BigInt(req.amountStroops) <= 0n) {

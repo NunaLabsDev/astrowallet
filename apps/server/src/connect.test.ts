@@ -106,6 +106,7 @@ function createConnectMemoryRepo(): ServerRepository {
   const tgUpdates = new Set<number>();
   const encryptedBackups = new Map<string, StoredEncryptedVaultBackup>();
   const connectRequests = new Map<string, ConnectRequestRecord>();
+  const verifiedTxs = new Set<string>();
 
   return {
     async upsertTelegramUser({ telegramUserId, usernameLower }) {
@@ -172,8 +173,8 @@ function createConnectMemoryRepo(): ServerRepository {
     async markClaimLinkStatus() {
       return null;
     },
-    async isTxHashUsed() {
-      return false;
+    async isTxHashUsed(txHash) {
+      return verifiedTxs.has(txHash.trim().toLowerCase());
     },
     async recordSplitPayment() {
       return { paidCount: 0 };
@@ -242,6 +243,9 @@ function createConnectMemoryRepo(): ServerRepository {
     },
     async recordDailyUserActivity() {},
     async incrementProductEvent() {},
+    async recordVerifiedTx({ txHash }) {
+      verifiedTxs.add(txHash.trim().toLowerCase());
+    },
     async getPublicMetricsSnapshot(network) {
       return {
         network,

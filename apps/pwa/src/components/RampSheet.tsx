@@ -25,6 +25,7 @@ import {
   normalizeDecimalAmountInput,
   type ClassicAddress,
 } from "@astrowallet/domain";
+import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, openExternalUrl } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
@@ -107,6 +108,7 @@ const LAYERZERO_EIDS = [
  * 3) Pro Bridge Execution (Circle CCTP V2 Burn/Forward + LayerZero V2 OFT Quote/Send)
  */
 export function RampSheet() {
+  const { sessionToken } = useTelegram();
   const {
     config,
     activeAccount,
@@ -357,9 +359,17 @@ export function RampSheet() {
       if (!cleanDomain) {
         throw new Error("Enter a valid SEP-24 anchor domain.");
       }
+      if (!sessionToken) {
+        throw new Error("Telegram Mini App authentication is required for MoneyGram SEP-24.");
+      }
       const chRes = await fetch(
         `${apiBase}/v1/proxy/sep10/challenge?domain=${encodeURIComponent(cleanDomain)}&account=${encodeURIComponent(activeAccount.address)}`,
-        { headers: { "X-Astro-Network": config.network } },
+        {
+          headers: {
+            Authorization: `Bearer ${sessionToken}`,
+            "X-Astro-Network": config.network,
+          },
+        },
       );
       const chJson = await readJsonSafe<{ transaction?: string; error?: string }>(chRes);
       if (!chRes.ok || !chJson.transaction) {
@@ -371,6 +381,7 @@ export function RampSheet() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
           "X-Astro-Network": config.network,
         },
         body: JSON.stringify({ domain: cleanDomain, transaction: signedXdr }),
@@ -384,6 +395,7 @@ export function RampSheet() {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          Authorization: `Bearer ${sessionToken}`,
           "X-Astro-Network": config.network,
         },
         body: JSON.stringify({

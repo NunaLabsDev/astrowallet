@@ -11,6 +11,10 @@ import {
   pickVerificationIndices,
 } from "./components/onboarding-helpers.js";
 import {
+  extractMaxDebitFromScanReport,
+  requiresHighValueReauth,
+} from "./components/flow-validators.js";
+import {
   SessionMnemonicVault,
   inspectDappAuthEntrySecurity,
   mapSep7MemoKind,
@@ -193,5 +197,43 @@ describe("PWA Client Security Hardening", () => {
     expect(formatSeedBackupFilename("testnet", ts)).toBe(
       "astrowallet-testnet-vault-2026-11-21.agvault.json",
     );
+  });
+
+  it("triggers HighValueReauthGate on benign high-value XDR debits, authority changes, and high TON amounts", () => {
+    const debit = extractMaxDebitFromScanReport(
+      {
+        verdict: "benign",
+        operationsCount: 1,
+        findings: [],
+        balanceDiffs: [
+          {
+            address: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+            assetCode: "XLM",
+            delta: "-500.0000000",
+          },
+        ],
+        requiresMemoCheck: false,
+        estimatedFeeStroops: "100",
+      },
+      "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
+    expect(debit.amount).toBe("500.0000000");
+    expect(debit.assetCode).toBe("XLM");
+    expect(
+      requiresHighValueReauth({
+        amount: debit.amount,
+        assetCode: debit.assetCode,
+        network: "testnet",
+      }).required,
+    ).toBe(true);
+
+    expect(
+      requiresHighValueReauth({
+        amount: "15",
+        assetCode: "TON",
+        thresholdTon: 10,
+        network: "mainnet",
+      }).required,
+    ).toBe(true);
   });
 });

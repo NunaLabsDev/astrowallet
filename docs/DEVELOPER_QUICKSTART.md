@@ -10,7 +10,7 @@ Configure your project using environment variables (never hardcode URLs or netwo
 
 ```env
 # Testnet (use your AstroWallet instance origin)
-VITE_ASTROWALLET_API_BASE_URL=https://astrowallet-soroban.pages.dev
+VITE_ASTROWALLET_API_BASE_URL=https://astro-wallet.pages.dev
 VITE_YOUR_BOT_USERNAME=YourProjectBot
 VITE_YOUR_MINI_APP_SHORT_NAME=app
 ```

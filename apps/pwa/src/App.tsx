@@ -525,6 +525,7 @@ function WalletShell({
     tonConnectSessions,
     pendingTonConnectTx,
     localVaultUpdatedAt,
+    cloudSyncEligible,
     resolvePendingTonConnectTx,
     signConnectChallenge,
     enableFingerprint,
@@ -537,6 +538,7 @@ function WalletShell({
     restoreAgVaultJson,
     syncFromNewerCloudBackup,
     exportAgVaultJson,
+    exportCloudBackupJson,
     isImportedAccount,
     setActiveIndex,
     renameDerivedAccount,
@@ -1021,8 +1023,8 @@ function WalletShell({
       setRenamingIndex(null);
       setRenameLabel("");
       setRenamePin("");
-      if (hasEncryptedBackup) {
-        void exportAgVaultJson()
+      if (hasEncryptedBackup && cloudSyncEligible) {
+        void exportCloudBackupJson()
           .then((json) => uploadEncryptedBackup(json))
           .catch(() => undefined);
       }
@@ -1229,7 +1231,7 @@ function WalletShell({
           return;
         }
         setCloudPullPinNeeded(false);
-        if (res.status === "push_merged" && res.envelopeJson && sessionToken) {
+        if (res.status === "push_merged" && res.envelopeJson && sessionToken && cloudSyncEligible) {
           void uploadEncryptedBackup(res.envelopeJson)
             .then(() => {
               showToast(`Synced ${res.accountCount ?? accounts.length} accounts to Telegram Cloud`);
@@ -1242,12 +1244,13 @@ function WalletShell({
 
     if (
       hasEncryptedBackup &&
+      cloudSyncEligible &&
       sessionToken &&
       (!backupUpdatedAt || localVaultUpdatedAt > backupUpdatedAt + 2) &&
       lastCloudPushTsRef.current !== localVaultUpdatedAt
     ) {
       lastCloudPushTsRef.current = localVaultUpdatedAt;
-      void exportAgVaultJson()
+      void exportCloudBackupJson()
         .then((json) => uploadEncryptedBackup(json))
         .catch(() => undefined);
     }
@@ -1258,9 +1261,10 @@ function WalletShell({
     localVaultUpdatedAt,
     accounts.length,
     hasEncryptedBackup,
+    cloudSyncEligible,
     sessionToken,
     syncFromNewerCloudBackup,
-    exportAgVaultJson,
+    exportCloudBackupJson,
     uploadEncryptedBackup,
     showToast,
   ]);
@@ -1288,9 +1292,22 @@ function WalletShell({
     setCloudSyncBusy(true);
     setCloudSyncError(null);
     try {
+      if (!cloudSyncEligible) {
+        setCloudSyncError(
+          "Your vault currently uses a numeric PIN. Upgrade to a strong Recovery Password below before uploading to Telegram Cloud.",
+        );
+        return;
+      }
       const latestCloud = await refreshCloudBackup().catch(() => null);
       if (latestCloud) {
         const merged = await syncFromNewerCloudBackup(latestCloud);
+        if (merged.status === "pin_required") {
+          setCloudPullPinNeeded(true);
+          setCloudSyncError(
+            "An encrypted Cloud backup exists with a different Recovery Password. Enter that Recovery Password to decrypt and merge before syncing.",
+          );
+          return;
+        }
         if (merged.status === "wallet_mismatch") {
           setCloudSyncError(
             "Cloud backup holds a different recovery phrase. Restore from Cloud or wipe/re-export explicitly before overwriting.",
@@ -1303,8 +1320,13 @@ function WalletShell({
           showToast(`Merged & synced ${merged.accountCount ?? accounts.length} accounts to Telegram`);
           return;
         }
+        if (merged.status === "synced" || merged.status === "up_to_date") {
+          triggerTelegramHaptic("success");
+          showToast("Encrypted backup is already up to date");
+          return;
+        }
       }
-      const json = await exportAgVaultJson();
+      const json = await exportCloudBackupJson();
       await uploadEncryptedBackup(json);
       triggerTelegramHaptic("success");
       showToast("Encrypted backup synced to Telegram");

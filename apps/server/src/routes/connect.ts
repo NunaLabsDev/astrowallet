@@ -482,10 +482,53 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
         return c.json({ error: "Invalid SEP-53 Ed25519 signature for auth challenge" }, 400);
       }
 
+      let verifiedAccounts: Array<{
+        address: string;
+        kind: "classic" | "smart";
+        label?: string | undefined;
+        isDefault?: boolean | undefined;
+      }> | undefined;
+      if (authPayload.includeAccounts) {
+        const smartEnabled = Boolean(config.smartAccountWasmHash);
+        const primaryAccount: {
+          address: string;
+          kind: "classic" | "smart";
+          label?: string | undefined;
+          isDefault?: boolean | undefined;
+        } = {
+          address: body.address,
+          kind: "classic",
+          isDefault: true,
+        };
+        if (responderTelegramUserId && body.accounts && body.accounts.length > 0) {
+          const linked = await repo.listLinkedAddresses(responderTelegramUserId);
+          const linkedByAddress = new Map(linked.map((entry) => [entry.address, entry]));
+          const ownedExtras = body.accounts.filter((acc) => {
+            if (acc.address === body.address) return false;
+            const bound = linkedByAddress.get(acc.address);
+            if (!bound) return false;
+            if (acc.kind === "smart" && !smartEnabled) return false;
+            return true;
+          });
+          const primarySubmitted = body.accounts.find((acc) => acc.address === body.address);
+          verifiedAccounts = [
+            {
+              address: body.address,
+              kind: "classic",
+              ...(primarySubmitted?.label ? { label: primarySubmitted.label } : {}),
+              isDefault: primarySubmitted?.isDefault ?? true,
+            },
+            ...ownedExtras,
+          ];
+        } else {
+          verifiedAccounts = [primaryAccount];
+        }
+      }
+
       resultPayload = ConnectResultSchema.parse({
         status: "approved",
         address: body.address,
-        ...(authPayload.includeAccounts && body.accounts ? { accounts: body.accounts } : {}),
+        ...(verifiedAccounts ? { accounts: verifiedAccounts } : {}),
         ...(responderTelegramUserId ? { telegramUserId: responderTelegramUserId } : {}),
         ...(responderUsername ? { username: responderUsername } : {}),
         signedMessage: authPayload.challengeMessage,
@@ -538,6 +581,12 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
           400,
         );
       }
+      if (authEntryPayload.sourceAddress && body.address !== authEntryPayload.sourceAddress) {
+        return c.json(
+          { error: "Signer address does not match requested sourceAddress" },
+          400,
+        );
+      }
       const kp = Keypair.fromPublicKey(body.address);
       let preimage: xdr.HashIdPreimage | null = null;
       try {
@@ -557,6 +606,17 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
           );
         }
         try {
+          if (preimage.type === "envelopeTypeSorobanAuthorizationWithAddress") {
+            const preimageAddr = Address.fromScAddress(
+              preimage.sorobanAuthorizationWithAddress.address,
+            ).toString();
+            if (ClassicAddressSchema.safeParse(preimageAddr).success && preimageAddr !== body.address) {
+              return c.json(
+                { error: "Soroban HashIdPreimage address does not match signer address" },
+                400,
+              );
+            }
+          }
           const rawNetId =
             preimage.type === "envelopeTypeSorobanAuthorization"
               ? preimage.sorobanAuthorization.networkId
@@ -702,10 +762,17 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
       }
 
       const shouldSubmit = xdrPayload.submit !== false;
+      if (xdrPayload.sourceAddress && body.address && body.address !== xdrPayload.sourceAddress) {
+        return c.json({ error: "Signer address does not match requested sourceAddress" }, 400);
+      }
       if (shouldSubmit) {
         if (!body.txHash) {
           return c.json({ error: "txHash is required when submit=true" }, 400);
         }
+        if (await repo.isTxHashUsed(body.txHash)) {
+          return c.json({ error: "Transaction hash already used" }, 409);
+        }
+        const expectedSourceAccount = body.address ?? xdrPayload.sourceAddress;
         const verifyFn =
           deps.verifyTxFn ??
           ((cfg, hash, expected) => verifyTransactionConfirmed(cfg, hash, deps.fetchFn, expected));
@@ -713,11 +780,16 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
           minCreatedAtUnix: record.createdAt,
           allowSorobanRpcFallback: true,
           ...(expectedUnsignedHashHex ? { expectedTxHash: expectedUnsignedHashHex } : {}),
-          ...(body.address ? { expectedSourceAccount: body.address } : {}),
+          ...(expectedSourceAccount ? { expectedSourceAccount } : {}),
         });
         if (!txCheck.confirmed) {
           return c.json({ error: txCheck.reason }, 409);
         }
+        await repo.recordVerifiedTx?.({
+          txHash: body.txHash.toLowerCase(),
+          network: config.network,
+          actionType: "connect_sign_xdr",
+        });
 
         resultPayload = ConnectResultSchema.parse({
           status: "approved",
@@ -732,39 +804,61 @@ export function createConnectRoutes(deps: ConnectRoutesDeps = {}): Hono<ConnectR
           completedAt: now,
         });
       } else {
-        if (!body.signedXdr) {
-          return c.json({ error: "signedXdr is required when submit=false" }, 400);
+        if (!body.signedXdr || !body.address) {
+          return c.json(
+            { error: "address and signedXdr are required when submit=false" },
+            400,
+          );
         }
         try {
           const parsedSigned = TransactionBuilder.fromXDR(
             body.signedXdr,
             config.networkPassphrase,
           );
-          const signedInnerHash =
-            parsedSigned instanceof FeeBumpTransaction
-              ? Buffer.from(parsedSigned.innerTransaction.hash()).toString("hex").toLowerCase()
-              : Buffer.from(parsedSigned.hash()).toString("hex").toLowerCase();
+          const isFeeBump = parsedSigned instanceof FeeBumpTransaction;
+          const signedInnerHash = isFeeBump
+            ? Buffer.from(parsedSigned.innerTransaction.hash()).toString("hex").toLowerCase()
+            : Buffer.from(parsedSigned.hash()).toString("hex").toLowerCase();
           if (signedInnerHash !== expectedUnsignedHashHex) {
             return c.json({ error: "signedXdr does not match requested unsignedXdr" }, 400);
           }
-          if (body.address) {
-            const kp = Keypair.fromPublicKey(body.address);
-            const sigMatch = parsedSigned.signatures.some((decSig) =>
+          const kp = Keypair.fromPublicKey(body.address);
+          let sigMatch = false;
+          if (isFeeBump) {
+            const feeMatches =
+              body.address === parsedSigned.feeSource &&
+              parsedSigned.signatures.some((decSig) =>
+                kp.verify(
+                  Buffer.from(parsedSigned.hash()),
+                  decSig.signature as unknown as Buffer,
+                ),
+              );
+            const innerMatches = parsedSigned.innerTransaction.signatures.some((decSig) =>
               kp.verify(
-                Buffer.from(parsedSigned.hash()),
+                Buffer.from(parsedSigned.innerTransaction.hash()),
                 decSig.signature as unknown as Buffer,
               ),
             );
-            if (!sigMatch) {
-              return c.json({ error: "signedXdr lacks valid signature from signer address" }, 400);
-            }
+            sigMatch = feeMatches || innerMatches;
+          } else {
+            sigMatch =
+              parsedSigned.signatures.length > 0 &&
+              parsedSigned.signatures.some((decSig) =>
+                kp.verify(
+                  Buffer.from(parsedSigned.hash()),
+                  decSig.signature as unknown as Buffer,
+                ),
+              );
+          }
+          if (!sigMatch) {
+            return c.json({ error: "signedXdr lacks valid signature from signer address" }, 400);
           }
         } catch {
           return c.json({ error: "Invalid signedXdr envelope" }, 400);
         }
         resultPayload = ConnectResultSchema.parse({
           status: "approved",
-          ...(body.address ? { address: body.address } : {}),
+          address: body.address,
           ...(responderTelegramUserId ? { telegramUserId: responderTelegramUserId } : {}),
           ...(responderUsername ? { username: responderUsername } : {}),
           signedXdr: body.signedXdr,

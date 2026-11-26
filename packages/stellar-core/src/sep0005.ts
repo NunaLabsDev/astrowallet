@@ -6,7 +6,7 @@ import {
   validateMnemonic,
 } from "@scure/bip39";
 import { wordlist } from "@scure/bip39/wordlists/english.js";
-import { authorizeEntry, Keypair, xdr } from "@stellar/stellar-sdk";
+import { Address, authorizeEntry, Keypair, StrKey, xdr } from "@stellar/stellar-sdk";
 import type { ClassicAddress } from "@astrowallet/domain";
 
 const SLIP10_ED25519_SEED_KEY = new TextEncoder().encode("ed25519 seed");
@@ -298,8 +298,17 @@ export async function signSorobanAuthEntry(
   }
 
   const cred = entry.credentials as unknown as {
-    address?: { signatureExpirationLedger?: number | bigint };
+    type?: string;
+    address?: { address?: xdr.ScAddress; signatureExpirationLedger?: number | bigint };
   };
+  if (cred.type === "sorobanCredentialsAddress" && cred.address?.address) {
+    const credAddr = Address.fromScAddress(cred.address.address).toString();
+    if (StrKey.isValidEd25519PublicKey(credAddr) && credAddr !== signerAddress) {
+      throw new Error(
+        `Soroban auth entry credential address (${credAddr}) does not match signer (${signerAddress})`,
+      );
+    }
+  }
   const fallbackLedger = Number(cred.address?.signatureExpirationLedger ?? 0);
   const validUntil = options.validUntilLedgerSeq ?? (fallbackLedger > 0 ? fallbackLedger : 1);
 

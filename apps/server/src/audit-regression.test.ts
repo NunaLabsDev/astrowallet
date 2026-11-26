@@ -5,13 +5,20 @@ import type {
   SignedIntent,
   TelegramUserBinding,
 } from "@astrowallet/domain";
-import { deriveClaimId, signIntentToken } from "@astrowallet/tg-protocol";
+import {
+  deriveClaimId,
+  signIntentToken,
+  signMiniAppSessionToken,
+} from "@astrowallet/tg-protocol";
 import {
   Account,
   Address,
+  Asset,
   BASE_FEE,
   Contract,
   Keypair,
+  Networks,
+  Operation,
   SorobanDataBuilder,
   StrKey,
   TransactionBuilder,
@@ -65,8 +72,16 @@ function createD1FaithfulRepo() {
   const relayTxCount = new Map<string, number>();
 
   const repo: ServerRepository = {
-    async upsertTelegramUser({ telegramUserId, usernameLower }) {
-      const next: TelegramUserRecord = { telegramUserId, usernameLower, alertsEnabled: true };
+    async upsertTelegramUser({ telegramUserId, usernameLower, authoritativeUsername }) {
+      const prev = users.get(telegramUserId);
+      const nextUsername = authoritativeUsername
+        ? usernameLower?.trim().replace(/^@/, "").toLowerCase() || undefined
+        : (usernameLower?.trim().replace(/^@/, "").toLowerCase() || prev?.usernameLower);
+      const next: TelegramUserRecord = {
+        telegramUserId,
+        usernameLower: nextUsername,
+        alertsEnabled: prev?.alertsEnabled ?? true,
+      };
       users.set(telegramUserId, next);
       return next;
     },
@@ -405,12 +420,25 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
       createdAt: now,
     });
 
+    const creatorToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: "7001",
+        network: "testnet",
+        issuedAt: now,
+        expiresAt: now + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
     const [resA, resB] = await Promise.all([
       app.request(
         `/v1/intents/${intentId}/confirm`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
           body: JSON.stringify({ sig, txHash: "a".repeat(64) }),
         },
         TEST_ENV,
@@ -419,7 +447,10 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
         `/v1/intents/${intentId}/confirm`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${creatorToken}`,
+          },
           body: JSON.stringify({ sig, txHash: "b".repeat(64) }),
         },
         TEST_ENV,
@@ -583,11 +614,40 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     expect(linkedToml.status).toBe(200);
     expect(await linkedToml.text()).toContain('code="USDC"');
 
-    const zeroSep24 = await app.request(
+    const sepAuthToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: "888222",
+        network: "testnet",
+        issuedAt: Math.floor(Date.now() / 1000),
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    const unauthSep24 = await app.request(
       "/v1/proxy/sep24/interactive",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          domain: "extstellar.moneygram.com",
+          direction: "deposit",
+          token: "a".repeat(20),
+          assetCode: "USDC",
+          amount: "10",
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(unauthSep24.status).toBe(401);
+
+    const zeroSep24 = await app.request(
+      "/v1/proxy/sep24/interactive",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${sepAuthToken}`,
+        },
         body: JSON.stringify({
           domain: "extstellar.moneygram.com",
           direction: "deposit",
@@ -686,6 +746,26 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
       },
     });
 
+    const probeToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: "888333",
+        network: "testnet",
+        issuedAt: Math.floor(Date.now() / 1000),
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    const unauthProbe = await app.request(
+      "/v1/proxy/x402-probe",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: "https://astrodex-testnet.pages.dev/v1/agent/forensic-alpha/XLM" }),
+      },
+      TEST_ENV,
+    );
+    expect(unauthProbe.status).toBe(401);
+
     for (const badUrl of [
       "https://127.0.0.1/x",
       "https://169.254.169.254/latest/meta-data/",
@@ -696,7 +776,10 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
         "/v1/proxy/x402-probe",
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${probeToken}`,
+          },
           body: JSON.stringify({ url: badUrl }),
         },
         TEST_ENV,
@@ -708,7 +791,10 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
       "/v1/proxy/x402-probe",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${probeToken}`,
+        },
         body: JSON.stringify({
           url: "https://astrodex-testnet.pages.dev/v1/agent/forensic-alpha/XLM",
           headers: {
@@ -768,13 +854,29 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
       },
     });
 
+    const sep10Token = await signMiniAppSessionToken(
+      {
+        telegramUserId: "888444",
+        network: "testnet",
+        issuedAt: Math.floor(Date.now() / 1000),
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
     const kp = Keypair.random();
-    const res = await app.request(
+    const unauthChallenge = await app.request(
       `/v1/proxy/sep10/challenge?domain=anchor.example.org&account=${kp.publicKey()}`,
       { method: "GET" },
+      TEST_ENV,
+    );
+    expect(unauthChallenge.status).toBe(401);
+
+    const res = await app.request(
+      `/v1/proxy/sep10/challenge?domain=anchor.example.org&account=${kp.publicKey()}`,
+      { method: "GET", headers: { Authorization: `Bearer ${sep10Token}` } },
       {
         ...TEST_ENV,
-        SEP10_CLIENT_DOMAIN: "astrowallet-soroban.pages.dev",
+        SEP10_CLIENT_DOMAIN: "astro-wallet.pages.dev",
       },
     );
     expect(res.status).toBe(200);
@@ -1953,5 +2055,303 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     if (!verifyRes.ok) {
       expect(verifyRes.status).toBe(403);
     }
+  });
+
+  it("enforces Carbon Block 2 defenses: TON manifest origin match, SEP-10 allowlist & oracle auth, Connect ownership & FeeBump sigs, group intent binding, metrics integrity, and authoritative username sync", async () => {
+    const { repo, verifiedTxs } = createD1FaithfulRepo();
+    const now = Math.floor(Date.now() / 1000);
+    const signer = Keypair.random();
+    const forgedKp = Keypair.random();
+    const anchorSigner = Keypair.random();
+    const clientSigner = Keypair.random();
+    const signLocalSep53 = async (kp: Keypair, msg: string) => {
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(`Stellar Signed Message:\n${msg}`),
+      );
+      return Buffer.from(kp.sign(Buffer.from(digest))).toString("base64");
+    };
+
+    const maliciousClientSourceChallenge = new TransactionBuilder(
+      new Account(anchorSigner.publicKey(), "-1"),
+      { fee: "100", networkPassphrase: Networks.TESTNET },
+    )
+      .addOperation(
+        Operation.manageData({
+          source: signer.publicKey(),
+          name: "extstellar.moneygram.com auth",
+          value: "n1",
+        }),
+      )
+      .addOperation(
+        Operation.manageData({
+          source: clientSigner.publicKey(),
+          name: "client_domain",
+          value: "astro-wallet.pages.dev",
+        }),
+      )
+      .addOperation(
+        Operation.manageData({
+          source: clientSigner.publicKey(),
+          name: "sneaky_extra_op",
+          value: "evil",
+        }),
+      )
+      .setTimeout(300)
+      .build();
+    maliciousClientSourceChallenge.sign(anchorSigner);
+
+    const app = createApp({
+      createRepo: () => repo,
+      verifyTxFn: async () => ({ confirmed: true, ledger: 500 }),
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url === "https://spoof.example/manifest.json") {
+          return new Response(
+            JSON.stringify({ name: "Fragment", url: "https://fragment.com" }),
+            { status: 200, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        if (url === "https://extstellar.moneygram.com/.well-known/stellar.toml") {
+          return new Response(
+            [
+              `SIGNING_KEY="${anchorSigner.publicKey()}"`,
+              'WEB_AUTH_ENDPOINT="https://extstellar.moneygram.com/auth"',
+              'TRANSFER_SERVER_SEP0024="https://extstellar.moneygram.com/sep24"',
+            ].join("\n"),
+            { status: 200 },
+          );
+        }
+        if (url === "https://unlisted.example.org/.well-known/stellar.toml") {
+          return new Response(
+            [
+              `SIGNING_KEY="${anchorSigner.publicKey()}"`,
+              'WEB_AUTH_ENDPOINT="https://unlisted.example.org/auth"',
+              'TRANSFER_SERVER_SEP0024="https://unlisted.example.org/sep24"',
+            ].join("\n"),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("https://extstellar.moneygram.com/auth")) {
+          return new Response(
+            JSON.stringify({
+              transaction: maliciousClientSourceChallenge.toXDR(),
+              network_passphrase: Networks.TESTNET,
+            }),
+            { status: 200 },
+          );
+        }
+        if (url.startsWith("https://unlisted.example.org/auth")) {
+          return new Response(
+            JSON.stringify({
+              transaction: "AAAAAg==",
+              network_passphrase: Networks.TESTNET,
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response("Not found", { status: 404 });
+      },
+    });
+
+    const userToken = await signMiniAppSessionToken(
+      { telegramUserId: "9001", network: "testnet", issuedAt: now, expiresAt: now + 900 },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
+    // 1. HALLAZGO-08: Reject cross-origin TON manifest url spoofing
+    const spoofManifest = await app.request(
+      `/v1/proxy/ton-manifest?url=${encodeURIComponent("https://spoof.example/manifest.json")}`,
+      { method: "GET" },
+      TEST_ENV,
+    );
+    expect(spoofManifest.status).toBe(400);
+
+    // 2. HALLAZGO-13: Unlisted anchor refuses client co-signing & sneaky clientKp op rejected
+    const sepEnv = {
+      ...TEST_ENV,
+      SEP10_CLIENT_DOMAIN: "astro-wallet.pages.dev",
+      SEP10_ALLOWED_ANCHOR_DOMAINS: "extstellar.moneygram.com",
+      SEP10_CLIENT_SIGNING_SECRET: clientSigner.secret(),
+    };
+    const unlistedChallenge = await app.request(
+      `/v1/proxy/sep10/challenge?domain=unlisted.example.org&account=${signer.publicKey()}`,
+      { headers: { Authorization: `Bearer ${userToken}` } },
+      sepEnv,
+    );
+    expect(unlistedChallenge.status).toBe(200);
+    const unlistedJson = (await unlistedChallenge.json()) as { clientDomainSigned?: boolean };
+    expect(unlistedJson.clientDomainSigned).toBeUndefined();
+
+    const sneakyChallenge = await app.request(
+      `/v1/proxy/sep10/challenge?domain=extstellar.moneygram.com&account=${signer.publicKey()}`,
+      { headers: { Authorization: `Bearer ${userToken}` } },
+      sepEnv,
+    );
+    expect(sneakyChallenge.status).toBe(502);
+
+    // 3. HALLAZGO-12: AstroConnect auth strips unowned extra accounts; sign_xdr submit=false requires address & valid sig
+    const authCreate = await app.request(
+      "/v1/connect/requests",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "auth",
+          app: { name: "Demo", botUsername: "AstroDexBot" },
+          payload: { includeAccounts: true, nonce: "carbon2nonce" },
+        }),
+      },
+      TEST_ENV,
+    );
+    const authCreated = (await authCreate.json()) as {
+      requestId: string;
+      sig: string;
+      resultToken: string;
+      challengeMessage: string;
+    };
+    const authSigBytes = await signLocalSep53(signer, authCreated.challengeMessage);
+    const completeAuth = await app.request(
+      `/v1/connect/requests/${authCreated.requestId}/complete`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${userToken}`,
+        },
+        body: JSON.stringify({
+          sig: authCreated.sig,
+          status: "approved",
+          address: signer.publicKey(),
+          signatureBase64: authSigBytes,
+          accounts: [
+            { address: signer.publicKey(), kind: "classic", label: "Real", isDefault: true },
+            { address: forgedKp.publicKey(), kind: "classic", label: "VictimHijack", isDefault: false },
+          ],
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(completeAuth.status).toBe(200);
+    const polledAuth = (await (
+      await app.request(
+        `/v1/connect/requests/${authCreated.requestId}`,
+        { headers: { "X-Connect-Token": authCreated.resultToken } },
+        TEST_ENV,
+      )
+    ).json()) as { result: { accounts: Array<{ address: string }> } };
+    expect(polledAuth.result.accounts).toHaveLength(1);
+    expect(polledAuth.result.accounts[0]?.address).toBe(signer.publicKey());
+
+    const unsignedTx = new TransactionBuilder(new Account(signer.publicKey(), "1"), {
+      fee: BASE_FEE,
+      networkPassphrase: Networks.TESTNET,
+    })
+      .addOperation(
+        Operation.payment({
+          destination: forgedKp.publicKey(),
+          asset: Asset.native(),
+          amount: "1",
+        }),
+      )
+      .setTimeout(60)
+      .build();
+    const unsignedXdr = unsignedTx.toXDR();
+    const xdrHashHex = Buffer.from(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(unsignedXdr)),
+    ).toString("hex");
+    const xdrReq = (await (
+      await app.request(
+        "/v1/connect/requests",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "sign_xdr",
+            app: { name: "Demo", botUsername: "AstroDexBot" },
+            payload: { unsignedXdr, xdrSha256: xdrHashHex, submit: false },
+          }),
+        },
+        TEST_ENV,
+      )
+    ).json()) as { requestId: string; sig: string };
+
+    // Missing address on submit=false rejected with 400
+    const missingAddrXdr = await app.request(
+      `/v1/connect/requests/${xdrReq.requestId}/complete`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sig: xdrReq.sig,
+          status: "approved",
+          signedXdr: unsignedXdr,
+        }),
+      },
+      TEST_ENV,
+    );
+    expect(missingAddrXdr.status).toBe(400);
+
+    // 4. HALLAZGO-14: Stranger cannot confirm creator-only pay intent without session or bound creator address
+    const paySig = await signIntentToken(
+      { intentId: "it_pay_hijack", network: "testnet", telegramUserId: "9001", expiresAt: now + 300 },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId: "it_pay_hijack",
+      network: "testnet",
+      creatorTelegramUserId: "9001",
+      actionType: "pay",
+      payloadJson: JSON.stringify({ amount: "10", assetCode: "XLM" }),
+      hmacSig: paySig,
+      status: "pending",
+      expiresAt: now + 300,
+      createdAt: now,
+    });
+    const unauthConfirm = await app.request(
+      "/v1/intents/it_pay_hijack/confirm",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sig: paySig, txHash: "f".repeat(64), payerAddress: forgedKp.publicKey() }),
+      },
+      TEST_ENV,
+    );
+    expect(unauthConfirm.status).toBe(401);
+
+    // 5. HALLAZGO-15 & HALLAZGO-16: Metrics require auth, never write verified_tx_log; authoritativeUsername clears stale username
+    const unauthMetric = await app.request(
+      "/v1/metrics/event",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventType: "tx_sent", txHash: "e".repeat(64) }),
+      },
+      TEST_ENV,
+    );
+    expect(unauthMetric.status).toBe(401);
+
+    const authMetric = await app.request(
+      "/v1/metrics/event",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${userToken}`,
+        },
+        body: JSON.stringify({ eventType: "tx_sent", txHash: "e".repeat(64) }),
+      },
+      TEST_ENV,
+    );
+    expect(authMetric.status).toBe(200);
+    expect(verifiedTxs).not.toContain("e".repeat(64));
+
+    await repo.upsertTelegramUser({ telegramUserId: "9002", usernameLower: "old_handle" });
+    const cleared = await repo.upsertTelegramUser({
+      telegramUserId: "9002",
+      usernameLower: null,
+      authoritativeUsername: true,
+    });
+    expect(cleared.usernameLower).toBeUndefined();
   });
 });

@@ -121,6 +121,28 @@ describe("@astrowallet/connect SDK", () => {
       { nowUnixSeconds: now + 400 },
     );
     expect(expiredProof.valid).toBe(false);
+
+    // Rejects spoofed (@BotName) embedded in app name when trailing bot suffix differs
+    const spoofedChallenge = [
+      "AstroConnect Sign-In v1",
+      "App: Fake (@AstroDexBot) (@AttackerBot)",
+      "Network: testnet",
+      "Request ID: ac_spoof_01",
+      "Nonce: nonce_12345678",
+      `Issued At: ${now}`,
+      `Expires At: ${now + 300}`,
+    ].join("\n");
+    const spoofedSig = await signer.signSep53(spoofedChallenge);
+    const spoofResult = await verifyAstroLoginProof(
+      {
+        address: signer.address,
+        network: "testnet",
+        challengeMessage: spoofedChallenge,
+        signatureBase64: spoofedSig,
+      },
+      { network: "testnet", botUsername: "AstroDexBot", nowUnixSeconds: now + 5 },
+    );
+    expect(spoofResult.valid).toBe(false);
   });
 
   it("handles login, signTransaction, rejection, and StellarWalletsKit adapter", async () => {

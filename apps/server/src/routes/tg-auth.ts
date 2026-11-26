@@ -154,7 +154,8 @@ export function createTgAuthRoutes(): Hono<TgAuthRouteEnv> {
     }
     await repo.upsertTelegramUser({
       telegramUserId: tgUser.id,
-      usernameLower: tgUser.usernameLower,
+      usernameLower: tgUser.usernameLower ?? null,
+      authoritativeUsername: true,
     });
 
     const dayUtc = utcDayString();

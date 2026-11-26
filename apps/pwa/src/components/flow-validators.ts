@@ -2,6 +2,7 @@ import {
   formatStroops7Trimmed,
   normalizeDecimalAmountInput,
   parsePositiveDecimalToStroops7,
+  type ScanReport,
 } from "@astrowallet/domain";
 
 export type StellarMemoKind = "text" | "id" | "hash" | "return" | "none";
@@ -107,19 +108,89 @@ const STABLECOIN_CODES = new Set([
   "PYUSD",
 ]);
 
+const HIGH_RISK_FINDING_CODES = new Set([
+  "SIGNER_WEIGHT_CHANGE",
+  "ACCOUNT_MERGE",
+  "MASTER_WEIGHT_ZERO",
+  "THRESHOLD_CHANGE",
+  "HOME_DOMAIN_CHANGE",
+  "DANGEROUS_CONTRACT_CALL",
+  "UNBOUNDED_APPROVAL",
+]);
+
+/**
+ * Extracts the largest outgoing debit asset/amount and high-risk operation indicator
+ * from a ScanReport so XDR Clear-Sign flows enforce HighValueReauthGate even on benign XDRs.
+ */
+export function extractMaxDebitFromScanReport(
+  report: ScanReport | null | undefined,
+  activeAddress?: string | null,
+): {
+  amount?: string | undefined;
+  assetCode?: string | undefined;
+  hasHighRiskOp: boolean;
+} {
+  if (!report) {
+    return { hasHighRiskOp: false };
+  }
+  const hasHighRiskOp = report.findings.some(
+    (f) => HIGH_RISK_FINDING_CODES.has(f.code) || /signer|merge|threshold|master/i.test(f.code),
+  );
+  const debits = report.balanceDiffs.filter((d) => d.delta.trim().startsWith("-"));
+  const matchingDebits =
+    activeAddress && debits.some((d) => d.address === activeAddress)
+      ? debits.filter((d) => d.address === activeAddress)
+      : debits;
+
+  let bestAmountStr: string | undefined;
+  let bestAssetCode: string | undefined;
+  let bestScore = -1;
+
+  for (const diff of matchingDebits) {
+    const absStr = diff.delta.trim().replace(/^-+/, "");
+    const normalized = normalizeDecimalAmountInput(absStr, 7);
+    if (!normalized) continue;
+    const numeric = Number(normalized);
+    if (!Number.isFinite(numeric) || numeric <= 0) continue;
+    const code = diff.assetCode.toUpperCase();
+    // Weight stablecoins higher (~7x vs XLM) so a 100 USDC debit outranks a 50 XLM fee/swap dust
+    const weighted = STABLECOIN_CODES.has(code) ? numeric * 7 : numeric;
+    if (weighted > bestScore) {
+      bestScore = weighted;
+      bestAmountStr = normalized;
+      bestAssetCode = code;
+    }
+  }
+
+  return {
+    ...(bestAmountStr ? { amount: bestAmountStr } : {}),
+    ...(bestAssetCode ? { assetCode: bestAssetCode } : {}),
+    hasHighRiskOp,
+  };
+}
+
 /**
  * Determines whether a transaction requires fresh PIN or biometric re-authentication
- * before signing (high-value XLM/stablecoin threshold, >50% balance drain, or mainnet warning).
+ * before signing (high-value XLM/stablecoin/TON threshold, >50% balance drain, or high-risk/mainnet warning).
  */
 export function requiresHighValueReauth(params: {
   amount?: string | undefined;
   assetCode?: string | undefined;
   spendableBalance?: number | string | undefined;
   thresholdXlm?: number | undefined;
+  thresholdTon?: number | undefined;
   network: "testnet" | "mainnet";
   hasWarningVerdict?: boolean | undefined;
+  forceHighRiskReason?: string | undefined;
 }): { required: boolean; reason?: string } {
+  if (params.forceHighRiskReason) {
+    return {
+      required: true,
+      reason: params.forceHighRiskReason,
+    };
+  }
   const thresholdXlm = params.thresholdXlm && params.thresholdXlm > 0 ? params.thresholdXlm : 250;
+  const thresholdTon = params.thresholdTon && params.thresholdTon > 0 ? params.thresholdTon : 10;
   const code = (params.assetCode ?? "XLM").toUpperCase();
   const normalizedAmount = params.amount ? normalizeDecimalAmountInput(params.amount, 7) : null;
   const numericAmount = normalizedAmount ? Number(normalizedAmount) : 0;
@@ -139,6 +210,12 @@ export function requiresHighValueReauth(params: {
         reason: `High-value transfer (>= ${thresholdXlm} XLM threshold).`,
       };
     }
+    if (code === "TON" && amountStroops >= BigInt(Math.round(thresholdTon)) * 10_000_000n) {
+      return {
+        required: true,
+        reason: `High-value TON transfer (>= ${thresholdTon} TON threshold).`,
+      };
+    }
     if (STABLECOIN_CODES.has(code) && amountStroops >= 100n * 10_000_000n) {
       return {
         required: true,
@@ -149,10 +226,11 @@ export function requiresHighValueReauth(params: {
       typeof params.spendableBalance === "string"
         ? Number(params.spendableBalance)
         : params.spendableBalance;
+    const minDrainFloor = code === "TON" ? 2 : 50;
     if (
       typeof spendableNum === "number" &&
       Number.isFinite(spendableNum) &&
-      spendableNum >= 50 &&
+      spendableNum >= minDrainFloor &&
       Number.isFinite(numericAmount) &&
       numericAmount >= spendableNum * 0.5
     ) {

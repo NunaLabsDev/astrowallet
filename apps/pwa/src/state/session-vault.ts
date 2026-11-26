@@ -58,6 +58,17 @@ export class SessionMnemonicVault {
     return fn(new TextDecoder().decode(buf));
   }
 
+  exportImportedSecrets(): Record<string, string> {
+    const out: Record<string, string> = {};
+    const decoder = new TextDecoder();
+    for (const [address, buf] of this.importedSecrets.entries()) {
+      if (buf.byteLength > 0) {
+        out[address] = decoder.decode(buf);
+      }
+    }
+    return out;
+  }
+
   clear(): void {
     if (this.buffer) {
       this.buffer.fill(0);
@@ -100,7 +111,20 @@ export async function inspectDappAuthEntrySecurity(
       throw new Error("Cross-network Soroban auth entry networkId mismatch rejected");
     }
   }
-  const findings = evaluateSorobanInvocation(summary.invocation);
+  const findings = [...evaluateSorobanInvocation(summary.invocation)];
+  const maxSafeAbsLedger = 0x7fffffff;
+  if (
+    typeof summary.signatureExpirationLedger === "number" &&
+    summary.signatureExpirationLedger >= maxSafeAbsLedger
+  ) {
+    findings.push({
+      code: "EXCESSIVE_SIGNATURE_EXPIRATION",
+      severity: "warning",
+      title: "Extremely long Soroban auth expiration ledger",
+      description: `Signature expiration ledger (${summary.signatureExpirationLedger}) is unusually far in the future. Confirm you trust this contract call.`,
+      blocksSigning: false,
+    });
+  }
   const blocker = findings.find((f) => f.severity === "malicious" || f.blocksSigning);
   return {
     summary,

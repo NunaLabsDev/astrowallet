@@ -28,6 +28,7 @@ import { reportTelemetryEvent } from "./telemetry.js";
 import {
   AGENT_DERIVATION_INDEX,
   clearPinLockoutState,
+  clearSessionLeaseKey,
   createSorobanDevClient,
   createStellarClient,
   decryptVaultPayload,
@@ -39,18 +40,23 @@ import {
   encryptVaultPayload,
   enqueueAccountTx as enqueueSharedAccountTx,
   enrollFingerprintUnlock,
+  evaluateCloudBackupSecretStrength,
   fetchHeldAssetsTomlMetadata,
+  getExistingSessionLeaseKey,
+  getOrCreateSessionLeaseKey,
   getPinLockoutState,
   isFingerprintSupported,
   loadBiometricRecord,
   loadContacts,
   loadEncryptedVault,
+  loadVaultCloudMeta,
   parseAgVaultBackup,
   parseExternalSecretAccount,
   publicKeyToRawHex,
   recordFailedPinAttempt,
   saveContacts,
   saveEncryptedVault,
+  saveVaultCloudMeta,
   serializeAgVaultBackup,
   signChallengeMessage,
   signSep10ChallengeTransaction,
@@ -74,7 +80,12 @@ import {
   type TypedMemoInput,
   type VaultAccountMetadata,
 } from "@astrowallet/stellar-core";
-import type { TonAccountChainState } from "@astrowallet/ton-core";
+import type {
+  TonAccountChainState,
+  TonConnectRequestItem,
+  TonPayloadClassification,
+  TonWalletVersion,
+} from "@astrowallet/ton-core";
 
 function loadTonCoreRaw() {
   return import("@astrowallet/ton-core");
@@ -118,6 +129,103 @@ function stripImportedSecrets(
 const EXPRESS_SESSION_TTL_KEY = "aw_express_session_ttl_min";
 const DEFAULT_EXPRESS_SESSION_MINUTES = 15;
 const TG_SESSION_LEASE_KEY = "aw_session_lease_v1";
+const TG_SESSION_LEASE_KEY_V2 = "aw_session_lease_v2";
+const TG_BIO_WRAP_KEY_V2 = "aw_bio_wrap_v2";
+const TON_WALLET_VERSION_KEY = "aw_ton_wallet_version_v1";
+
+function bytesToB64(bytes: Uint8Array): string {
+  let bin = "";
+  for (const b of bytes) {
+    bin += String.fromCharCode(b);
+  }
+  return btoa(bin);
+}
+
+function b64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) {
+    out[i] = bin.charCodeAt(i);
+  }
+  return out;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function hexToBytes(hex: string): Uint8Array {
+  const clean = hex.trim().toLowerCase();
+  if (!/^[a-f0-9]+$/.test(clean) || clean.length % 2 !== 0) {
+    throw new Error("Invalid hex key");
+  }
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i += 1) {
+    out[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+  }
+  return out;
+}
+
+async function sha256HexText(raw: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(raw));
+  return bytesToHex(new Uint8Array(digest));
+}
+
+async function importBioWrapAesKey(hexKey: string): Promise<CryptoKey> {
+  const raw = hexToBytes(hexKey);
+  if (raw.length !== 32) {
+    throw new Error("Biometric token key must be 256-bit");
+  }
+  return crypto.subtle.importKey("raw", raw as BufferSource, { name: "AES-GCM" }, false, [
+    "encrypt",
+    "decrypt",
+  ]);
+}
+
+async function sealWithAesGcmKey(
+  key: CryptoKey,
+  plaintext: string,
+): Promise<{ ivB64: string; ctB64: string }> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const encoded = new TextEncoder().encode(plaintext);
+  const ctBuf = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv: iv as BufferSource },
+    key,
+    encoded as BufferSource,
+  );
+  encoded.fill(0);
+  return {
+    ivB64: bytesToB64(iv),
+    ctB64: bytesToB64(new Uint8Array(ctBuf)),
+  };
+}
+
+async function unsealWithAesGcmKey(
+  key: CryptoKey,
+  wrapped: { ivB64: string; ctB64: string },
+): Promise<string> {
+  const iv = b64ToBytes(wrapped.ivB64);
+  const ct = b64ToBytes(wrapped.ctB64);
+  const ptBuf = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: iv as BufferSource },
+    key,
+    ct as BufferSource,
+  );
+  return new TextDecoder().decode(new Uint8Array(ptBuf));
+}
+
+function readPersistedTonWalletVersion(scopeId?: string): TonWalletVersion {
+  if (typeof window === "undefined") return "v4r2";
+  try {
+    const key = scopeId ? `${TON_WALLET_VERSION_KEY}:${scopeId}` : TON_WALLET_VERSION_KEY;
+    const raw = window.localStorage.getItem(key);
+    return raw === "v5r1" ? "v5r1" : "v4r2";
+  } catch {
+    return "v4r2";
+  }
+}
 
 function readExpressSessionMinutes(): number {
   if (typeof window === "undefined") return DEFAULT_EXPRESS_SESSION_MINUTES;
@@ -139,18 +247,33 @@ export interface ToastMessage {
   message: string;
 }
 
+export interface TonConnectPairingPreview {
+  uri: string;
+  dappClientId: string;
+  dappName: string;
+  dappUrl: string;
+  manifestUrl: string;
+  domainForProof: string;
+  hasTonProof: boolean;
+  originVerified: boolean;
+  tonProofPayload?: string | undefined;
+  items: TonConnectRequestItem[];
+}
+
 export interface PendingTonConnectTxRequest {
   requestId: string;
   walletClientId: string;
   dappClientId: string;
   dappName: string;
   dappUrl: string;
+  connectedAddress: string;
   validUntil: number;
   messages: Array<{
     address: string;
     amountNano: bigint;
     payload?: string | undefined;
     stateInit?: string | undefined;
+    classification: TonPayloadClassification;
   }>;
 }
 
@@ -231,15 +354,18 @@ export interface WalletContextValue {
   verifiedAssets: readonly VerifiedAssetEntry[];
   tokenMetaMap: Readonly<Record<string, HeldTokenTomlMetadata>>;
   tonAccount: TonAccountSummary | null;
+  tonWalletVersion: TonWalletVersion;
   tonState: TonAccountChainState | null;
   loadingTonChain: boolean;
   tonChainError: string | null;
   tonConnectSessions: readonly StoredTonConnectSession[];
   pendingTonConnectTx: PendingTonConnectTxRequest | null;
   localVaultUpdatedAt: number | null;
+  cloudSyncEligible: boolean;
   storageScopeId: string | undefined;
 
   setActiveIndex(index: number): void;
+  setTonWalletVersion(version: TonWalletVersion): void;
   ensureTonAccount(): Promise<TonAccountSummary | null>;
   showToast(message: string, kind?: "success" | "info" | "error"): void;
   dismissToast(): void;
@@ -259,6 +385,7 @@ export interface WalletContextValue {
     accountCount?: number | undefined;
   }>;
   exportAgVaultJson(): Promise<string>;
+  exportCloudBackupJson(): Promise<string>;
   revealMnemonicWithPin(pinOrPassphrase: string): Promise<string>;
   verifyPinOrPassphrase(pinOrPassphrase: string): Promise<void>;
   verifyBiometricReauth(reason?: string): Promise<void>;
@@ -299,6 +426,8 @@ export interface WalletContextValue {
     amountTon: string;
     comment?: string | undefined;
   }): Promise<{ hash: string; bocBase64: string }>;
+  previewTonConnectUri(uri: string): Promise<TonConnectPairingPreview>;
+  approveTonConnectPairing(preview: TonConnectPairingPreview): Promise<StoredTonConnectSession>;
   pairTonConnectUri(uri: string): Promise<StoredTonConnectSession>;
   disconnectTonConnectSession(walletClientId: string): Promise<void>;
   resolvePendingTonConnectTx(approved: boolean): Promise<void>;
@@ -456,123 +585,216 @@ export function WalletProvider({
   sessionTokenRef.current = sessionToken ?? null;
   const cleanScopeId = storageScopeId?.trim() || undefined;
   const securePinKey = cleanScopeId ? `${TG_SECURE_PIN_KEY}:${cleanScopeId}` : TG_SECURE_PIN_KEY;
+  const bioWrapKey = cleanScopeId ? `${TG_BIO_WRAP_KEY_V2}:${cleanScopeId}` : TG_BIO_WRAP_KEY_V2;
   const sessionLeaseKey = cleanScopeId
     ? `${TG_SESSION_LEASE_KEY}:${cleanScopeId}`
     : TG_SESSION_LEASE_KEY;
+  const sessionLeaseKeyV2 = cleanScopeId
+    ? `${TG_SESSION_LEASE_KEY_V2}:${cleanScopeId}`
+    : TG_SESSION_LEASE_KEY_V2;
 
   const [expressSessionMinutes, setExpressSessionMinutesState] = useState<number>(
     readExpressSessionMinutes,
   );
+  const [tonWalletVersion, setTonWalletVersionState] = useState<TonWalletVersion>(() =>
+    readPersistedTonWalletVersion(cleanScopeId),
+  );
+  const tonWalletVersionRef = useRef<TonWalletVersion>(tonWalletVersion);
+  tonWalletVersionRef.current = tonWalletVersion;
 
-  const inMemoryLeaseRef = useRef<{ pin: string; expiresAt: number } | null>(null);
+  const [cloudSyncEligible, setCloudSyncEligible] = useState<boolean>(false);
+  const cloudSyncEligibleRef = useRef<boolean>(cloudSyncEligible);
+  cloudSyncEligibleRef.current = cloudSyncEligible;
+
+  // Kept strictly in process memory for same-session CRDT cloud backup merge; NEVER written to storage.
+  const inMemorySessionPinRef = useRef<string | null>(null);
+  const inMemoryLeaseExpiresAtRef = useRef<number | null>(null);
+  const accountMetaListRef = useRef<VaultAccountMetadata[]>([]);
   const expressSessionMinutesRef = useRef(expressSessionMinutes);
   expressSessionMinutesRef.current = expressSessionMinutes;
 
-  const setExpressSessionMinutes = useCallback((minutes: 0 | 15 | 30 | 60) => {
-    setExpressSessionMinutesState(minutes);
-    expressSessionMinutesRef.current = minutes;
+  const markCloudGradeSecret = useCallback(
+    async (acceptable: boolean, syncedSha256?: string) => {
+      setCloudSyncEligible(acceptable);
+      cloudSyncEligibleRef.current = acceptable;
+      await saveVaultCloudMeta(
+        {
+          cloudGradeSecret: acceptable,
+          ...(syncedSha256 ? { lastSyncedCloudSha256: syncedSha256 } : {}),
+          updatedAt: Math.floor(Date.now() / 1000),
+        },
+        cleanScopeId,
+      ).catch(() => undefined);
+    },
+    [cleanScopeId],
+  );
+
+  const clearSessionLease = useCallback(() => {
+    inMemoryLeaseExpiresAtRef.current = null;
     try {
       if (typeof window !== "undefined") {
-        window.localStorage.setItem(EXPRESS_SESSION_TTL_KEY, String(minutes));
+        window.sessionStorage.removeItem(sessionLeaseKey);
+        window.sessionStorage.removeItem(sessionLeaseKeyV2);
       }
     } catch {
-      // Ignore storage errors
+      // Ignore
     }
-    if (minutes === 0) {
-      inMemoryLeaseRef.current = null;
+    void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
+    void tgSecureStorageRemove(sessionLeaseKeyV2).catch(() => false);
+    void clearSessionLeaseKey(cleanScopeId).catch(() => undefined);
+  }, [sessionLeaseKey, sessionLeaseKeyV2, cleanScopeId]);
+
+  const setExpressSessionMinutes = useCallback(
+    (minutes: 0 | 15 | 30 | 60) => {
+      setExpressSessionMinutesState(minutes);
+      expressSessionMinutesRef.current = minutes;
+      try {
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem(EXPRESS_SESSION_TTL_KEY, String(minutes));
+        }
+      } catch {
+        // Ignore storage errors
+      }
+      if (minutes === 0) {
+        clearSessionLease();
+      }
+    },
+    [clearSessionLease],
+  );
+
+  const saveSessionLease = useCallback(
+    async (
+      pinForRamOnly?: string,
+      accountsOverride?: readonly VaultAccountMetadata[],
+      cloudGradeOverride?: boolean,
+    ) => {
+      if (pinForRamOnly !== undefined) {
+        inMemorySessionPinRef.current = pinForRamOnly;
+      }
+      // Never persist plaintext PINs or Recovery Passwords in sessionStorage or SecureStorage
       try {
         if (typeof window !== "undefined") {
           window.sessionStorage.removeItem(sessionLeaseKey);
+          window.sessionStorage.removeItem(sessionLeaseKeyV2);
         }
       } catch {
         // Ignore
       }
       void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
-    }
-  }, [sessionLeaseKey]);
 
-  const saveSessionLease = useCallback(
-    async (pinOrPassphrase: string) => {
-      // Never persist plaintext PINs in window.sessionStorage
-      try {
-        if (typeof window !== "undefined") {
-          window.sessionStorage.removeItem(sessionLeaseKey);
-        }
-      } catch {
-        // Ignore
-      }
-      if (expressSessionMinutes <= 0) {
-        inMemoryLeaseRef.current = null;
-        await tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
+      if (expressSessionMinutesRef.current <= 0 || !sessionVault.has()) {
+        clearSessionLease();
         return;
       }
-      const lease = {
-        pin: pinOrPassphrase,
-        expiresAt: Date.now() + expressSessionMinutes * 60 * 1000,
-      };
-      inMemoryLeaseRef.current = lease;
-      await tgSecureStorageSet(sessionLeaseKey, JSON.stringify(lease)).catch(() => false);
+
+      const expiresAt = Date.now() + expressSessionMinutesRef.current * 60 * 1000;
+      inMemoryLeaseExpiresAtRef.current = expiresAt;
+      try {
+        const leaseKey = await getOrCreateSessionLeaseKey(cleanScopeId);
+        if (!leaseKey) return;
+        const secretsMap = sessionVault.exportImportedSecrets();
+        const metaSource = accountsOverride ?? accountMetaListRef.current;
+        const accountsWithSecrets: VaultAccountMetadata[] = metaSource.map((acc) => {
+          const importedSecret = acc.importedSecret ?? secretsMap[acc.address];
+          return importedSecret ? { ...acc, importedSecret } : { ...acc };
+        });
+        const mnemonic = sessionVault.withMnemonic((m) => m);
+        const sealed = await sealWithAesGcmKey(
+          leaseKey,
+          JSON.stringify({
+            v: 2,
+            mnemonic,
+            accounts: accountsWithSecrets,
+            cloudGradeSecret: cloudGradeOverride ?? cloudSyncEligibleRef.current,
+            expiresAt,
+          }),
+        );
+        await tgSecureStorageSet(
+          sessionLeaseKeyV2,
+          JSON.stringify({ v: 2, ...sealed, expiresAt }),
+        ).catch(() => false);
+      } catch {
+        // Best-effort encrypted session lease
+      }
     },
-    [sessionLeaseKey, expressSessionMinutes],
+    [cleanScopeId, sessionLeaseKey, sessionLeaseKeyV2, clearSessionLease],
   );
 
   const loadValidSessionLease = useCallback(async (): Promise<{
-    pin: string;
+    mnemonic: string;
+    accounts: VaultAccountMetadata[];
+    cloudGradeSecret: boolean;
     expiresAt: number;
   } | null> => {
     try {
       if (typeof window !== "undefined") {
         window.sessionStorage.removeItem(sessionLeaseKey);
+        window.sessionStorage.removeItem(sessionLeaseKeyV2);
       }
     } catch {
       // Ignore
     }
-
-    const mem = inMemoryLeaseRef.current;
-    if (mem && Date.now() < mem.expiresAt) {
-      return mem;
-    }
-    inMemoryLeaseRef.current = null;
-
-    const parseLease = (raw: string | null) => {
-      if (!raw) return null;
-      try {
-        const parsed = JSON.parse(raw) as { pin?: unknown; expiresAt?: unknown };
-        if (
-          typeof parsed.pin === "string" &&
-          parsed.pin.length > 0 &&
-          typeof parsed.expiresAt === "number" &&
-          Date.now() < parsed.expiresAt
-        ) {
-          return { pin: parsed.pin, expiresAt: parsed.expiresAt };
-        }
-      } catch {
-        // Ignore malformed lease
-      }
-      return null;
-    };
-
-    const secLease = parseLease(await tgSecureStorageGet(sessionLeaseKey).catch(() => null));
-    if (secLease) {
-      inMemoryLeaseRef.current = secLease;
-      return secLease;
-    }
-
     void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
-    return null;
-  }, [sessionLeaseKey]);
 
-  const clearSessionLease = useCallback(() => {
-    inMemoryLeaseRef.current = null;
     try {
-      if (typeof window !== "undefined") {
-        window.sessionStorage.removeItem(sessionLeaseKey);
+      const raw = await tgSecureStorageGet(sessionLeaseKeyV2).catch(() => null);
+      if (!raw) {
+        return null;
       }
+      const parsed = JSON.parse(raw) as {
+        v?: unknown;
+        ivB64?: unknown;
+        ctB64?: unknown;
+        expiresAt?: unknown;
+      };
+      if (
+        parsed.v !== 2 ||
+        typeof parsed.ivB64 !== "string" ||
+        typeof parsed.ctB64 !== "string" ||
+        typeof parsed.expiresAt !== "number" ||
+        Date.now() >= parsed.expiresAt
+      ) {
+        clearSessionLease();
+        return null;
+      }
+      const leaseKey = await getExistingSessionLeaseKey(cleanScopeId);
+      if (!leaseKey) {
+        clearSessionLease();
+        return null;
+      }
+      const plaintext = await unsealWithAesGcmKey(leaseKey, {
+        ivB64: parsed.ivB64,
+        ctB64: parsed.ctB64,
+      });
+      const payload = JSON.parse(plaintext) as {
+        v?: unknown;
+        mnemonic?: unknown;
+        accounts?: unknown;
+        cloudGradeSecret?: unknown;
+        expiresAt?: unknown;
+      };
+      if (
+        payload.v !== 2 ||
+        typeof payload.mnemonic !== "string" ||
+        !Array.isArray(payload.accounts) ||
+        typeof payload.expiresAt !== "number" ||
+        Date.now() >= payload.expiresAt
+      ) {
+        clearSessionLease();
+        return null;
+      }
+      inMemoryLeaseExpiresAtRef.current = payload.expiresAt;
+      return {
+        mnemonic: payload.mnemonic,
+        accounts: payload.accounts as VaultAccountMetadata[],
+        cloudGradeSecret: Boolean(payload.cloudGradeSecret),
+        expiresAt: payload.expiresAt,
+      };
     } catch {
-      // Ignore
+      clearSessionLease();
+      return null;
     }
-    void tgSecureStorageRemove(sessionLeaseKey).catch(() => false);
-  }, [sessionLeaseKey]);
+  }, [cleanScopeId, sessionLeaseKey, sessionLeaseKeyV2, clearSessionLease]);
   const relaySubmitter = useMemo(
     () =>
       config.apiBaseUrl
@@ -663,7 +885,9 @@ export function WalletProvider({
 
   const [vaultStatus, setVaultStatus] = useState<VaultStatus>("loading");
   const tonConnectResolvingRef = useRef(false);
+  const processedTonEventIdsRef = useRef<Set<string>>(new Set());
   const [accountMetaList, setAccountMetaList] = useState<VaultAccountMetadata[]>([]);
+  accountMetaListRef.current = accountMetaList;
   const [activeIndex, setActiveIndex] = useState<number>(0);
 
   const [rawAccountState, setRawAccountState] = useState<StellarAccountState | null>(null);
@@ -766,46 +990,74 @@ export function WalletProvider({
   const tonEnabledRef = useRef(false);
   const tonDeriveInflightRef = useRef<Promise<TonAccountSummary | null> | null>(null);
 
-  const ensureTonAccount = useCallback(async (): Promise<TonAccountSummary | null> => {
-    if (vaultStatus !== "unlocked" || !sessionVault.has()) {
-      return null;
-    }
-    tonEnabledRef.current = true;
-    if (tonDeriveInflightRef.current) {
-      return tonDeriveInflightRef.current;
-    }
-    const gen = vaultGenerationRef.current;
-    const tonNet = config.tonNetwork;
-    const acc = activeAccount;
-    const idx = activeIndex;
-    const promise = loadTonCore()
-      .then(({ deriveTonAccount }) => {
-        if (gen !== vaultGenerationRef.current || !sessionVault.has()) {
-          return null;
-        }
-        const summary = sessionVault.withMnemonic((mnemonic) => {
-          const tonDerivationIndex = resolveTonDerivationIndex(acc, idx);
-          const derived = deriveTonAccount(mnemonic, tonDerivationIndex, tonNet, "v4r2");
-          try {
-            return derived.toSummary();
-          } finally {
-            derived.zeroize();
+  const ensureTonAccount = useCallback(
+    async (versionOverride?: TonWalletVersion): Promise<TonAccountSummary | null> => {
+      if (vaultStatus !== "unlocked" || !sessionVault.has()) {
+        return null;
+      }
+      tonEnabledRef.current = true;
+      const versionToUse = versionOverride ?? tonWalletVersionRef.current;
+      if (tonDeriveInflightRef.current && versionOverride === undefined) {
+        return tonDeriveInflightRef.current;
+      }
+      const gen = vaultGenerationRef.current;
+      const tonNet = config.tonNetwork;
+      const acc = activeAccount;
+      const idx = activeIndex;
+      const promise = loadTonCore()
+        .then(({ deriveTonAccount }) => {
+          if (gen !== vaultGenerationRef.current || !sessionVault.has()) {
+            return null;
+          }
+          const summary = sessionVault.withMnemonic((mnemonic) => {
+            const tonDerivationIndex = resolveTonDerivationIndex(acc, idx);
+            const derived = deriveTonAccount(
+              mnemonic,
+              tonDerivationIndex,
+              tonNet,
+              versionToUse,
+            );
+            try {
+              return derived.toSummary();
+            } finally {
+              derived.zeroize();
+            }
+          });
+          if (gen === vaultGenerationRef.current) {
+            setTonAccount(summary);
+          }
+          return summary;
+        })
+        .catch(() => null)
+        .finally(() => {
+          if (tonDeriveInflightRef.current === promise) {
+            tonDeriveInflightRef.current = null;
           }
         });
-        if (gen === vaultGenerationRef.current) {
-          setTonAccount(summary);
+      tonDeriveInflightRef.current = promise;
+      return promise;
+    },
+    [vaultStatus, activeAccount, activeIndex, config.tonNetwork],
+  );
+
+  const setTonWalletVersion = useCallback(
+    (version: TonWalletVersion) => {
+      setTonWalletVersionState(version);
+      tonWalletVersionRef.current = version;
+      try {
+        if (typeof window !== "undefined") {
+          const key = cleanScopeId ? `${TON_WALLET_VERSION_KEY}:${cleanScopeId}` : TON_WALLET_VERSION_KEY;
+          window.localStorage.setItem(key, version);
         }
-        return summary;
-      })
-      .catch(() => null)
-      .finally(() => {
-        if (tonDeriveInflightRef.current === promise) {
-          tonDeriveInflightRef.current = null;
-        }
-      });
-    tonDeriveInflightRef.current = promise;
-    return promise;
-  }, [vaultStatus, activeAccount, activeIndex, config.tonNetwork]);
+      } catch {
+        // Ignore storage errors
+      }
+      if (vaultStatus === "unlocked" && sessionVault.has()) {
+        void ensureTonAccount(version);
+      }
+    },
+    [cleanScopeId, vaultStatus, ensureTonAccount],
+  );
 
   useEffect(() => {
     if (vaultStatus !== "unlocked" || !sessionVault.has()) {
@@ -816,33 +1068,44 @@ export function WalletProvider({
     if (!tonEnabledRef.current && tonConnectSessions.length === 0) {
       return undefined;
     }
-    void ensureTonAccount();
+    void ensureTonAccount(tonWalletVersion);
     return undefined;
-  }, [vaultStatus, tonConnectSessions.length, ensureTonAccount]);
+  }, [vaultStatus, tonWalletVersion, tonConnectSessions.length, ensureTonAccount]);
 
   useEffect(() => {
     let cancelled = false;
     const startGen = vaultGenerationRef.current;
     async function init() {
       let vaultReadError = false;
-      const [vaultEnvelope, fpSupported, tgBio, bioRecord, tgPin, storedContacts, storedTcSessions] =
-        await Promise.all([
-          loadEncryptedVault(cleanScopeId).catch(() => {
-            vaultReadError = true;
-            return null;
-          }),
-          isFingerprintSupported().catch(() => false),
-          isTelegramBiometricAvailable().catch(() => false),
-          loadBiometricRecord(cleanScopeId).catch(() => null),
-          tgSecureStorageGet(securePinKey).catch(() => null),
-          loadContacts(cleanScopeId).catch(() => []),
-          loadTonConnectSessions(cleanScopeId).catch(() => []),
-        ]);
+      const [
+        vaultEnvelope,
+        fpSupported,
+        tgBio,
+        bioRecord,
+        bioWrap,
+        cloudMeta,
+        storedContacts,
+        storedTcSessions,
+      ] = await Promise.all([
+        loadEncryptedVault(cleanScopeId).catch(() => {
+          vaultReadError = true;
+          return null;
+        }),
+        isFingerprintSupported().catch(() => false),
+        isTelegramBiometricAvailable().catch(() => false),
+        loadBiometricRecord(cleanScopeId).catch(() => null),
+        tgSecureStorageGet(bioWrapKey).catch(() => null),
+        loadVaultCloudMeta(cleanScopeId).catch(() => null),
+        loadContacts(cleanScopeId).catch(() => []),
+        loadTonConnectSessions(cleanScopeId).catch(() => []),
+      ]);
       if (cancelled || startGen !== vaultGenerationRef.current) return;
       const bmSaved = Boolean(getTelegramWebApp()?.BiometricManager?.isBiometricTokenSaved);
       setTelegramBioAvailable(tgBio);
       setFingerprintSupported(fpSupported || tgBio);
-      setFingerprintEnrolled(bioRecord !== null || Boolean(tgPin) || bmSaved);
+      setFingerprintEnrolled(bioRecord !== null || (bmSaved && Boolean(bioWrap || bmSaved)));
+      setCloudSyncEligible(Boolean(cloudMeta?.cloudGradeSecret));
+      cloudSyncEligibleRef.current = Boolean(cloudMeta?.cloudGradeSecret);
       setContacts(storedContacts);
       setTonConnectSessions(storedTcSessions);
       setLocalVaultUpdatedAt(vaultEnvelope?.updatedAt ?? null);
@@ -857,25 +1120,18 @@ export function WalletProvider({
       }
       const lease = await loadValidSessionLease();
       if (lease && !cancelled && startGen === vaultGenerationRef.current) {
-        try {
-          const decrypted = await decryptVaultPayload(vaultEnvelope, lease.pin, {
-            deriveKeyFn: deriveKeyInWorker,
-          });
-          if (!cancelled && startGen === vaultGenerationRef.current) {
-            sessionVault.set(decrypted.mnemonic);
-            for (const acc of decrypted.accounts) {
-              if (acc.importedSecret) {
-                sessionVault.setImportedSecret(acc.address, acc.importedSecret);
-              }
-            }
-            setAccountMetaList(stripImportedSecrets(decrypted.accounts));
-            setActiveIndex(decrypted.accounts[0]?.index ?? 0);
-            setVaultStatus("unlocked");
-            return;
+        sessionVault.set(lease.mnemonic);
+        for (const acc of lease.accounts) {
+          if (acc.importedSecret) {
+            sessionVault.setImportedSecret(acc.address, acc.importedSecret);
           }
-        } catch {
-          clearSessionLease();
         }
+        setAccountMetaList(stripImportedSecrets(lease.accounts));
+        setActiveIndex(lease.accounts[0]?.index ?? 0);
+        setCloudSyncEligible(lease.cloudGradeSecret);
+        cloudSyncEligibleRef.current = lease.cloudGradeSecret;
+        setVaultStatus("unlocked");
+        return;
       }
       if (!cancelled && startGen === vaultGenerationRef.current) {
         setVaultStatus("locked");
@@ -885,7 +1141,7 @@ export function WalletProvider({
     return () => {
       cancelled = true;
     };
-  }, [cleanScopeId, securePinKey, loadValidSessionLease, clearSessionLease]);
+  }, [cleanScopeId, bioWrapKey, loadValidSessionLease]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1086,6 +1342,7 @@ export function WalletProvider({
     if (typeof window === "undefined") return undefined;
     const handleUnload = () => {
       vaultGenerationRef.current += 1;
+      inMemorySessionPinRef.current = null;
       sessionVault.clear();
     };
     window.addEventListener("pagehide", handleUnload);
@@ -1174,7 +1431,7 @@ export function WalletProvider({
           mnemonic,
           activeAccount.address ? resolveTonDerivationIndex(activeAccount, activeIndex) : 0,
           config.tonNetwork,
-          "v4r2",
+          tonWalletVersionRef.current,
         );
         try {
           return await tonClient.sendTonTransfer({
@@ -1194,28 +1451,27 @@ export function WalletProvider({
     [activeAccount, activeIndex, config.tonNetwork, config.tonRpcUrls.length, getTonClient, refreshTonState, showToast],
   );
 
-  const pairTonConnectUri = useCallback(
-    async (uri: string): Promise<StoredTonConnectSession> => {
-      if (vaultStatus !== "unlocked" || !sessionVault.has() || !tonAccount) {
+  const previewTonConnectUri = useCallback(
+    async (uri: string): Promise<TonConnectPairingPreview> => {
+      if (vaultStatus !== "unlocked" || !sessionVault.has()) {
         throw new Error("Unlock your vault before connecting TON apps");
       }
       if (!config.tonBridgeUrl) {
         throw new Error("VITE_TON_BRIDGE_URL is not configured");
       }
-
-      const startGen = vaultGenerationRef.current;
-      const {
-        TonConnectCryptoSession,
-        buildTonConnectSuccessEvent,
-        deriveTonAccount,
-        parseTonConnectUri,
-        sendTonConnectBridgeMessage,
-        signTonProof,
-      } = await loadTonCore();
+      const { isValidTonManifestOriginMatch, parseTonConnectUri } = await loadTonCore();
       const parsed = parseTonConnectUri(uri);
       const manifestOrigin = new URL(parsed.manifestUrl);
+      if (
+        manifestOrigin.protocol !== "https:" &&
+        !(manifestOrigin.protocol === "http:" && manifestOrigin.hostname === "localhost")
+      ) {
+        throw new Error("TON Connect manifestUrl must use https://");
+      }
+
       let dappName = manifestOrigin.hostname;
       let dappUrl = manifestOrigin.origin;
+      let manifestFetchedOk = false;
 
       try {
         const proxyManifestUrl = `${config.apiBaseUrl.replace(/\/+$/, "")}/v1/proxy/ton-manifest?url=${encodeURIComponent(parsed.manifestUrl)}`;
@@ -1223,18 +1479,80 @@ export function WalletProvider({
           headers: { "X-Astro-Network": config.network },
           signal: AbortSignal.timeout(4000),
         });
-        if (manifestRes.ok) {
+        if (!manifestRes.ok) {
+          const errJson = (await manifestRes.json().catch(() => ({}))) as { error?: string };
+          if (manifestRes.status >= 400 && manifestRes.status < 500) {
+            throw new Error(
+              errJson.error ?? "TON Connect manifest validation rejected (origin mismatch)",
+            );
+          }
+        } else {
+          manifestFetchedOk = true;
           const m = (await manifestRes.json()) as { name?: unknown; url?: unknown };
           if (typeof m.name === "string" && m.name.trim()) {
             dappName = m.name.trim().slice(0, 64);
           }
-          if (typeof m.url === "string" && m.url.trim().startsWith("http")) {
-            dappUrl = m.url.trim();
+          if (typeof m.url === "string" && m.url.trim()) {
+            if (!isValidTonManifestOriginMatch(parsed.manifestUrl, m.url.trim())) {
+              throw new Error(
+                "TON Connect manifest url origin does not match manifestUrl (possible domain spoof)",
+              );
+            }
+            dappUrl = new URL(m.url.trim()).origin;
           }
         }
-      } catch {
-        // Fallback cleanly to manifest hostname when manifest proxy is unreachable
+      } catch (err) {
+        if (err instanceof Error && /origin|spoof|manifestUrl|rejected/i.test(err.message)) {
+          throw err;
+        }
+        // Fallback only when proxy fetch fails due to transient network error
       }
+
+      const proofItem = parsed.items.find((i) => i.name === "ton_proof" && i.payload);
+      const originVerified =
+        manifestFetchedOk && isValidTonManifestOriginMatch(parsed.manifestUrl, dappUrl);
+      const domainForProof = new URL(dappUrl).hostname;
+
+      return {
+        uri,
+        dappClientId: parsed.clientId,
+        dappName,
+        dappUrl,
+        manifestUrl: parsed.manifestUrl,
+        domainForProof,
+        hasTonProof: Boolean(proofItem?.payload),
+        originVerified,
+        tonProofPayload: proofItem?.payload,
+        items: parsed.items,
+      };
+    },
+    [vaultStatus, config.apiBaseUrl, config.network, config.tonBridgeUrl],
+  );
+
+  const approveTonConnectPairing = useCallback(
+    async (preview: TonConnectPairingPreview): Promise<StoredTonConnectSession> => {
+      if (vaultStatus !== "unlocked" || !sessionVault.has()) {
+        throw new Error("Unlock your vault before connecting TON apps");
+      }
+      if (!config.tonBridgeUrl) {
+        throw new Error("VITE_TON_BRIDGE_URL is not configured");
+      }
+      if (preview.hasTonProof && !preview.originVerified) {
+        throw new Error(
+          "Refusing to sign ton_proof: manifest url could not be origin-verified via HTTPS.",
+        );
+      }
+
+      const startGen = vaultGenerationRef.current;
+      const versionToUse = tonWalletVersionRef.current;
+      const derivationIdx = resolveTonDerivationIndex(activeAccount, activeIndex);
+      const {
+        TonConnectCryptoSession,
+        buildTonConnectSuccessEvent,
+        deriveTonAccount,
+        sendTonConnectBridgeMessage,
+        signTonProof,
+      } = await loadTonCore();
 
       if (startGen !== vaultGenerationRef.current || !sessionVault.has()) {
         throw new Error("Vault locked before TON Connect pairing completed");
@@ -1242,48 +1560,59 @@ export function WalletProvider({
 
       const cryptoSess = new TonConnectCryptoSession();
       const timestamp = Math.floor(Date.now() / 1000);
-      const proofItem = parsed.items.find((i) => i.name === "ton_proof" && i.payload);
       let tonProof:
         | { timestamp: number; domain: string; payload: string; signatureBase64: string }
         | undefined;
 
-      if (proofItem?.payload) {
-        const domain = new URL(dappUrl).hostname;
-        const signatureBase64 = sessionVault.withMnemonic((mnemonic) => {
-          const derived = deriveTonAccount(
-            mnemonic,
-            resolveTonDerivationIndex(activeAccount, activeIndex),
-            config.tonNetwork,
-            "v4r2",
-          );
-          try {
-            return signTonProof({
+      const derivedResult = sessionVault.withMnemonic((mnemonic) => {
+        const derived = deriveTonAccount(
+          mnemonic,
+          derivationIdx,
+          config.tonNetwork,
+          versionToUse,
+        );
+        try {
+          if (preview.hasTonProof && preview.tonProofPayload) {
+            const sigB64 = signTonProof({
               rawAddress: derived.rawAddress,
-              domain,
+              domain: preview.domainForProof,
               timestamp,
-              payload: proofItem.payload!,
+              payload: preview.tonProofPayload,
               secretKey: derived.secretKey,
             });
-          } finally {
-            derived.zeroize();
+            tonProof = {
+              timestamp,
+              domain: preview.domainForProof,
+              payload: preview.tonProofPayload,
+              signatureBase64: sigB64,
+            };
           }
-        });
-        tonProof = { timestamp, domain, payload: proofItem.payload, signatureBase64 };
-      }
+          return {
+            summary: derived.toSummary(),
+            walletStateInitBase64: derived.walletStateInitBase64,
+            publicKeyHex: derived.publicKeyHex,
+            rawAddress: derived.rawAddress,
+          };
+        } finally {
+          derived.zeroize();
+        }
+      });
+
+      setTonAccount(derivedResult.summary);
 
       const connectEventJson = buildTonConnectSuccessEvent({
-        rawAddress: tonAccount.rawAddress,
+        rawAddress: derivedResult.rawAddress,
         network: config.tonNetwork,
-        walletStateInitBase64: tonAccount.walletStateInitBase64,
-        publicKeyHex: tonAccount.publicKeyHex,
+        walletStateInitBase64: derivedResult.walletStateInitBase64,
+        publicKeyHex: derivedResult.publicKeyHex,
         ...(tonProof ? { tonProof } : {}),
       });
 
-      const sealed = cryptoSess.encrypt(connectEventJson, parsed.clientId);
+      const sealed = cryptoSess.encrypt(connectEventJson, preview.dappClientId);
       await sendTonConnectBridgeMessage({
         bridgeUrl: config.tonBridgeUrl,
         clientId: cryptoSess.clientId,
-        to: parsed.clientId,
+        to: preview.dappClientId,
         payloadBase64: sealed,
       });
 
@@ -1295,12 +1624,14 @@ export function WalletProvider({
         ...(cleanScopeId ? { scopeId: cleanScopeId } : {}),
         walletClientId: cryptoSess.clientId,
         walletSecretHex: cryptoSess.secretKeyHex,
-        dappClientId: parsed.clientId,
-        dappName,
-        dappUrl,
-        manifestUrl: parsed.manifestUrl,
+        dappClientId: preview.dappClientId,
+        dappName: preview.dappName,
+        dappUrl: preview.dappUrl,
+        manifestUrl: preview.manifestUrl,
         network: config.tonNetwork,
-        connectedAddress: tonAccount.rawAddress,
+        connectedAddress: derivedResult.rawAddress,
+        derivationIndex: derivationIdx,
+        walletVersion: versionToUse,
         createdAt: timestamp,
       };
       await saveTonConnectSession(stored);
@@ -1309,21 +1640,26 @@ export function WalletProvider({
         ...prev.filter((s) => s.dappClientId !== stored.dappClientId),
       ]);
       triggerTelegramHaptic("success");
-      showToast(`Connected to ${dappName} via TON Connect`);
+      showToast(`Connected to ${preview.dappName} via TON Connect (${versionToUse.toUpperCase()})`);
       return stored;
     },
     [
       vaultStatus,
-      tonAccount,
       activeAccount,
       activeIndex,
-      config.apiBaseUrl,
-      config.network,
       config.tonBridgeUrl,
       config.tonNetwork,
       cleanScopeId,
       showToast,
     ],
+  );
+
+  const pairTonConnectUri = useCallback(
+    async (uri: string): Promise<StoredTonConnectSession> => {
+      const preview = await previewTonConnectUri(uri);
+      return approveTonConnectPairing(preview);
+    },
+    [previewTonConnectUri, approveTonConnectPairing],
   );
 
   const disconnectTonConnectSession = useCallback(
@@ -1401,13 +1737,20 @@ export function WalletProvider({
 
         const tonClient = await getTonClient();
         const bocBase64 = await sessionVault.withMnemonic(async (mnemonic) => {
+          const boundIndex = sessRecord.derivationIndex ?? 0;
+          const boundVersion = sessRecord.walletVersion ?? "v4r2";
           const derived = deriveTonAccount(
             mnemonic,
-            resolveTonDerivationIndex(activeAccount, activeIndex),
-            config.tonNetwork,
-            "v4r2",
+            boundIndex,
+            sessRecord.network,
+            boundVersion,
           );
           try {
+            if (derived.rawAddress !== sessRecord.connectedAddress) {
+              throw new Error(
+                "Connected TON Connect account does not match derived key — aborting signature.",
+              );
+            }
             return await enqueueTonAccountTx(derived.rawAddress, async () => {
               const chainState = await tonClient.getAccountState(derived.friendlyAddress);
               const boc = buildSignedTonTransfer({
@@ -1460,10 +1803,11 @@ export function WalletProvider({
 
   // Live TON Connect v2 SSE listener while Mini App vault is unlocked
   useEffect(() => {
+    const activeNetSessions = tonConnectSessions.filter((s) => s.network === config.tonNetwork);
     if (
       vaultStatus !== "unlocked" ||
       !config.tonBridgeUrl ||
-      tonConnectSessions.length === 0 ||
+      activeNetSessions.length === 0 ||
       typeof EventSource === "undefined"
     ) {
       return undefined;
@@ -1476,12 +1820,15 @@ export function WalletProvider({
       ({
         TonConnectCryptoSession,
         buildTonConnectEventsUrl,
+        classifyTonPayloadBoc,
         sendTonConnectBridgeMessage,
         validateTonConnectSendTxRequest,
       }) => {
         if (cancelled) return;
-        const clientIds = tonConnectSessions.map((s) => s.walletClientId);
-        const lastEventId = tonConnectSessions.find((s) => s.lastEventId)?.lastEventId;
+        const clientIds = activeNetSessions.map((s) => s.walletClientId);
+        // Only pass a single-session cursor; sharing last_event_id across multiple sessions can drop peer events.
+        const lastEventId =
+          activeNetSessions.length === 1 ? activeNetSessions[0]?.lastEventId : undefined;
         const eventsUrl = buildTonConnectEventsUrl(config.tonBridgeUrl!, clientIds, lastEventId);
         source = new EventSource(eventsUrl);
 
@@ -1490,11 +1837,20 @@ export function WalletProvider({
             const packet = JSON.parse(evt.data) as { from?: string; message?: string };
             if (!packet.from || !packet.message) return;
             const matched = tonConnectSessionsRef.current.find(
-              (s) => s.dappClientId === packet.from,
+              (s) => s.dappClientId === packet.from && s.network === config.tonNetwork,
             );
             if (!matched) return;
 
             if (evt.lastEventId) {
+              const dedupKey = `${matched.walletClientId}:${evt.lastEventId}`;
+              if (processedTonEventIdsRef.current.has(dedupKey)) {
+                return;
+              }
+              processedTonEventIdsRef.current.add(dedupKey);
+              if (processedTonEventIdsRef.current.size > 200) {
+                const oldest = processedTonEventIdsRef.current.values().next().value;
+                if (oldest) processedTonEventIdsRef.current.delete(oldest);
+              }
               const updated = { ...matched, lastEventId: evt.lastEventId };
               void saveTonConnectSession(updated).catch(() => undefined);
             }
@@ -1534,6 +1890,8 @@ export function WalletProvider({
                   messages: Array.isArray(txReq.messages) ? txReq.messages : [],
                 },
                 config.tonNetwork,
+                undefined,
+                { expectedFromRawAddress: matched.connectedAddress },
               );
 
               if (!validated.ok) {
@@ -1550,6 +1908,11 @@ export function WalletProvider({
                 return;
               }
 
+              const classifiedMessages = validated.messages.map((m) => ({
+                ...m,
+                classification: classifyTonPayloadBoc(m.payload, m.stateInit),
+              }));
+
               triggerTelegramHaptic("warning");
               setPendingTonConnectTx({
                 requestId: rpc.id,
@@ -1557,8 +1920,9 @@ export function WalletProvider({
                 dappClientId: matched.dappClientId,
                 dappName: matched.dappName,
                 dappUrl: matched.dappUrl,
+                connectedAddress: matched.connectedAddress,
                 validUntil: validated.validUntil,
-                messages: validated.messages,
+                messages: classifiedMessages,
               });
             }
           } catch {
@@ -1601,15 +1965,18 @@ export function WalletProvider({
       await saveEncryptedVault(envelope, cleanScopeId);
       setLocalVaultUpdatedAt(envelope.updatedAt);
 
+      const isCloudGrade = evaluateCloudBackupSecretStrength(pinOrPassphrase).acceptable;
+      await markCloudGradeSecret(isCloudGrade);
+
       sessionVault.set(payload.mnemonic);
       setAccountMetaList(stripImportedSecrets(initialAccounts));
       setActiveIndex(0);
       setVaultStatus("unlocked");
-      void saveSessionLease(pinOrPassphrase);
+      void saveSessionLease(pinOrPassphrase, initialAccounts, isCloudGrade);
       showToast("Sovereign SEP-0005 Vault created locally");
       return { envelopeJson: serializeAgVaultBackup(envelope) };
     },
-    [cleanScopeId, saveSessionLease, showToast],
+    [cleanScopeId, markCloudGradeSecret, saveSessionLease, showToast],
   );
 
   const unlockWithPin = useCallback(
@@ -1640,6 +2007,8 @@ export function WalletProvider({
       if (startGen !== vaultGenerationRef.current) {
         return;
       }
+      const isCloudGrade = evaluateCloudBackupSecretStrength(pinOrPassphrase).acceptable;
+      await markCloudGradeSecret(isCloudGrade);
       sessionVault.set(decrypted.mnemonic);
       for (const acc of decrypted.accounts) {
         if (acc.importedSecret) {
@@ -1650,17 +2019,55 @@ export function WalletProvider({
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setLocalVaultUpdatedAt(envelope.updatedAt);
       setVaultStatus("unlocked");
-      void saveSessionLease(pinOrPassphrase);
+      void saveSessionLease(pinOrPassphrase, decrypted.accounts, isCloudGrade);
     },
-    [cleanScopeId, saveSessionLease],
+    [cleanScopeId, markCloudGradeSecret, saveSessionLease],
+  );
+
+  const unwrapPinFromTelegramBiometric = useCallback(
+    async (token?: string): Promise<string | null> => {
+      const cleanToken = token?.trim() ?? "";
+      if (!cleanToken) return null;
+      const bioWrapRaw = await tgSecureStorageGet(bioWrapKey).catch(() => null);
+      if (bioWrapRaw && /^[a-f0-9]{64}$/i.test(cleanToken)) {
+        const parsed = JSON.parse(bioWrapRaw) as {
+          v?: unknown;
+          ivB64?: unknown;
+          ctB64?: unknown;
+        };
+        if (
+          parsed.v === 2 &&
+          typeof parsed.ivB64 === "string" &&
+          typeof parsed.ctB64 === "string"
+        ) {
+          const aesKey = await importBioWrapAesKey(cleanToken);
+          const pt = await unsealWithAesGcmKey(aesKey, {
+            ivB64: parsed.ivB64,
+            ctB64: parsed.ctB64,
+          });
+          const payload = JSON.parse(pt) as { v?: unknown; pin?: unknown };
+          if (payload.v === 2 && typeof payload.pin === "string" && payload.pin.length > 0) {
+            void tgSecureStorageRemove(securePinKey).catch(() => false);
+            return payload.pin;
+          }
+        }
+        return null;
+      }
+      // Migration path for pre-v2 biometric token stored inside hardware BiometricManager itself
+      if (!bioWrapRaw && cleanToken.length > 0) {
+        void tgSecureStorageRemove(securePinKey).catch(() => false);
+        return cleanToken;
+      }
+      return null;
+    },
+    [bioWrapKey, securePinKey],
   );
 
   const unlockWithBiometric = useCallback(async () => {
     if (telegramBioAvailable) {
       const bio = await authenticateTelegramBiometric("Unlock your AstroWallet vault");
       if (bio.authenticated) {
-        const pinFromBio =
-          bio.token || (await tgSecureStorageGet(securePinKey));
+        const pinFromBio = await unwrapPinFromTelegramBiometric(bio.token).catch(() => null);
         if (pinFromBio) {
           await unlockWithPin(pinFromBio);
           return;
@@ -1669,7 +2076,13 @@ export function WalletProvider({
     }
     const pin = await unlockWithFingerprint(resolveWebAuthnRpId(config.pwaOrigin), cleanScopeId);
     await unlockWithPin(pin);
-  }, [telegramBioAvailable, securePinKey, unlockWithPin, config.pwaOrigin, cleanScopeId]);
+  }, [
+    telegramBioAvailable,
+    unwrapPinFromTelegramBiometric,
+    unlockWithPin,
+    config.pwaOrigin,
+    cleanScopeId,
+  ]);
 
   const enableFingerprint = useCallback(
     async (pinOrPassphrase: string) => {
@@ -1688,15 +2101,30 @@ export function WalletProvider({
         if (!bio.authenticated) {
           return { enrolled: false, message: "Telegram biometric permission was not granted." };
         }
-        const savedBm = await updateTelegramBiometricToken(pinOrPassphrase);
-        const savedStore = await tgSecureStorageSet(securePinKey, pinOrPassphrase);
-        if (savedBm || savedStore) {
-          setFingerprintEnrolled(true);
-          return {
-            enrolled: true,
-            message: "Telegram Biometrics + device SecureStorage quick-unlock enabled.",
-          };
+        const bioKeyBytes = crypto.getRandomValues(new Uint8Array(32));
+        const bioKeyHex = bytesToHex(bioKeyBytes);
+        bioKeyBytes.fill(0);
+        const aesKey = await importBioWrapAesKey(bioKeyHex);
+        const sealed = await sealWithAesGcmKey(
+          aesKey,
+          JSON.stringify({ v: 2, pin: pinOrPassphrase }),
+        );
+        const savedBm = await updateTelegramBiometricToken(bioKeyHex);
+        if (savedBm) {
+          const savedStore = await tgSecureStorageSet(
+            bioWrapKey,
+            JSON.stringify({ v: 2, ...sealed }),
+          );
+          await tgSecureStorageRemove(securePinKey).catch(() => false);
+          if (savedStore) {
+            setFingerprintEnrolled(true);
+            return {
+              enrolled: true,
+              message: "Telegram Biometrics + encrypted SecureStorage quick-unlock enabled.",
+            };
+          }
         }
+        await updateTelegramBiometricToken("").catch(() => false);
       }
 
       const res = await enrollFingerprintUnlock(
@@ -1711,15 +2139,16 @@ export function WalletProvider({
       }
       return { enrolled: false, message: res.reason };
     },
-    [telegramBioAvailable, securePinKey, config.pwaOrigin, cleanScopeId],
+    [telegramBioAvailable, bioWrapKey, securePinKey, config.pwaOrigin, cleanScopeId],
   );
 
   const disableFingerprint = useCallback(async () => {
     await updateTelegramBiometricToken("").catch(() => false);
+    await tgSecureStorageRemove(bioWrapKey).catch(() => false);
     await tgSecureStorageRemove(securePinKey).catch(() => false);
     await disableFingerprintUnlock(cleanScopeId);
     setFingerprintEnrolled(false);
-  }, [securePinKey, cleanScopeId]);
+  }, [bioWrapKey, securePinKey, cleanScopeId]);
 
   const restoreAgVaultJson = useCallback(
     async (rawJson: string, pinOrPassphrase: string) => {
@@ -1731,6 +2160,9 @@ export function WalletProvider({
       if (startGen !== vaultGenerationRef.current) return;
       await saveEncryptedVault(envelope, cleanScopeId);
       if (startGen !== vaultGenerationRef.current) return;
+      const isCloudGrade = evaluateCloudBackupSecretStrength(pinOrPassphrase).acceptable;
+      const cloudSha = await sha256HexText(rawJson).catch(() => undefined);
+      await markCloudGradeSecret(isCloudGrade, cloudSha);
       setLocalVaultUpdatedAt(envelope.updatedAt);
       sessionVault.set(decrypted.mnemonic);
       for (const acc of decrypted.accounts) {
@@ -1741,10 +2173,10 @@ export function WalletProvider({
       setAccountMetaList(stripImportedSecrets(decrypted.accounts));
       setActiveIndex(decrypted.accounts[0]?.index ?? 0);
       setVaultStatus("unlocked");
-      void saveSessionLease(pinOrPassphrase);
+      void saveSessionLease(pinOrPassphrase, decrypted.accounts, isCloudGrade);
       showToast("Encrypted .agvault restored locally");
     },
-    [cleanScopeId, saveSessionLease, showToast],
+    [cleanScopeId, markCloudGradeSecret, saveSessionLease, showToast],
   );
 
   const syncFromNewerCloudBackup = useCallback(
@@ -1769,14 +2201,14 @@ export function WalletProvider({
           return { status: "up_to_date" };
         }
 
-        const lease = await loadValidSessionLease();
-        if (!lease || startGen !== vaultGenerationRef.current) {
+        const activePin = inMemorySessionPinRef.current;
+        if (!activePin || startGen !== vaultGenerationRef.current) {
           return { status: "pin_required" };
         }
 
         let cloudPayload;
         try {
-          cloudPayload = await decryptVaultPayload(cloudEnvelope, lease.pin, {
+          cloudPayload = await decryptVaultPayload(cloudEnvelope, activePin, {
             deriveKeyFn: deriveKeyInWorker,
           });
         } catch {
@@ -1786,9 +2218,13 @@ export function WalletProvider({
           return { status: "pin_required" };
         }
 
+        const cloudSha = await sha256HexText(rawJson).catch(() => undefined);
+        const isCloudGrade = evaluateCloudBackupSecretStrength(activePin).acceptable;
+
         if (!localEnvelope) {
           await saveEncryptedVault(cloudEnvelope, cleanScopeId);
           if (startGen !== vaultGenerationRef.current) return { status: "pin_required" };
+          await markCloudGradeSecret(isCloudGrade, cloudSha);
           setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
           sessionVault.set(cloudPayload.mnemonic);
           for (const acc of cloudPayload.accounts) {
@@ -1798,13 +2234,14 @@ export function WalletProvider({
           }
           setAccountMetaList(stripImportedSecrets(cloudPayload.accounts));
           setVaultStatus("unlocked");
+          void saveSessionLease(activePin, cloudPayload.accounts, isCloudGrade);
           showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
           return { status: "synced", accountCount: cloudPayload.accounts.length };
         }
 
         let localPayload;
         try {
-          localPayload = await decryptVaultPayload(localEnvelope, lease.pin, {
+          localPayload = await decryptVaultPayload(localEnvelope, activePin, {
             deriveKeyFn: deriveKeyInWorker,
           });
         } catch {
@@ -1861,12 +2298,13 @@ export function WalletProvider({
               accounts: mergedAccounts,
               createdAt: Math.min(localPayload.createdAt, cloudPayload.createdAt),
             },
-            lease.pin,
+            activePin,
             { deriveKeyFn: deriveKeyInWorker },
           );
           if (startGen !== vaultGenerationRef.current) return { status: "pin_required" };
           await saveEncryptedVault(mergedEnvelope, cleanScopeId);
           if (startGen !== vaultGenerationRef.current) return { status: "pin_required" };
+          await markCloudGradeSecret(isCloudGrade, cloudSha);
           setLocalVaultUpdatedAt(mergedEnvelope.updatedAt);
           sessionVault.set(localPayload.mnemonic);
           for (const acc of mergedAccounts) {
@@ -1876,6 +2314,7 @@ export function WalletProvider({
           }
           setAccountMetaList(stripImportedSecrets(mergedAccounts));
           setVaultStatus("unlocked");
+          void saveSessionLease(activePin, mergedAccounts, isCloudGrade);
           return {
             status: "push_merged",
             envelopeJson: serializeAgVaultBackup(mergedEnvelope),
@@ -1886,6 +2325,7 @@ export function WalletProvider({
         if (localMissingAny || cloudEnvelope.updatedAt > localEnvelope.updatedAt) {
           await saveEncryptedVault(cloudEnvelope, cleanScopeId);
           if (startGen !== vaultGenerationRef.current) return { status: "pin_required" };
+          await markCloudGradeSecret(isCloudGrade, cloudSha);
           setLocalVaultUpdatedAt(cloudEnvelope.updatedAt);
           sessionVault.set(cloudPayload.mnemonic);
           for (const acc of cloudPayload.accounts) {
@@ -1895,16 +2335,30 @@ export function WalletProvider({
           }
           setAccountMetaList(stripImportedSecrets(cloudPayload.accounts));
           setVaultStatus("unlocked");
+          void saveSessionLease(activePin, cloudPayload.accounts, isCloudGrade);
           showToast(`Synced ${cloudPayload.accounts.length} accounts from Telegram Cloud`);
           return { status: "synced", accountCount: cloudPayload.accounts.length };
         }
 
         return { status: "up_to_date" };
       }),
-    [cleanScopeId, loadValidSessionLease, showToast, withVaultMutex],
+    [cleanScopeId, markCloudGradeSecret, saveSessionLease, showToast, withVaultMutex],
   );
 
   const exportAgVaultJson = useCallback(async () => {
+    const envelope = await loadEncryptedVault(cleanScopeId);
+    if (!envelope) {
+      throw new Error("No encrypted vault present to export");
+    }
+    return serializeAgVaultBackup(envelope);
+  }, [cleanScopeId]);
+
+  const exportCloudBackupJson = useCallback(async () => {
+    if (!cloudSyncEligibleRef.current) {
+      throw new Error(
+        "Cloud Sync requires a strong Recovery Password (not a numeric PIN). Upgrade your vault protection in the Accounts tab.",
+      );
+    }
     const envelope = await loadEncryptedVault(cleanScopeId);
     if (!envelope) {
       throw new Error("No encrypted vault present to export");
@@ -1932,14 +2386,17 @@ export function WalletProvider({
           { deriveKeyFn: deriveKeyInWorker },
         );
         await saveEncryptedVault(updatedEnvelope, cleanScopeId);
+        const isCloudGrade = evaluateCloudBackupSecretStrength(newPinOrPassphrase).acceptable;
+        await markCloudGradeSecret(isCloudGrade);
         setLocalVaultUpdatedAt(updatedEnvelope.updatedAt);
-        clearSessionLease();
+        inMemorySessionPinRef.current = newPinOrPassphrase;
+        void saveSessionLease(newPinOrPassphrase, decrypted.accounts, isCloudGrade);
         // Clear any previous biometric PIN wrapper so stale PIN credentials never cause a mismatch
         await disableFingerprint();
         showToast("Vault protection updated", "info");
         return { envelopeJson: serializeAgVaultBackup(updatedEnvelope) };
       }),
-    [cleanScopeId, clearSessionLease, disableFingerprint, showToast, withVaultMutex],
+    [cleanScopeId, disableFingerprint, markCloudGradeSecret, saveSessionLease, showToast, withVaultMutex],
   );
 
   const revealMnemonicWithPin = useCallback(
@@ -1988,8 +2445,7 @@ export function WalletProvider({
       if (telegramBioAvailable) {
         const bio = await authenticateTelegramBiometric(reason);
         if (bio.authenticated) {
-          const pinFromBio =
-            bio.token || (await tgSecureStorageGet(securePinKey));
+          const pinFromBio = await unwrapPinFromTelegramBiometric(bio.token).catch(() => null);
           if (pinFromBio) {
             await verifyPinOrPassphrase(pinFromBio);
             return;
@@ -1999,7 +2455,13 @@ export function WalletProvider({
       const pin = await unlockWithFingerprint(resolveWebAuthnRpId(config.pwaOrigin), cleanScopeId);
       await verifyPinOrPassphrase(pin);
     },
-    [telegramBioAvailable, securePinKey, verifyPinOrPassphrase, config.pwaOrigin, cleanScopeId],
+    [
+      telegramBioAvailable,
+      unwrapPinFromTelegramBiometric,
+      verifyPinOrPassphrase,
+      config.pwaOrigin,
+      cleanScopeId,
+    ],
   );
 
   const addDerivedAccount = useCallback(
@@ -2278,6 +2740,7 @@ export function WalletProvider({
     chainFetchSeqRef.current += 1;
     tonFetchSeqRef.current += 1;
     tonEnabledRef.current = false;
+    inMemorySessionPinRef.current = null;
     setTonAccount(null);
     setPendingTonConnectTx(null);
     sessionVault.clear();
@@ -2315,13 +2778,9 @@ export function WalletProvider({
         showToast("Vault auto-locked after 15 minutes of inactivity", "info");
       }, INACTIVITY_MS);
       const now = Date.now();
-      if (now - lastLeaseExtendAt > 5 * 60 * 1000) {
+      if (now - lastLeaseExtendAt > 5 * 60 * 1000 && inMemoryLeaseExpiresAtRef.current) {
         lastLeaseExtendAt = now;
-        void loadValidSessionLease().then((lease) => {
-          if (lease) {
-            void saveSessionLease(lease.pin);
-          }
-        });
+        void saveSessionLease();
       }
     };
 
@@ -2363,16 +2822,20 @@ export function WalletProvider({
     chainFetchSeqRef.current += 1;
     tonFetchSeqRef.current += 1;
     tonEnabledRef.current = false;
+    inMemorySessionPinRef.current = null;
     setTonAccount(null);
     setPendingTonConnectTx(null);
     clearSessionLease();
     clearCachedClaimSecret();
     await updateTelegramBiometricToken("").catch(() => false);
+    await tgSecureStorageRemove(bioWrapKey).catch(() => false);
     await tgSecureStorageRemove(securePinKey).catch(() => false);
     await clearAllTonConnectSessions(cleanScopeId).catch(() => undefined);
     await clearPinLockoutState(cleanScopeId).catch(() => undefined);
     await deleteEncryptedVault(cleanScopeId);
     sessionVault.clear();
+    setCloudSyncEligible(false);
+    cloudSyncEligibleRef.current = false;
     setLocalVaultUpdatedAt(null);
     setAccountMetaList([]);
     setRawAccountState(null);
@@ -2385,7 +2848,7 @@ export function WalletProvider({
     setFingerprintEnrolled(false);
     setVaultStatus("uninitialized");
     showToast("Local vault wiped from this device", "info");
-  }, [securePinKey, cleanScopeId, clearSessionLease, showToast]);
+  }, [bioWrapKey, securePinKey, cleanScopeId, clearSessionLease, showToast]);
 
   const fundActiveTestnetAccount = useCallback(async () => {
     if (!activeAccount) {
@@ -3129,14 +3592,17 @@ export function WalletProvider({
       verifiedAssets,
       tokenMetaMap,
       tonAccount,
+      tonWalletVersion,
       tonState,
       loadingTonChain,
       tonChainError,
       tonConnectSessions,
       pendingTonConnectTx,
       localVaultUpdatedAt,
+      cloudSyncEligible,
       storageScopeId: cleanScopeId,
       setActiveIndex,
+      setTonWalletVersion,
       ensureTonAccount,
       showToast,
       dismissToast,
@@ -3145,6 +3611,7 @@ export function WalletProvider({
       restoreAgVaultJson,
       syncFromNewerCloudBackup,
       exportAgVaultJson,
+      exportCloudBackupJson,
       revealMnemonicWithPin,
       verifyPinOrPassphrase,
       verifyBiometricReauth,
@@ -3169,6 +3636,8 @@ export function WalletProvider({
       fundAnyTestnetAddress,
       sendPayment,
       sendTonPayment,
+      previewTonConnectUri,
+      approveTonConnectPairing,
       pairTonConnectUri,
       disconnectTonConnectSession,
       resolvePendingTonConnectTx,
@@ -3219,14 +3688,17 @@ export function WalletProvider({
       verifiedAssets,
       tokenMetaMap,
       tonAccount,
+      tonWalletVersion,
       tonState,
       loadingTonChain,
       tonChainError,
       tonConnectSessions,
       pendingTonConnectTx,
       localVaultUpdatedAt,
+      cloudSyncEligible,
       cleanScopeId,
       setActiveIndex,
+      setTonWalletVersion,
       ensureTonAccount,
       showToast,
       dismissToast,
@@ -3235,6 +3707,7 @@ export function WalletProvider({
       restoreAgVaultJson,
       syncFromNewerCloudBackup,
       exportAgVaultJson,
+      exportCloudBackupJson,
       revealMnemonicWithPin,
       verifyPinOrPassphrase,
       verifyBiometricReauth,
@@ -3259,6 +3732,8 @@ export function WalletProvider({
       fundAnyTestnetAddress,
       sendPayment,
       sendTonPayment,
+      previewTonConnectUri,
+      approveTonConnectPairing,
       pairTonConnectUri,
       disconnectTonConnectSession,
       resolvePendingTonConnectTx,

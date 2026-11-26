@@ -8,6 +8,8 @@ import QRCode from "qrcode";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard, triggerTelegramHaptic } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
+import { requiresHighValueReauth } from "./flow-validators.js";
+import { HighValueReauthGate } from "./HighValueReauthGate.js";
 import { IconCheck, IconCopy, IconExternalLink, IconQr, IconRefresh, IconSend } from "./Icons.js";
 
 interface PendingTonReview {
@@ -25,6 +27,8 @@ export function TonWalletSheet({
     config,
     activeIndex,
     tonAccount,
+    tonWalletVersion,
+    setTonWalletVersion,
     tonState,
     loadingTonChain,
     tonChainError,
@@ -38,6 +42,7 @@ export function TonWalletSheet({
   const [amountTon, setAmountTon] = useState("0.1");
   const [comment, setComment] = useState("");
   const [reviewPending, setReviewPending] = useState<PendingTonReview | null>(null);
+  const [reauthVerified, setReauthVerified] = useState(false);
   const [busy, setBusy] = useState(false);
   const submittingRef = useRef(false);
   const [copied, setCopied] = useState(false);
@@ -49,6 +54,7 @@ export function TonWalletSheet({
 
   useEffect(() => {
     setReviewPending(null);
+    setReauthVerified(false);
     setErrorMsg(null);
     setTxHash(null);
     setShowQr(false);
@@ -156,6 +162,7 @@ export function TonWalletSheet({
     }
 
     triggerTelegramHaptic("selection");
+    setReauthVerified(false);
     setReviewPending({
       destination: cleanDest,
       amountTon: amountTon.trim(),
@@ -163,8 +170,24 @@ export function TonWalletSheet({
     });
   };
 
+  const tonReauthGate = reviewPending
+    ? requiresHighValueReauth({
+        amount: reviewPending.amountTon,
+        assetCode: "TON",
+        spendableBalance: formattedBalance,
+        thresholdTon: 10,
+        network: config.network,
+        hasWarningVerdict:
+          reviewPending.destination.startsWith("EQ") || reviewPending.destination.startsWith("0:"),
+      })
+    : { required: false };
+
   const handleConfirmSend = async () => {
     if (!reviewPending || submittingRef.current) return;
+    if (tonReauthGate.required && !reauthVerified) {
+      setErrorMsg("Complete PIN or biometric confirmation before sending.");
+      return;
+    }
     submittingRef.current = true;
     setBusy(true);
     setErrorMsg(null);
@@ -204,6 +227,30 @@ export function TonWalletSheet({
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
               <span className="glass-pill glass-pill--trust">TON {tonAccount.version.toUpperCase()}</span>
               <span className="glass-pill">m/44&apos;/607&apos;/{tonDerivationIndex}&apos;</span>
+              <div style={{ display: "inline-flex", gap: 4 }} role="group" aria-label="TON Wallet Contract Version">
+                <button
+                  type="button"
+                  className={tonWalletVersion === "v4r2" ? "aw-mini-chip aw-mini-chip--active" : "aw-mini-chip"}
+                  aria-pressed={tonWalletVersion === "v4r2"}
+                  onClick={() => {
+                    triggerTelegramHaptic("selection");
+                    setTonWalletVersion("v4r2");
+                  }}
+                >
+                  V4R2
+                </button>
+                <button
+                  type="button"
+                  className={tonWalletVersion === "v5r1" ? "aw-mini-chip aw-mini-chip--active" : "aw-mini-chip"}
+                  aria-pressed={tonWalletVersion === "v5r1"}
+                  onClick={() => {
+                    triggerTelegramHaptic("selection");
+                    setTonWalletVersion("v5r1");
+                  }}
+                >
+                  V5R1 (W5)
+                </button>
+              </div>
               <button
                 type="button"
                 className="aw-chip-btn"
@@ -214,6 +261,9 @@ export function TonWalletSheet({
                   {tonAccount.friendlyAddress.slice(0, 6)}…{tonAccount.friendlyAddress.slice(-6)}
                 </code>
               </button>
+            </div>
+            <div style={{ fontSize: 11, color: "var(--aw-ink-secondary)", marginTop: 2 }}>
+              Standard {tonWalletVersion === "v5r1" ? "W5 V5R1 (gasless-ready)" : "V4R2 (Default)"} — V4R2 and V5R1 derive distinct TON addresses from the same seed.
             </div>
 
             <div className="aw-balance-figure tabular-nums">
@@ -377,6 +427,14 @@ export function TonWalletSheet({
               </div>
             )}
 
+            {tonReauthGate.required && tonReauthGate.reason && (
+              <HighValueReauthGate
+                reason={tonReauthGate.reason}
+                verified={reauthVerified}
+                onVerified={() => setReauthVerified(true)}
+              />
+            )}
+
             {errorMsg && <div className="aw-banner aw-banner--danger">{errorMsg}</div>}
 
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -387,6 +445,7 @@ export function TonWalletSheet({
                 disabled={busy}
                 onClick={() => {
                   setErrorMsg(null);
+                  setReauthVerified(false);
                   setReviewPending(null);
                 }}
               >
@@ -396,7 +455,7 @@ export function TonWalletSheet({
                 type="button"
                 className="aw-btn-primary"
                 style={{ flex: 2 }}
-                disabled={busy}
+                disabled={busy || (tonReauthGate.required && !reauthVerified)}
                 onClick={() => void handleConfirmSend()}
               >
                 <IconSend size={15} />

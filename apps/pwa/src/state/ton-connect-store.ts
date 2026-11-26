@@ -1,4 +1,5 @@
 import type { TonNetwork } from "@astrowallet/domain";
+import type { TonWalletVersion } from "@astrowallet/ton-core";
 
 const TC_DB_NAME = "astrowallet_ton_connect_v1";
 const TC_DB_VERSION = 1;
@@ -14,6 +15,8 @@ export interface StoredTonConnectSession {
   manifestUrl: string;
   network: TonNetwork;
   connectedAddress: string;
+  derivationIndex?: number | undefined;
+  walletVersion?: TonWalletVersion | undefined;
   createdAt: number;
   lastEventId?: string | undefined;
 }

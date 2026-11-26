@@ -104,7 +104,7 @@ const OptionalShortNameSchema = (field: string) =>
     z
       .string()
       .trim()
-      .regex(/^[A-Za-z0-9_]{3,64}$/, `${field} must be 3-64 alphanumeric/underscore characters`)
+      .regex(/^[A-Za-z0-9_-]{1,64}$/, `${field} must be 1-64 alphanumeric/underscore/hyphen characters`)
       .optional(),
   );
 
@@ -116,11 +116,45 @@ const OptionalBotUsernameSchema = (field: string) =>
       .trim()
       .transform((v) => v.replace(/^@/, ""))
       .refine(
-        (v) => /^[A-Za-z0-9_]{5,32}$/.test(v),
-        `${field} must be a valid Telegram bot username (5-32 chars)`,
+        (v) => /^[A-Za-z0-9_]{3,64}$/.test(v),
+        `${field} must be a valid Telegram bot username (3-64 chars)`,
       )
       .optional(),
   );
+
+function parseDomainCsv(field: string) {
+  return z
+    .preprocess(
+      (val) => (typeof val === "string" ? val : ""),
+      z.string(),
+    )
+    .transform((raw) =>
+      Array.from(
+        new Set(
+          raw
+            .split(",")
+            .map((part) =>
+              part
+                .trim()
+                .replace(/^https?:\/\//i, "")
+                .replace(/\/+$/, "")
+                .toLowerCase(),
+            )
+            .filter(Boolean),
+        ),
+      ),
+    )
+    .superRefine((domains, ctx) => {
+      for (const domain of domains) {
+        if (!PUBLIC_DOMAIN_REGEX.test(domain)) {
+          ctx.addIssue({
+            code: "custom",
+            message: `${field} contains invalid domain hostname "${domain}"`,
+          });
+        }
+      }
+    });
+}
 
 function parseContractCsv(field: string) {
   return z
@@ -326,7 +360,6 @@ const RawPwaEnvSchema = z
       "VITE_SOROBAN_MAX_RESOURCE_FEE_STROOPS",
       "5000000",
     ),
-    VITE_REOWN_PROJECT_ID: OptionalNonEmptyStringSchema,
     VITE_CCTP_BRIDGE_URL: OptionalUrlSchema("VITE_CCTP_BRIDGE_URL"),
     VITE_CCTP_TOKEN_MESSENGER_CONTRACT_ID: z.preprocess(
       emptyToUndefined,
@@ -520,7 +553,6 @@ export interface PwaConfig {
   explorerBaseUrl?: string | undefined;
   sorobitsExplorerUrl?: string | undefined;
   sorobanMaxResourceFeeStroops: string;
-  reownProjectId?: string | undefined;
   cctpBridgeUrl?: string | undefined;
   cctpTokenMessengerContractId?: ContractAddress | undefined;
   cctpForwarderContractId?: ContractAddress | undefined;
@@ -584,7 +616,6 @@ export function parsePwaConfig(rawEnv: Record<string, unknown>): PwaConfig {
     explorerBaseUrl: parsed.VITE_EXPLORER_BASE_URL,
     sorobitsExplorerUrl: parsed.VITE_SOROBITS_EXPLORER_URL,
     sorobanMaxResourceFeeStroops: parsed.VITE_SOROBAN_MAX_RESOURCE_FEE_STROOPS,
-    reownProjectId: parsed.VITE_REOWN_PROJECT_ID,
     cctpBridgeUrl: parsed.VITE_CCTP_BRIDGE_URL,
     cctpTokenMessengerContractId: parsed.VITE_CCTP_TOKEN_MESSENGER_CONTRACT_ID,
     cctpForwarderContractId: parsed.VITE_CCTP_FORWARDER_CONTRACT_ID,
@@ -718,6 +749,8 @@ const RawServerEnvSchema = z
         .optional(),
     ),
     TG_MINI_APP_SHORT_NAME: OptionalShortNameSchema("TG_MINI_APP_SHORT_NAME"),
+    ASTRODEX_BOT_USERNAME: OptionalBotUsernameSchema("ASTRODEX_BOT_USERNAME"),
+    ASTRODEX_MINI_APP_SHORT_NAME: OptionalShortNameSchema("ASTRODEX_MINI_APP_SHORT_NAME"),
     TG_BOT_TOKEN: z
       .string({
         error: (iss) => (iss.input === undefined ? "TG_BOT_TOKEN is required" : undefined),
@@ -802,6 +835,7 @@ const RawServerEnvSchema = z
         )
         .optional(),
     ),
+    SEP10_ALLOWED_ANCHOR_DOMAINS: parseDomainCsv("SEP10_ALLOWED_ANCHOR_DOMAINS"),
     SEP10_CLIENT_SIGNING_SECRET: z.preprocess(
       emptyToUndefined,
       z
@@ -877,6 +911,8 @@ export interface ServerConfig {
   telegramApiOrigin?: string | undefined;
   tgBotUsername?: string | undefined;
   tgMiniAppShortName?: string | undefined;
+  astrodexBotUsername?: string | undefined;
+  astrodexMiniAppShortName?: string | undefined;
   tgBotToken: string;
   tgWebhookSecret: string;
   intentHmacSecret: string;
@@ -891,6 +927,7 @@ export interface ServerConfig {
   relayBootstrapDailyLimit: number;
   relayAllowDirectBootstrap: boolean;
   sep10ClientDomain?: string | undefined;
+  sep10AllowedAnchorDomains: string[];
   sep10ClientSigningSecret?: string | undefined;
 }
 
@@ -922,6 +959,8 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     telegramApiOrigin: parsed.TELEGRAM_API_ORIGIN,
     tgBotUsername: parsed.TG_BOT_USERNAME,
     tgMiniAppShortName: parsed.TG_MINI_APP_SHORT_NAME,
+    astrodexBotUsername: parsed.ASTRODEX_BOT_USERNAME,
+    astrodexMiniAppShortName: parsed.ASTRODEX_MINI_APP_SHORT_NAME,
     tgBotToken: parsed.TG_BOT_TOKEN,
     tgWebhookSecret: parsed.TG_WEBHOOK_SECRET,
     intentHmacSecret: parsed.INTENT_HMAC_SECRET,
@@ -936,6 +975,7 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     relayBootstrapDailyLimit: parsed.RELAY_BOOTSTRAP_DAILY_LIMIT,
     relayAllowDirectBootstrap: parsed.RELAY_ALLOW_DIRECT_BOOTSTRAP,
     sep10ClientDomain: parsed.SEP10_CLIENT_DOMAIN,
+    sep10AllowedAnchorDomains: parsed.SEP10_ALLOWED_ANCHOR_DOMAINS,
     sep10ClientSigningSecret: parsed.SEP10_CLIENT_SIGNING_SECRET,
   };
 }

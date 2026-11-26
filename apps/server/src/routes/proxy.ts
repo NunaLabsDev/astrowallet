@@ -35,6 +35,7 @@ import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
 import { checkRateLimit, clientKeyFromHeaders } from "../rate-limit.js";
 import type { FetchLike } from "../stellar-verifier.js";
+import { authenticateMiniAppSession } from "./tg-auth.js";
 
 export interface ProxyRoutesDeps {
   fetchFn?: FetchLike | undefined;
@@ -539,11 +540,25 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         return c.json({ error: "TON Connect manifest must be a JSON object" }, 502);
       }
       const rawObj = parsedJson as Record<string, unknown>;
+      let verifiedDappUrl: string | undefined;
+      if (typeof rawObj.url === "string" && rawObj.url.trim()) {
+        const parsedDappUrl = parseSafeHttpsPublicUrl(rawObj.url.trim());
+        if (
+          !parsedDappUrl ||
+          parsedDappUrl.username ||
+          parsedDappUrl.password ||
+          parsedDappUrl.hostname.toLowerCase() !== parsed.hostname.toLowerCase()
+        ) {
+          return c.json(
+            { error: "TON Connect manifest url origin does not match manifestUrl" },
+            400,
+          );
+        }
+        verifiedDappUrl = parsedDappUrl.origin;
+      }
       manifestJson = {
         ...(typeof rawObj.name === "string" ? { name: rawObj.name.trim().slice(0, 64) } : {}),
-        ...(typeof rawObj.url === "string" && rawObj.url.trim().startsWith("https://")
-          ? { url: rawObj.url.trim() }
-          : {}),
+        ...(verifiedDappUrl ? { url: verifiedDappUrl } : {}),
         ...(typeof rawObj.iconUrl === "string" && rawObj.iconUrl.trim().startsWith("https://")
           ? { iconUrl: rawObj.iconUrl.trim() }
           : {}),
@@ -1334,13 +1349,28 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
   }
 
   router.get("/sep10/challenge", async (c) => {
+    const session = await authenticateMiniAppSession(c).catch(() => ({
+      ok: false as const,
+      status: 401 as const,
+      error: "Unauthorized",
+    }));
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
     const config = c.get("config");
     const domain = c.req.query("domain") ?? "";
+    const normalizedDomain = domain.trim().replace(/^https?:\/\//i, "").replace(/\/+$/, "").toLowerCase();
     const account = c.req.query("account") ?? "";
     const parsedAcct = ClassicAddressSchema.safeParse(account.trim());
     if (!parsedAcct.success) {
       return c.json({ error: "Valid Classic G... account is required" }, 400);
     }
+    const clientCosignAllowed = Boolean(
+      config.sep10ClientDomain &&
+        config.sep10ClientSigningSecret &&
+        normalizedDomain &&
+        config.sep10AllowedAnchorDomains.includes(normalizedDomain),
+    );
     try {
       const endpoints = (await resolveSep24AnchorEndpoints(domain, c.env.CACHE)) as {
         webAuthEndpoint: string;
@@ -1349,7 +1379,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
       };
       const challengeUrl = new URL(endpoints.webAuthEndpoint);
       challengeUrl.searchParams.set("account", parsedAcct.data);
-      if (config.sep10ClientDomain && config.sep10ClientSigningSecret) {
+      if (clientCosignAllowed && config.sep10ClientDomain) {
         challengeUrl.searchParams.set("client_domain", config.sep10ClientDomain);
       }
       const res = await fetchFn(challengeUrl.toString(), {
@@ -1375,7 +1405,7 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
 
       let challengeXdr = body.transaction;
       let clientDomainSigned = false;
-      if (config.sep10ClientDomain && config.sep10ClientSigningSecret) {
+      if (clientCosignAllowed && config.sep10ClientDomain && config.sep10ClientSigningSecret) {
         const parsed = TransactionBuilder.fromXDR(body.transaction, config.networkPassphrase);
         if (parsed instanceof FeeBumpTransaction || !(parsed instanceof Transaction)) {
           return c.json({ error: "Invalid SEP-10 challenge envelope type" }, 502);
@@ -1415,15 +1445,27 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         if (!firstOp || firstOp.source !== parsedAcct.data) {
           return c.json({ error: "SEP-10 challenge op 0 source does not match requested account" }, 502);
         }
-        const hasMatchingClientDomain = parsed.operations.some((op) => {
+        const hasUnexpectedClientSourceOp = parsed.operations.some((op) => {
+          if (op.type !== "manageData") return false;
+          if (op.source !== clientKp.publicKey()) return false;
+          const valStr = op.value ? Buffer.from(op.value).toString("utf8") : "";
+          return !(op.name === "client_domain" && valStr === config.sep10ClientDomain);
+        });
+        if (hasUnexpectedClientSourceOp) {
+          return c.json(
+            { error: "SEP-10 challenge contains unauthorized operation sourced to client_domain key" },
+            502,
+          );
+        }
+        const clientDomainOps = parsed.operations.filter((op) => {
           if (op.type !== "manageData" || op.name !== "client_domain") return false;
           if (op.source && op.source !== clientKp.publicKey()) return false;
           const valStr = op.value ? Buffer.from(op.value).toString("utf8") : "";
           return valStr === config.sep10ClientDomain;
         });
-        if (!hasMatchingClientDomain) {
+        if (clientDomainOps.length !== 1) {
           return c.json(
-            { error: "SEP-10 challenge missing matching client_domain manageData op" },
+            { error: "SEP-10 challenge missing unique matching client_domain manageData op" },
             502,
           );
         }
@@ -1437,7 +1479,9 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
         network_passphrase: body.network_passphrase,
         webAuthEndpoint: endpoints.webAuthEndpoint,
         transferServerSep24: endpoints.transferServerSep24,
-        ...(config.sep10ClientDomain ? { client_domain: config.sep10ClientDomain } : {}),
+        ...(clientCosignAllowed && config.sep10ClientDomain
+          ? { client_domain: config.sep10ClientDomain }
+          : {}),
         ...(clientDomainSigned ? { clientDomainSigned: true } : {}),
       });
     } catch (err) {
@@ -1451,6 +1495,14 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
   });
 
   router.post("/sep10/token", async (c) => {
+    const session = await authenticateMiniAppSession(c).catch(() => ({
+      ok: false as const,
+      status: 401 as const,
+      error: "Unauthorized",
+    }));
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
     let body: z.infer<typeof Sep10TokenBodySchema>;
     try {
       body = Sep10TokenBodySchema.parse(await c.req.json());
@@ -1493,6 +1545,14 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
   });
 
   router.post("/sep24/interactive", async (c) => {
+    const session = await authenticateMiniAppSession(c).catch(() => ({
+      ok: false as const,
+      status: 401 as const,
+      error: "Unauthorized",
+    }));
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
     let body: z.infer<typeof Sep24InteractiveBodySchema>;
     try {
       body = Sep24InteractiveBodySchema.parse(await c.req.json());
@@ -1648,6 +1708,14 @@ export function createProxyRoutes(deps: ProxyRoutesDeps = {}): Hono<ProxyRouteEn
   });
 
   router.post("/x402-probe", async (c) => {
+    const session = await authenticateMiniAppSession(c).catch(() => ({
+      ok: false as const,
+      status: 401 as const,
+      error: "Unauthorized",
+    }));
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
     let body: z.infer<typeof X402ProbeBodySchema>;
     try {
       body = X402ProbeBodySchema.parse(await c.req.json());

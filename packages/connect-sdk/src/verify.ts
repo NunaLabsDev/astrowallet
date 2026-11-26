@@ -147,9 +147,12 @@ export async function verifyAstroLoginProof(
   }
 
   if (expected.botUsername) {
-    const cleanBot = expected.botUsername.trim().replace(/^@/, "").toLowerCase();
-    const appLine = (getField("App:") ?? "").toLowerCase();
-    if (!appLine.includes(`(@${cleanBot})`)) {
+    const cleanBot = expected.botUsername.trim().replace(/^@/, "");
+    const escapedBot = cleanBot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const appLine = getField("App:") ?? "";
+    const trailingBotPattern = new RegExp(`\\s\\(@${escapedBot}\\)$`, "i");
+    const botTagMatches = appLine.match(/\(@[A-Za-z0-9_]+\)/g) ?? [];
+    if (!trailingBotPattern.test(appLine) || botTagMatches.length !== 1) {
       return { valid: false, reason: "Bot username mismatch in challenge" };
     }
   }

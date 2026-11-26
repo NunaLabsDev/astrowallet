@@ -1,4 +1,4 @@
-import { Address } from "@ton/core";
+import { Address, beginCell } from "@ton/core";
 import nacl from "tweetnacl";
 import { describe, expect, it } from "vitest";
 import {
@@ -8,10 +8,12 @@ import {
   buildTonConnectEventsUrl,
   buildTonConnectSuccessEvent,
   buildTonProofSignatureMessage,
+  classifyTonPayloadBoc,
   createTonClient,
   deriveTonAccount,
   formatNanoTon,
   isValidTonAddress,
+  isValidTonManifestOriginMatch,
   parseTonConnectUri,
   parseTonToNano,
   signTonProof,
@@ -243,5 +245,100 @@ describe("@astrowallet/ton-core", () => {
 
     src.zeroize();
     dest.zeroize();
+  });
+
+  it("validates TON Connect manifest origin, classifies BOC payloads, and enforces from/validUntil bounds", () => {
+    expect(
+      isValidTonManifestOriginMatch(
+        "https://app.ston.fi/tonconnect-manifest.json",
+        "https://app.ston.fi",
+      ),
+    ).toBe(true);
+    expect(
+      isValidTonManifestOriginMatch(
+        "https://evil.example/manifest.json",
+        "https://fragment.com",
+      ),
+    ).toBe(false);
+    expect(
+      isValidTonManifestOriginMatch(
+        "http://app.ston.fi/manifest.json",
+        "https://app.ston.fi",
+      ),
+    ).toBe(false);
+
+    const jettonBoc = beginCell().storeUint(0x0f8a7ea5, 32).storeUint(1, 64).endCell().toBoc().toString("base64");
+    expect(classifyTonPayloadBoc(jettonBoc).kind).toBe("jetton_transfer");
+
+    const nftBoc = beginCell().storeUint(0x5fcc3d14, 32).storeUint(1, 64).endCell().toBoc().toString("base64");
+    expect(classifyTonPayloadBoc(nftBoc).kind).toBe("nft_transfer");
+
+    const commentBoc = beginCell()
+      .storeUint(0x00000000, 32)
+      .storeStringTail("Hello TON")
+      .endCell()
+      .toBoc()
+      .toString("base64");
+    const commentParsed = classifyTonPayloadBoc(commentBoc);
+    expect(commentParsed.kind).toBe("text_comment");
+    expect(commentParsed.comment).toBe("Hello TON");
+
+    const contractBoc = beginCell().storeUint(0x12345678, 32).endCell().toBoc().toString("base64");
+    const stateInitBoc = beginCell().storeUint(1, 8).endCell().toBoc().toString("base64");
+    const withStateInit = classifyTonPayloadBoc(contractBoc, stateInitBoc);
+    expect(withStateInit.kind).toBe("contract_call");
+    expect(withStateInit.hasStateInit).toBe(true);
+    expect(withStateInit.warnings.length).toBeGreaterThanOrEqual(2);
+
+    const acct0 = deriveTonAccount(TEST_MNEMONIC, 0, "testnet", "v4r2");
+    const acct1 = deriveTonAccount(TEST_MNEMONIC, 1, "testnet", "v4r2");
+    const now = 1_900_000_000;
+
+    // Rejects mismatched from address
+    expect(
+      validateTonConnectSendTxRequest(
+        {
+          id: "from-mismatch",
+          validUntil: now + 120,
+          network: "-3",
+          from: acct1.rawAddress,
+          messages: [{ address: acct1.friendlyAddress, amount: "100000000" }],
+        },
+        "testnet",
+        now,
+        { expectedFromRawAddress: acct0.rawAddress },
+      ),
+    ).toMatchObject({ ok: false, code: 1 });
+
+    // Rejects validUntil > 10 minutes
+    expect(
+      validateTonConnectSendTxRequest(
+        {
+          id: "long-expiry",
+          validUntil: now + 900,
+          network: "-3",
+          messages: [{ address: acct1.friendlyAddress, amount: "100000000" }],
+        },
+        "testnet",
+        now,
+      ),
+    ).toMatchObject({ ok: false, code: 1 });
+
+    // Rejects corrupted payload BOC
+    expect(
+      validateTonConnectSendTxRequest(
+        {
+          id: "bad-boc",
+          validUntil: now + 120,
+          network: "-3",
+          messages: [{ address: acct1.friendlyAddress, amount: "100000000", payload: "not-base64-boc!" }],
+        },
+        "testnet",
+        now,
+      ),
+    ).toMatchObject({ ok: false, code: 1 });
+
+    acct0.zeroize();
+    acct1.zeroize();
   });
 });

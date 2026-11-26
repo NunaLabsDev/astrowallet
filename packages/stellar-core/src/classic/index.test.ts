@@ -1,5 +1,16 @@
 import type { ClassicAddress, MuxedAddress } from "@astrowallet/domain";
-import { Keypair, MemoHash, MemoID, MemoNone, MemoReturn, MemoText } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Keypair,
+  MemoHash,
+  MemoID,
+  MemoNone,
+  MemoReturn,
+  MemoText,
+  Networks,
+  Operation,
+  TransactionBuilder,
+} from "@stellar/stellar-sdk";
 import { describe, expect, it } from "vitest";
 import {
   buildChangeTrustOperation,
@@ -9,6 +20,7 @@ import {
   buildStellarMemo,
   decodeMuxedAddress,
   encodeMuxedAddress,
+  signSep10ChallengeTransaction,
 } from "./index.js";
 
 describe("Classic Stellar completeness (@astrowallet/stellar-core)", () => {
@@ -81,5 +93,86 @@ describe("Classic Stellar completeness (@astrowallet/stellar-core)", () => {
       price: "0.25",
     });
     expect(sellOp.body.type).toBe("manageSellOffer");
+  });
+
+  it("hardens signSep10ChallengeTransaction against unbounded timeBounds, user source tx, and op0 source mismatch", () => {
+    const anchorKp = Keypair.random();
+    const userKp = Keypair.random();
+    const otherKp = Keypair.random();
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    const validChallenge = new TransactionBuilder(new Account(anchorKp.publicKey(), "-1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+      timebounds: { minTime: nowSec - 10, maxTime: nowSec + 300 },
+    })
+      .addOperation(
+        Operation.manageData({
+          source: userKp.publicKey(),
+          name: "anchor.example auth",
+          value: "nonce",
+        }),
+      )
+      .build();
+    validChallenge.sign(anchorKp);
+
+    const signedValid = signSep10ChallengeTransaction(
+      validChallenge.toXDR(),
+      userKp,
+      Networks.TESTNET,
+      nowSec,
+    );
+    expect(TransactionBuilder.fromXDR(signedValid, Networks.TESTNET).signatures).toHaveLength(2);
+
+    const infiniteChallenge = new TransactionBuilder(new Account(anchorKp.publicKey(), "-1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+      timebounds: { minTime: 0, maxTime: 0 },
+    })
+      .addOperation(
+        Operation.manageData({
+          source: userKp.publicKey(),
+          name: "anchor.example auth",
+          value: "nonce",
+        }),
+      )
+      .build();
+    expect(() =>
+      signSep10ChallengeTransaction(infiniteChallenge.toXDR(), userKp, Networks.TESTNET, nowSec),
+    ).toThrow(/timeBounds/);
+
+    const userSourcedChallenge = new TransactionBuilder(new Account(userKp.publicKey(), "-1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+      timebounds: { minTime: nowSec - 10, maxTime: nowSec + 300 },
+    })
+      .addOperation(
+        Operation.manageData({
+          source: userKp.publicKey(),
+          name: "anchor.example auth",
+          value: "nonce",
+        }),
+      )
+      .build();
+    expect(() =>
+      signSep10ChallengeTransaction(userSourcedChallenge.toXDR(), userKp, Networks.TESTNET, nowSec),
+    ).toThrow(/challenge source cannot be user account/);
+
+    const wrongOpSource = new TransactionBuilder(new Account(anchorKp.publicKey(), "-1"), {
+      fee: "100",
+      networkPassphrase: Networks.TESTNET,
+      timebounds: { minTime: nowSec - 10, maxTime: nowSec + 300 },
+    })
+      .addOperation(
+        Operation.manageData({
+          source: otherKp.publicKey(),
+          name: "anchor.example auth",
+          value: "nonce",
+        }),
+      )
+      .build();
+    expect(() =>
+      signSep10ChallengeTransaction(wrongOpSource.toXDR(), userKp, Networks.TESTNET, nowSec),
+    ).toThrow(/first manageData operation source/);
   });
 });

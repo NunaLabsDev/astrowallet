@@ -208,5 +208,5 @@ sequenceDiagram
 
 - **UI Surface:** Built strictly according to [`docs/DESIGN_SYSTEM.md`](docs/DESIGN_SYSTEM.md) using the 5-color palette (`#F15A24`, `#F5C928`, `#8050C8`, `#A58BE0`, `#172C69`), Apple Liquid Glass elevation limits (max 2–3 simultaneous blur layers), and deterministic **Astro Navigators** state visuals.
 - **Mini App Security Headers (`_headers` / Cloudflare):**
-  `default-src 'self'; script-src 'self' https://telegram.org 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: https:; connect-src 'self' <CONFIGURED_STELLAR_TON_AND_API_ORIGINS>; worker-src 'self'; object-src 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'self'; form-action 'self';`
+  `default-src 'self'; script-src 'self' https://telegram.org 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' <CONFIGURED_STELLAR_TON_AND_API_ORIGINS>; worker-src 'self'; object-src 'none'; frame-ancestors https://web.telegram.org https://*.telegram.org; base-uri 'self'; form-action 'self';`
 - **Multi-Network Runtime Config:** Validated at boot by `@astrowallet/domain` Zod schemas—zero hardcoded passphrases, endpoints, or contract addresses in application source.

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AGENT_DERIVATION_INDEX,
+  AgentBudgetPolicySchema,
   createDefaultAgentBudgetPolicy,
   evaluateAgentSpendRequest,
   getEffectiveSpentTodayStroops,
@@ -8,6 +9,7 @@ import {
   recordAgentSpend,
   type AgentBudgetPolicy,
 } from "@astrowallet/stellar-core";
+import { useTelegram } from "../state/telegram-context.js";
 import { useWallet } from "../state/wallet-context.js";
 import { copyTextToClipboard } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
@@ -25,7 +27,10 @@ function loadPolicy(
   try {
     const raw = localStorage.getItem(`${STORAGE_KEY}:${network}`);
     if (raw) {
-      return JSON.parse(raw) as AgentBudgetPolicy;
+      const parsed = AgentBudgetPolicySchema.safeParse(JSON.parse(raw));
+      if (parsed.success) {
+        return parsed.data;
+      }
     }
   } catch {
     // Fallback to default policy
@@ -46,6 +51,7 @@ function formatStroopsUsdc(stroops: string): string {
  * for isolated sub-account m/44'/148'/99' + test live HTTP 402 endpoints (AstroDex Forensic Alpha).
  */
 export function AgentBudgetSheet() {
+  const { sessionToken } = useTelegram();
   const {
     config,
     activeAccount,
@@ -156,12 +162,16 @@ export function AgentBudgetSheet() {
         bodyPreview: string;
       }> => {
         if (parsedUrl.protocol === "https:" && config.apiBaseUrl) {
+          if (!sessionToken) {
+            throw new Error("Telegram Mini App session is required for HTTPS x402 proxy probes.");
+          }
           const proxyRes = await fetch(
             `${config.apiBaseUrl.replace(/\/+$/, "")}/v1/proxy/x402-probe`,
             {
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
+                Authorization: `Bearer ${sessionToken}`,
                 "X-Astro-Network": config.network,
               },
               body: JSON.stringify({
@@ -219,6 +229,7 @@ export function AgentBudgetSheet() {
           domain: parsedUrl.hostname,
           network: first.network,
           amountStroops: first.amount,
+          asset: first.asset,
         });
         if (!check.allowed) {
           setProbeResult(

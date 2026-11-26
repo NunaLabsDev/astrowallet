@@ -630,6 +630,31 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         return c.json({ error: "Transaction hash already used for another intent" }, 409);
       }
 
+      const isCreatorClaimStage = stage === "funded" || stage === "cancelled";
+      let fallbackCreatorSourceAccount: string | undefined;
+      if (isCreatorClaimStage && !authCheck.hasSession) {
+        const creatorLinked = await repo.listLinkedAddresses(intent.creatorTelegramUserId);
+        const allowedCreatorAddrs = new Set<string>([
+          ...(payload.sourceAddress ? [payload.sourceAddress] : []),
+          ...creatorLinked.map((a) => a.address),
+        ]);
+        const suppliedAddr = stage === "funded" ? parsedBody.senderAddress : parsedBody.payerAddress;
+        if (allowedCreatorAddrs.size === 0) {
+          return c.json(
+            { error: "Mini App session is required to confirm creator-only claim action" },
+            401,
+          );
+        }
+        if (suppliedAddr && !allowedCreatorAddrs.has(suppliedAddr)) {
+          return c.json(
+            { error: "Confirmed sender does not belong to intent creator" },
+            403,
+          );
+        }
+        fallbackCreatorSourceAccount =
+          suppliedAddr ?? payload.sourceAddress ?? creatorLinked[0]?.address;
+      }
+
       const escrowParsed = ContractAddressSchema.safeParse(
         payload.escrowContractId ?? existingClaim?.escrowContractId ?? config.claimEscrowContractId,
       );
@@ -646,12 +671,14 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
               ? "cancel_claim"
               : "refund_expired";
 
+      const resolvedClaimSource =
+        fallbackCreatorSourceAccount ??
+        (stage === "funded" ? parsedBody.senderAddress : undefined);
+
       const expected: ExpectedTxMatch = {
         minCreatedAtUnix: intent.createdAt,
         allowSorobanRpcFallback: true,
-        ...(stage === "funded" && parsedBody.senderAddress
-          ? { expectedSourceAccount: parsedBody.senderAddress }
-          : {}),
+        ...(resolvedClaimSource ? { expectedSourceAccount: resolvedClaimSource } : {}),
         sorobanInvoke: {
           contractId: escrowParsed.data,
           functionName: sorobanFn,
@@ -958,6 +985,29 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
       return c.json({ error: "Transaction hash already used for another intent" }, 409);
     }
 
+    let creatorBoundSourceAccount: string | undefined;
+    if (CREATOR_ONLY_INTENTS.has(intent.actionType) && !authCheck.hasSession) {
+      const creatorLinked = await repo.listLinkedAddresses(intent.creatorTelegramUserId);
+      const allowedCreatorAddrs = new Set<string>([
+        ...(payload.sourceAddress ? [payload.sourceAddress] : []),
+        ...creatorLinked.map((a) => a.address),
+      ]);
+      if (allowedCreatorAddrs.size === 0) {
+        return c.json(
+          { error: "Mini App session is required to confirm creator-only intent" },
+          401,
+        );
+      }
+      if (parsedBody.payerAddress && !allowedCreatorAddrs.has(parsedBody.payerAddress)) {
+        return c.json(
+          { error: "Confirmed payerAddress does not belong to intent creator" },
+          403,
+        );
+      }
+      creatorBoundSourceAccount =
+        parsedBody.payerAddress ?? payload.sourceAddress ?? creatorLinked[0]?.address;
+    }
+
     let expectedSignXdrHash: string | undefined;
     if (intent.actionType === "sign_xdr" && payload.unsignedXdr) {
       try {
@@ -970,7 +1020,8 @@ export function createIntentRoutes(deps: IntentRoutesDeps = {}): Hono<IntentRout
         // Ignore if unparseable
       }
     }
-    const resolvedSourceAccount = parsedBody.payerAddress ?? payload.sourceAddress;
+    const resolvedSourceAccount =
+      creatorBoundSourceAccount ?? parsedBody.payerAddress ?? payload.sourceAddress;
     const expected: ExpectedTxMatch = {
       minCreatedAtUnix: intent.createdAt,
       ...(resolvedSourceAccount ? { expectedSourceAccount: resolvedSourceAccount } : {}),

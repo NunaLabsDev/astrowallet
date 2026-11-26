@@ -559,6 +559,36 @@ export function TelegramProvider({
         throw new Error(errBody.error ?? `Failed to delete server cloud backup (${res.status})`);
       }
     }
+    const altNet = config.altNetworkProfile?.network;
+    if (altNet && altNet !== networkRef.current) {
+      try {
+        const initData = initTelegramMiniApp()?.initData ?? "";
+        if (initData) {
+          const altAuth = await fetch(`${base}/v1/tg/auth`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Astro-Network": altNet,
+            },
+            body: JSON.stringify({ initData }),
+          });
+          const altAuthJson = (await altAuth.json().catch(() => ({}))) as {
+            sessionToken?: string;
+          };
+          if (altAuth.ok && altAuthJson.sessionToken) {
+            await fetch(`${base}/v1/tg/vault-backup`, {
+              method: "DELETE",
+              headers: {
+                Authorization: `Bearer ${altAuthJson.sessionToken}`,
+                "X-Astro-Network": altNet,
+              },
+            });
+          }
+        }
+      } catch {
+        // Best-effort alternate network backup deletion
+      }
+    }
     await Promise.all([
       tgCloudStorageRemove(UNIFIED_TG_CLOUD_VAULT_KEY),
       ...LEGACY_TG_CLOUD_VAULT_KEYS.map((k) => tgCloudStorageRemove(k)),
@@ -567,7 +597,7 @@ export function TelegramProvider({
     setHasEncryptedBackup(false);
     setBackupUpdatedAt(null);
     setCloudBackupError(null);
-  }, [config.apiBaseUrl, ensureFreshSessionToken]);
+  }, [config.apiBaseUrl, config.altNetworkProfile?.network, ensureFreshSessionToken]);
 
   const allowed = shouldAllowMiniAppAccess({
     inTelegram,

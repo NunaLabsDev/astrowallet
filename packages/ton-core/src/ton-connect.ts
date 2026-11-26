@@ -1,6 +1,6 @@
 import type { TonNetwork } from "@astrowallet/domain";
 import { sha256 } from "@noble/hashes/sha2.js";
-import { Address } from "@ton/core";
+import { Address, Cell } from "@ton/core";
 import nacl from "tweetnacl";
 
 export type TonConnectFetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -359,6 +359,127 @@ export function buildTonConnectErrorEvent(code: number, message: string, id = Da
   });
 }
 
+export interface TonPayloadClassification {
+  kind: "none" | "text_comment" | "jetton_transfer" | "nft_transfer" | "contract_call";
+  opcodeHex: string | null;
+  hasPayload: boolean;
+  hasStateInit: boolean;
+  comment?: string | undefined;
+  warnings: string[];
+}
+
+/**
+ * Verifies that a TON Connect manifest's declared `url` is strictly HTTPS and matches
+ * the hostname/origin where the manifest JSON itself was hosted (prevents cross-origin ton_proof spoofing).
+ */
+export function isValidTonManifestOriginMatch(manifestUrl: string, dappUrl: string): boolean {
+  try {
+    const manifestParsed = new URL(manifestUrl);
+    const dappParsed = new URL(dappUrl);
+    if (manifestParsed.protocol !== "https:" || dappParsed.protocol !== "https:") {
+      return false;
+    }
+    if (
+      manifestParsed.username ||
+      manifestParsed.password ||
+      dappParsed.username ||
+      dappParsed.password
+    ) {
+      return false;
+    }
+    return (
+      manifestParsed.origin === dappParsed.origin ||
+      manifestParsed.hostname.toLowerCase() === dappParsed.hostname.toLowerCase()
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Decodes and classifies an outgoing TON Connect message payload BOC and optional stateInit BOC
+ * so wallets can warn clearly before signing Jetton/NFT transfers or arbitrary smart contract calls.
+ */
+export function classifyTonPayloadBoc(
+  payloadBase64?: string,
+  stateInitBase64?: string,
+): TonPayloadClassification {
+  const warnings: string[] = [];
+  const hasStateInit = Boolean(stateInitBase64?.trim());
+  if (stateInitBase64?.trim()) {
+    try {
+      Cell.fromBase64(stateInitBase64.trim());
+    } catch {
+      throw new Error("Invalid TON Connect stateInit BOC");
+    }
+    warnings.push("Deploys or initializes smart contract state (stateInit)");
+  }
+
+  const cleanPayload = payloadBase64?.trim();
+  if (!cleanPayload) {
+    return {
+      kind: "none",
+      opcodeHex: null,
+      hasPayload: false,
+      hasStateInit,
+      warnings,
+    };
+  }
+
+  let cell: Cell;
+  try {
+    cell = Cell.fromBase64(cleanPayload);
+  } catch {
+    throw new Error("Invalid TON Connect payload BOC");
+  }
+
+  const slice = cell.beginParse();
+  if (slice.remainingBits < 32) {
+    warnings.push("Non-empty payload without standard 32-bit opcode");
+    return {
+      kind: "contract_call",
+      opcodeHex: null,
+      hasPayload: true,
+      hasStateInit,
+      warnings,
+    };
+  }
+
+  const opcode = slice.loadUint(32);
+  const opcodeHex = `0x${opcode.toString(16).padStart(8, "0")}`;
+
+  if (opcode === 0x0f8a7ea5) {
+    warnings.push("Jetton token transfer (payload moves tokens beyond TON value)");
+    return { kind: "jetton_transfer", opcodeHex, hasPayload: true, hasStateInit, warnings };
+  }
+  if (opcode === 0x5fcc3d14) {
+    warnings.push("NFT ownership transfer");
+    return { kind: "nft_transfer", opcodeHex, hasPayload: true, hasStateInit, warnings };
+  }
+  if (opcode === 0x00000000) {
+    let comment: string | undefined;
+    try {
+      const text = slice.loadStringTail().trim();
+      if (text) {
+        comment = text.slice(0, 120);
+      }
+    } catch {
+      // Non-UTF8 / structured body with zero opcode
+    }
+    return {
+      kind: "text_comment",
+      opcodeHex,
+      hasPayload: true,
+      hasStateInit,
+      ...(comment !== undefined ? { comment } : {}),
+      warnings,
+    };
+  }
+
+  warnings.push(`Arbitrary smart contract call payload (${opcodeHex})`);
+  return { kind: "contract_call", opcodeHex, hasPayload: true, hasStateInit, warnings };
+}
+
 /**
  * Validates an incoming TON Connect v2 sendTransaction RPC request fail-closed.
  */
@@ -366,10 +487,33 @@ export function validateTonConnectSendTxRequest(
   req: TonConnectSendTxRequest,
   expectedNetwork: TonNetwork,
   nowUnixSeconds: number = Math.floor(Date.now() / 1000),
+  options?: { expectedFromRawAddress?: string | undefined },
 ): ValidateSendTxResult {
   const validUntil = req.validUntil ?? nowUnixSeconds + 300;
   if (!Number.isInteger(validUntil) || validUntil <= nowUnixSeconds) {
     return { ok: false, code: 1, message: "TON Connect request expired (validUntil passed)" };
+  }
+  if (validUntil > nowUnixSeconds + 600) {
+    return {
+      ok: false,
+      code: 1,
+      message: "TON Connect validUntil exceeds maximum 10-minute signature window",
+    };
+  }
+
+  if (req.from && options?.expectedFromRawAddress) {
+    try {
+      const normalizedFrom = Address.parse(req.from.trim()).toRawString();
+      if (normalizedFrom !== options.expectedFromRawAddress) {
+        return {
+          ok: false,
+          code: 1,
+          message: "Sender address (from) does not match connected TON Connect account",
+        };
+      }
+    } catch {
+      return { ok: false, code: 1, message: `Invalid sender TON address: ${req.from}` };
+    }
   }
 
   const expectedChain = expectedTonConnectChainId(expectedNetwork);
@@ -397,6 +541,15 @@ export function validateTonConnectSendTxRequest(
     }
     if (!/^\d+$/.test(String(msg.amount)) || BigInt(msg.amount) <= 0n) {
       return { ok: false, code: 1, message: `Invalid nanoTON amount: ${msg.amount}` };
+    }
+    try {
+      classifyTonPayloadBoc(msg.payload, msg.stateInit);
+    } catch (err) {
+      return {
+        ok: false,
+        code: 1,
+        message: err instanceof Error ? err.message : "Invalid TON Connect BOC payload",
+      };
     }
     validatedMessages.push({
       address: msg.address.trim(),

@@ -19,7 +19,10 @@ import {
 } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
-import { requiresHighValueReauth } from "./flow-validators.js";
+import {
+  extractMaxDebitFromScanReport,
+  requiresHighValueReauth,
+} from "./flow-validators.js";
 import { HighValueReauthGate } from "./HighValueReauthGate.js";
 import {
   parseConnectRouteFromLocation,
@@ -844,9 +847,16 @@ export function ConnectRequestSheet({
                     </div>
                   )}
                   {(() => {
+                    const debit = extractMaxDebitFromScanReport(scanReport, activeAccount?.address);
                     const gate = requiresHighValueReauth({
+                      amount: debit.amount,
+                      assetCode: debit.assetCode,
+                      thresholdXlm: config.highValueReauthXlm,
                       network: config.network,
                       hasWarningVerdict: scanReport?.verdict === "warning",
+                      forceHighRiskReason: debit.hasHighRiskOp
+                        ? "Transaction modifies account signers, thresholds, or authority."
+                        : undefined,
                     });
                     return gate.required && gate.reason ? (
                       <HighValueReauthGate
@@ -880,10 +890,22 @@ export function ConnectRequestSheet({
                     ((request.action === "sign_xdr" || request.action === "sign_auth_entry") &&
                       (scanReport?.verdict === "malicious" ||
                         (scanReport?.verdict === "warning" && !warningAcknowledged) ||
-                        (requiresHighValueReauth({
-                          network: config.network,
-                          hasWarningVerdict: scanReport?.verdict === "warning",
-                        }).required &&
+                        ((() => {
+                          const debit = extractMaxDebitFromScanReport(
+                            scanReport,
+                            activeAccount?.address,
+                          );
+                          return requiresHighValueReauth({
+                            amount: debit.amount,
+                            assetCode: debit.assetCode,
+                            thresholdXlm: config.highValueReauthXlm,
+                            network: config.network,
+                            hasWarningVerdict: scanReport?.verdict === "warning",
+                            forceHighRiskReason: debit.hasHighRiskOp
+                              ? "Transaction modifies account signers, thresholds, or authority."
+                              : undefined,
+                          }).required;
+                        })() &&
                           !reauthVerified)))
                   }
                   onClick={() => void handleApprove()}

@@ -19,7 +19,8 @@ export function AccountSwitcher() {
     importExternalSecretAccount,
     isImportedAccount,
     derivePublicKeyPreview,
-    exportAgVaultJson,
+    cloudSyncEligible,
+    exportCloudBackupJson,
     showToast,
   } = useWallet();
 
@@ -45,16 +46,18 @@ export function AccountSwitcher() {
   }, [adding, mode, derivePublicKeyPreview]);
 
   const syncBackupIfEnabled = () => {
-    if (!hasEncryptedBackup) {
+    if (!hasEncryptedBackup || !cloudSyncEligible) {
       if (inTelegram && sessionToken) {
         showToast(
-          "Saved locally — enable Telegram Encrypted Sync in Accounts tab to sync across devices",
+          hasEncryptedBackup
+            ? "Saved locally — set a strong Recovery Password in Accounts tab to sync to Telegram Cloud"
+            : "Saved locally — enable Telegram Encrypted Sync in Accounts tab to sync across devices",
           "info",
         );
       }
       return;
     }
-    void exportAgVaultJson()
+    void exportCloudBackupJson()
       .then((json) => uploadEncryptedBackup(json))
       .catch(() => {
         showToast(

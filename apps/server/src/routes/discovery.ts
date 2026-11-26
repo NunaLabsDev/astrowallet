@@ -156,7 +156,7 @@ export function createDiscoveryRoutes(): Hono<DiscoveryRouteEnv> {
       `- POST ${serverUrl}/v1/connect/requests/:requestId/complete`,
       "",
       "## Protocol Flow (Telegram ToS 7.3-7.4 Compliant)",
-      "1. Your app calls POST /v1/connect/requests with action ('auth', 'sign_message', or 'sign_xdr'), app metadata ({ name, botUsername, miniAppShortName?, returnStartAppParam? }), and payload.",
+      "1. Your app calls POST /v1/connect/requests with action ('auth', 'sign_message', 'sign_xdr', or 'sign_auth_entry'), app metadata ({ name, botUsername, miniAppShortName?, returnStartAppParam? }), and payload.",
       "2. Server returns { requestId, sig, resultToken, deepLink }.",
       "3. Open deepLink via Telegram.WebApp.openTelegramLink(deepLink) (format: https://t.me/<bot>/<short>?startapp=c-<requestId>-<sig>).",
       "4. User reviews the request in AstroWallet with independent Scan & Shield simulation, signs locally with Argon2id/IndexedDB keys, and gets a safe Telegram Boomerang button back to your bot.",

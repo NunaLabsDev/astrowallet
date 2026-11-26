@@ -275,13 +275,17 @@ export function createTelegramBot(
   }
 
   bot.use(async (ctx, next) => {
-    if (ctx.from?.username) {
+    if (ctx.from) {
       const tgId = String(ctx.from.id);
-      const usernameLower = ctx.from.username.toLowerCase();
+      const usernameLower = ctx.from.username ? ctx.from.username.toLowerCase() : null;
       const existing = await repo.getUserById(tgId).catch(() => null);
-      if (existing && existing.usernameLower !== usernameLower) {
+      if (existing && (existing.usernameLower ?? null) !== usernameLower) {
         await repo
-          .upsertTelegramUser({ telegramUserId: tgId, usernameLower })
+          .upsertTelegramUser({
+            telegramUserId: tgId,
+            usernameLower,
+            authoritativeUsername: true,
+          })
           .catch(() => undefined);
       }
     }
@@ -385,9 +389,11 @@ export function createTelegramBot(
         config,
         botUsername: ctx.me?.username,
       },
-    )
-      .row()
-      .url("⚡ Trade on AstroDex", "https://t.me/AstroDexBot/dex");
+    );
+    if (config.astrodexBotUsername) {
+      const shortPath = config.astrodexMiniAppShortName ? `/${config.astrodexMiniAppShortName}` : "";
+      keyboard.row().url("⚡ Trade on AstroDex", `https://t.me/${config.astrodexBotUsername}${shortPath}`);
+    }
 
     const caption = [
       `<b>AstroWallet</b> · <code>${networkBadge}</code>`,
@@ -670,6 +676,7 @@ export function createTelegramBot(
   }
 
   bot.command("pay", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     if (!ctx.from) return;
     const tgId = String(ctx.from.id);
     const username = ctx.from.username ? `@${ctx.from.username}` : `User ${tgId}`;
@@ -728,6 +735,7 @@ export function createTelegramBot(
             amount,
             assetCode,
             ...(assetIssuer ? { assetIssuer } : {}),
+            ...(senderDefault?.address ? { sourceAddress: senderDefault.address } : {}),
             recipientUsername: recipientHandle,
             senderLabel: username,
             claimId,
@@ -831,6 +839,7 @@ export function createTelegramBot(
         amount,
         assetCode,
         ...(assetIssuer ? { assetIssuer } : {}),
+        ...(senderDefault?.address ? { sourceAddress: senderDefault.address } : {}),
         destination: resolved.address,
         recipientLabel: resolved.label,
         senderLabel: username,
@@ -869,6 +878,7 @@ export function createTelegramBot(
   });
 
   bot.command("request", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     if (!ctx.from) return;
     const tgId = String(ctx.from.id);
     const username = ctx.from.username ? `@${ctx.from.username}` : `User ${tgId}`;
@@ -939,6 +949,7 @@ export function createTelegramBot(
   });
 
   bot.command("split", async (ctx) => {
+    if (!isExplicitBotMentionInGroup(ctx)) return;
     if (!ctx.from) return;
     const tgId = String(ctx.from.id);
     const username = ctx.from.username ? `@${ctx.from.username}` : `User ${tgId}`;

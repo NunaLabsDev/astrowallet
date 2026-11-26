@@ -81,7 +81,8 @@ export interface PublicMetricsSnapshot {
 export interface ServerRepository {
   upsertTelegramUser(input: {
     telegramUserId: string;
-    usernameLower?: string | undefined;
+    usernameLower?: string | null | undefined;
+    authoritativeUsername?: boolean | undefined;
   }): Promise<TelegramUserRecord>;
   getUserById(telegramUserId: string): Promise<TelegramUserRecord | null>;
   getUserByUsername(usernameLower: string): Promise<TelegramUserRecord | null>;
@@ -376,15 +377,18 @@ function mapIntentRow(row: RawIntentRow): SignedIntent {
 
 export function createD1Repository(db: D1Database): ServerRepository {
   return {
-    async upsertTelegramUser({ telegramUserId, usernameLower }) {
+    async upsertTelegramUser({ telegramUserId, usernameLower, authoritativeUsername }) {
       const now = Math.floor(Date.now() / 1000);
       const cleanUsername = usernameLower?.trim().replace(/^@/, "").toLowerCase() || null;
+      const usernameUpdateExpr = authoritativeUsername
+        ? "excluded.username_lower"
+        : "COALESCE(excluded.username_lower, tg_users.username_lower)";
       const upsertStmt = db
         .prepare(
           `INSERT INTO tg_users (telegram_user_id, username_lower, alerts_enabled, created_at, updated_at)
            VALUES (?, ?, 1, ?, ?)
            ON CONFLICT(telegram_user_id) DO UPDATE SET
-             username_lower = COALESCE(excluded.username_lower, tg_users.username_lower),
+             username_lower = ${usernameUpdateExpr},
              updated_at = excluded.updated_at`,
         )
         .bind(telegramUserId, cleanUsername, now, now);
@@ -815,7 +819,16 @@ export function createD1Repository(db: D1Database): ServerRepository {
         .prepare("SELECT 1 AS hit FROM intent_payments WHERE tx_hash = ? LIMIT 1")
         .bind(normalized)
         .first<{ hit: number }>();
-      return Boolean(payRow);
+      if (payRow) return true;
+      try {
+        const verifiedRow = await db
+          .prepare("SELECT 1 AS hit FROM verified_tx_log WHERE tx_hash = ? LIMIT 1")
+          .bind(normalized)
+          .first<{ hit: number }>();
+        return Boolean(verifiedRow);
+      } catch {
+        return false;
+      }
     },
 
     async recordSplitPayment({ intentId, payerAddress, txHash, amount, maxParticipants }) {

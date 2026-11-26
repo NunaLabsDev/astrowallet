@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { deriveStellarAccount } from "../sep0005.js";
 import {
   AGENT_DERIVATION_INDEX,
+  AgentBudgetPolicySchema,
   buildX402PaymentHeader,
   createDefaultAgentBudgetPolicy,
   evaluateAgentSpendRequest,
@@ -128,5 +129,30 @@ describe("x402 Agent Allowance Policy Engine", () => {
     expect(signed.payer).toBe(agent.publicKey);
     expect(JSON.parse(atob(signed.paymentHeader)).payer).toBe(agent.publicKey);
     agent.zeroize();
+  });
+
+  it("validates AgentBudgetPolicySchema and restricts spends to allowed USDC assets", () => {
+    const policy = { ...createDefaultAgentBudgetPolicy("testnet"), enabled: true };
+    expect(AgentBudgetPolicySchema.safeParse(policy).success).toBe(true);
+    expect(AgentBudgetPolicySchema.safeParse({ enabled: true, dailyCapStroops: "-5" }).success).toBe(
+      false,
+    );
+
+    expect(
+      evaluateAgentSpendRequest(policy, {
+        domain: "astrodex-testnet.pages.dev",
+        network: "stellar:testnet",
+        amountStroops: "10000",
+        asset: "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA",
+      }).allowed,
+    ).toBe(true);
+
+    const blockedAsset = evaluateAgentSpendRequest(policy, {
+      domain: "astrodex-testnet.pages.dev",
+      network: "stellar:testnet",
+      amountStroops: "10000",
+      asset: "SCAMTOKEN",
+    });
+    expect(blockedAsset.allowed).toBe(false);
   });
 });

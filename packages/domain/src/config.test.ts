@@ -296,5 +296,18 @@ describe("parseServerConfig", () => {
         RELAY_ALLOW_DIRECT_BOOTSTRAP: "true",
       }),
     ).toThrow(/RELAY_ALLOW_DIRECT_BOOTSTRAP/);
+
+    const stdCfg = parseServerConfig({
+      ...VALID_TESTNET_SERVER_ENV,
+      SEP10_ALLOWED_ANCHOR_DOMAINS: "https://ExtStellar.MoneyGram.com/, stellar.moneygram.com",
+      ASTRODEX_BOT_USERNAME: "@AstroDexBot",
+      ASTRODEX_MINI_APP_SHORT_NAME: "dex",
+    });
+    expect(stdCfg.sep10AllowedAnchorDomains).toEqual([
+      "extstellar.moneygram.com",
+      "stellar.moneygram.com",
+    ]);
+    expect(stdCfg.astrodexBotUsername).toBe("AstroDexBot");
+    expect(stdCfg.astrodexMiniAppShortName).toBe("dex");
   });
 });

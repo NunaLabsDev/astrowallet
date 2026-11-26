@@ -8,6 +8,8 @@ const LEGACY_VAULT_CLAIMED_BY_KEY = "legacy_vault_claimed_by";
 const BIOMETRIC_WRAP_KEY = "biometric_wrap";
 const CONTACTS_KEY = "contacts_v1";
 const PIN_LOCKOUT_KEY = "pin_lockout_v1";
+const SESSION_LEASE_KEY = "session_lease_key_v1";
+const VAULT_CLOUD_META_KEY = "vault_cloud_meta_v1";
 
 function scopedKey(base: string, scopeId?: string): string {
   const clean = scopeId?.trim();
@@ -147,6 +149,8 @@ export async function deleteEncryptedVault(scopeId?: string): Promise<void> {
   await idbDelete(scopedKey(PRIMARY_VAULT_KEY, scopeId));
   await idbDelete(scopedKey(BIOMETRIC_WRAP_KEY, scopeId));
   await idbDelete(scopedKey(PIN_LOCKOUT_KEY, scopeId));
+  await idbDelete(scopedKey(SESSION_LEASE_KEY, scopeId));
+  await idbDelete(scopedKey(VAULT_CLOUD_META_KEY, scopeId));
   const cleanScope = scopeId?.trim();
   if (!cleanScope) {
     await idbDelete(LEGACY_VAULT_CLAIMED_BY_KEY);
@@ -228,6 +232,68 @@ export async function recordFailedPinAttempt(
 export async function clearPinLockoutState(scopeId?: string): Promise<void> {
   try {
     await idbDelete(scopedKey(PIN_LOCKOUT_KEY, scopeId));
+  } catch {
+    // Ignore when IDB is unavailable
+  }
+}
+
+export interface VaultCloudMeta {
+  cloudGradeSecret: boolean;
+  lastSyncedCloudSha256?: string | undefined;
+  updatedAt: number;
+}
+
+export async function loadVaultCloudMeta(scopeId?: string): Promise<VaultCloudMeta | null> {
+  try {
+    const meta = await idbGet<VaultCloudMeta>(scopedKey(VAULT_CLOUD_META_KEY, scopeId));
+    if (meta && typeof meta.cloudGradeSecret === "boolean" && typeof meta.updatedAt === "number") {
+      return meta;
+    }
+  } catch {
+    // Ignore when IDB is unavailable
+  }
+  return null;
+}
+
+export async function saveVaultCloudMeta(
+  meta: VaultCloudMeta,
+  scopeId?: string,
+): Promise<void> {
+  try {
+    await idbPut(scopedKey(VAULT_CLOUD_META_KEY, scopeId), meta);
+  } catch {
+    // Ignore when IDB is unavailable
+  }
+}
+
+export async function getOrCreateSessionLeaseKey(scopeId?: string): Promise<CryptoKey | null> {
+  if (typeof indexedDB === "undefined" || typeof crypto === "undefined" || !crypto.subtle) {
+    return null;
+  }
+  const keyName = scopedKey(SESSION_LEASE_KEY, scopeId);
+  const existing = await idbGet<CryptoKey>(keyName).catch(() => null);
+  if (existing) {
+    return existing;
+  }
+  const generated = await crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"],
+  );
+  await idbPut(keyName, generated);
+  return generated;
+}
+
+export async function getExistingSessionLeaseKey(scopeId?: string): Promise<CryptoKey | null> {
+  if (typeof indexedDB === "undefined") {
+    return null;
+  }
+  return idbGet<CryptoKey>(scopedKey(SESSION_LEASE_KEY, scopeId)).catch(() => null);
+}
+
+export async function clearSessionLeaseKey(scopeId?: string): Promise<void> {
+  try {
+    await idbDelete(scopedKey(SESSION_LEASE_KEY, scopeId));
   } catch {
     // Ignore when IDB is unavailable
   }

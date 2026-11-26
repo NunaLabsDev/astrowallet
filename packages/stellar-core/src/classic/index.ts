@@ -206,6 +206,7 @@ export function signSep10ChallengeTransaction(
   challengeXdr: string,
   keypair: Keypair,
   networkPassphrase: string,
+  nowUnixSeconds: number = Math.floor(Date.now() / 1000),
 ): string {
   const tx = TransactionBuilder.fromXDR(challengeXdr, networkPassphrase);
   if ("innerTransaction" in tx) {
@@ -214,11 +215,35 @@ export function signSep10ChallengeTransaction(
   if (tx.sequence !== "0") {
     throw new Error("SEP-10 safety check failed: challenge sequence must be 0");
   }
+  if (!tx.timeBounds) {
+    throw new Error("SEP-10 safety check failed: bounded timeBounds required");
+  }
+  const minTime = Number(tx.timeBounds.minTime);
+  const maxTime = Number(tx.timeBounds.maxTime);
+  if (
+    !Number.isSafeInteger(minTime) ||
+    !Number.isSafeInteger(maxTime) ||
+    maxTime <= 0 ||
+    maxTime <= minTime ||
+    maxTime < nowUnixSeconds - 60 ||
+    maxTime > nowUnixSeconds + 900
+  ) {
+    throw new Error("SEP-10 safety check failed: challenge timeBounds outside safe window");
+  }
+  if (tx.source === keypair.publicKey()) {
+    throw new Error("SEP-10 safety check failed: challenge source cannot be user account");
+  }
   if (
     tx.operations.length === 0 ||
     tx.operations.some((op: { type: string }) => op.type !== "manageData")
   ) {
     throw new Error("SEP-10 safety check failed: challenge may only contain manageData ops");
+  }
+  const firstOp = tx.operations[0] as { source?: string } | undefined;
+  if (!firstOp || firstOp.source !== keypair.publicKey()) {
+    throw new Error(
+      "SEP-10 safety check failed: first manageData operation source must match signer",
+    );
   }
   tx.sign(keypair);
   return tx.toXDR();

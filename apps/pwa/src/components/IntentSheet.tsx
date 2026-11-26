@@ -23,7 +23,10 @@ import {
 } from "../telegram/webapp.js";
 import { AstroNavigatorAvatar } from "./AstroNavigatorAvatar.js";
 import { ClearSignSummaryCard } from "./ClearSignSummaryCard.js";
-import { requiresHighValueReauth } from "./flow-validators.js";
+import {
+  extractMaxDebitFromScanReport,
+  requiresHighValueReauth,
+} from "./flow-validators.js";
 import { HighValueReauthGate } from "./HighValueReauthGate.js";
 import {
   clearCachedClaimSecret,
@@ -246,16 +249,28 @@ export function IntentSheet({
     if (!intent) return { required: false };
     const isSwap = intent.actionType === "swap";
     const rawAsset = isSwap ? intent.payload.fromAsset : intent.payload.assetCode;
-    const assetCode = rawAsset?.split(":")[0];
+    const scanDebit = extractMaxDebitFromScanReport(destScanReport, activeAccount?.address);
+    const assetCode = rawAsset?.split(":")[0] ?? scanDebit.assetCode;
+    const effectiveAmount = intent.payload.amount ?? scanDebit.amount;
     return requiresHighValueReauth({
-      amount: intent.payload.amount,
+      amount: effectiveAmount,
       assetCode,
       spendableBalance: availableNum ?? undefined,
       thresholdXlm: config.highValueReauthXlm,
       network: config.network,
       hasWarningVerdict: destScanReport?.verdict === "warning",
+      forceHighRiskReason: scanDebit.hasHighRiskOp
+        ? "Transaction modifies account signers, thresholds, or authority."
+        : undefined,
     });
-  }, [intent, availableNum, config.highValueReauthXlm, config.network, destScanReport?.verdict]);
+  }, [
+    intent,
+    availableNum,
+    config.highValueReauthXlm,
+    config.network,
+    destScanReport,
+    activeAccount?.address,
+  ]);
 
   useEffect(() => {
     const requestedSource = intent?.payload.sourceAddress?.trim();

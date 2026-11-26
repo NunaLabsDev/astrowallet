@@ -37,7 +37,7 @@
 | `VITE_SOROBITS_EXPLORER_URL` | Optional NFT explorer base | Optional NFT explorer base | Optional legacy NFT explorer link |
 | `VITE_MONEYGRAM_ANCHOR_DOMAIN` | `extstellar.moneygram.com` | `stellar.moneygram.com` | Optional override for MoneyGram SEP-24 / SEP-10 anchor domain |
 | `VITE_CCTP_BRIDGE_URL` / `VITE_CCTP_FORWARDER_CONTRACT_ID` | Optional CCTP config | Optional CCTP config | In-app Circle CCTP 6↔7 USDC precision validator |
-| `VITE_REOWN_PROJECT_ID` / `VITE_MOONPAY_WIDGET_URL` / `VITE_TRANSAK_WIDGET_URL` | *(legacy / disabled in Mini App)* | *(disabled in Mini App)* | Retained for schema compatibility only; disabled under ToS §7.3–7.4 |
+| `VITE_MOONPAY_WIDGET_URL` / `VITE_TRANSAK_WIDGET_URL` | *(legacy / disabled in Mini App)* | *(disabled in Mini App)* | Retained for schema compatibility only; disabled under ToS §7.3–7.4 |
 
 ---
 
@@ -74,5 +74,7 @@
 | `ECOSYSTEM_SHARED_INTENT_SECRET` | Secret | Authenticates server-to-server `POST /v1/intents/external` & `official` AstroConnect requests (`>= 32` chars) |
 | `CONNECT_VERIFIED_BOTS` | Env Var | Optional comma-separated list of verified third-party Telegram bot usernames (`verified` trust tier in AstroConnect v1) |
 | `ASTRODEX_API_BASE_URL` | Env Var | Base URL for AstroDex 5-Way Aggregator `/v1/quote` used by `/buy`, `/sell`, and `/swap` |
-| `SEP10_CLIENT_DOMAIN` | Env Var | Public hostname (e.g. `astrowallet-soroban.pages.dev`) serving `/.well-known/stellar.toml` for MoneyGram SEP-10 |
+| `ASTRODEX_BOT_USERNAME` / `ASTRODEX_MINI_APP_SHORT_NAME` | Env Var | Target Telegram bot (`AstroDexBot`) & short name (`dex`) for `/start` "Trade on AstroDex" deep link |
+| `SEP10_CLIENT_DOMAIN` | Env Var | Public hostname (e.g. `astro-wallet.pages.dev`) serving `/.well-known/stellar.toml` for MoneyGram SEP-10 |
+| `SEP10_ALLOWED_ANCHOR_DOMAINS` | Env Var | Comma-separated SEP-10 anchor hostnames permitted for `SEP10_CLIENT_SIGNING_SECRET` co-signing |
 | `SEP10_CLIENT_SIGNING_SECRET` | Secret | Optional Stellar `S...` key cosigning sequence-0 `manageData`-only SEP-10 challenges (`SIGNING_KEY` published in `stellar.toml`) |

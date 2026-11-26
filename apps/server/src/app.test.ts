@@ -762,12 +762,25 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(getRes.status).toBe(200);
 
+    const creatorSessionToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: "5551234",
+        network: "testnet",
+        issuedAt: now,
+        expiresAt: now + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
     // Unconfirmed tx rejected 409
     const unconfirmed = await app.request(
       `/v1/intents/${intentId}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${creatorSessionToken}`,
+        },
         body: JSON.stringify({ sig: hmacSig, txHash: "b".repeat(64) }),
       },
       TEST_ENV,
@@ -779,7 +792,10 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       `/v1/intents/${intentId}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${creatorSessionToken}`,
+        },
         body: JSON.stringify({ sig: hmacSig, txHash: "a".repeat(64) }),
       },
       TEST_ENV,
@@ -1402,11 +1418,24 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     const intentA = (await repo.getSignedIntent("it_replay_a"))!;
     const intentB = (await repo.getSignedIntent("it_replay_b"))!;
 
+    const creatorToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: "7001",
+        network: "testnet",
+        issuedAt: now,
+        expiresAt: now + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
     const firstConfirm = await app.request(
       `/v1/intents/${intentA.intentId}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${creatorToken}`,
+        },
         body: JSON.stringify({ sig: intentA.hmacSig, txHash: sharedHash }),
       },
       TEST_ENV,
@@ -1417,7 +1446,10 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       `/v1/intents/${intentB.intentId}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${creatorToken}`,
+        },
         body: JSON.stringify({ sig: intentB.hmacSig, txHash: sharedHash }),
       },
       TEST_ENV,
@@ -1750,12 +1782,25 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       createdAt: now,
     });
 
+    const claimCreatorToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: "444555",
+        network: "testnet",
+        issuedAt: now,
+        expiresAt: now + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+
     const fundTxHash = "c3".repeat(32);
     const fundRes = await app.request(
       `/v1/intents/${intentId}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${claimCreatorToken}`,
+        },
         body: JSON.stringify({
           sig,
           txHash: fundTxHash,
@@ -1842,7 +1887,10 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       `/v1/intents/${cancelIntentId}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${claimCreatorToken}`,
+        },
         body: JSON.stringify({
           sig: cancelSig,
           txHash: "e5".repeat(32),
@@ -1859,7 +1907,10 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       `/v1/intents/${cancelIntentId}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${claimCreatorToken}`,
+        },
         body: JSON.stringify({
           sig: cancelSig,
           txHash: cancelTxHash,
@@ -2388,8 +2439,8 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
             date: now,
             chat: { id: -100123456, type: "supergroup", title: "Stellar Group" },
             from: { id: 777111, is_bot: false, first_name: "Alice", username: "alice_tg" },
-            text: `/pay 5 XLM ${signer.address}`,
-            entities: [{ offset: 0, length: 4, type: "bot_command" }],
+            text: `/pay@AstroWalletTestBot 5 XLM ${signer.address}`,
+            entities: [{ offset: 0, length: 23, type: "bot_command" }],
           },
         }),
       },
@@ -2742,11 +2793,23 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(fetched.payload.originApp).toBe("astrodex");
     expect(fetched.payload.xdrSha256).toBe(xdrSha256);
 
+    const extSessionToken = await signMiniAppSessionToken(
+      {
+        telegramUserId: "777888",
+        network: "testnet",
+        issuedAt: Math.floor(Date.now() / 1000),
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
     const confirmRes = await app.request(
       `/v1/intents/${created.intentId}/confirm`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${extSessionToken}`,
+        },
         body: JSON.stringify({
           sig: created.sig,
           txHash: "1".repeat(64),
@@ -3275,8 +3338,20 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(pubJson.service).toBe("astrowallet");
     expect(pubJson.privacy.cookies).toBe(false);
     expect(pubJson.privacy.piiExposed).toBe(false);
-    expect(pubJson.metrics.verifiedTxCount).toBe(1);
+    // Client telemetry /v1/metrics/event must never forge verified_tx_log entries
+    expect(pubJson.metrics.verifiedTxCount).toBe(0);
     expect(pubJson.metrics.eventBreakdown.tx_sent).toBe(1);
+
+    const unauthEvRes = await app.request(
+      "/v1/metrics/event",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ eventType: "tx_sent" }),
+      },
+      TEST_ENV,
+    );
+    expect(unauthEvRes.status).toBe(401);
 
     const badgeRes = await app.request("/v1/metrics/badge.svg", { method: "GET" }, TEST_ENV);
     expect(badgeRes.status).toBe(200);
@@ -3406,7 +3481,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         Operation.manageData({
           source: clientSigner.publicKey(),
           name: "client_domain",
-          value: "astrowallet-soroban.pages.dev",
+          value: "astro-wallet.pages.dev",
         }),
       )
       .setTimeout(300)
@@ -3458,23 +3533,33 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
 
     const sep10Env = {
       ...TEST_ENV,
-      SEP10_CLIENT_DOMAIN: "astrowallet-soroban.pages.dev",
+      SEP10_CLIENT_DOMAIN: "astro-wallet.pages.dev",
+      SEP10_ALLOWED_ANCHOR_DOMAINS: "extstellar.moneygram.com",
       SEP10_CLIENT_SIGNING_SECRET: clientSigner.secret(),
     };
+    const sep10Token = await signMiniAppSessionToken(
+      {
+        telegramUserId: "555777",
+        network: "testnet",
+        issuedAt: Math.floor(Date.now() / 1000),
+        expiresAt: Math.floor(Date.now() / 1000) + 900,
+      },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
 
     const okRes = await app.request(
       `/v1/proxy/sep10/challenge?domain=extstellar.moneygram.com&account=${userKp.publicKey()}`,
-      {},
+      { headers: { Authorization: `Bearer ${sep10Token}` } },
       sep10Env,
     );
     expect(okRes.status).toBe(200);
-    expect(capturedAuthUrl).toContain("client_domain=astrowallet-soroban.pages.dev");
+    expect(capturedAuthUrl).toContain("client_domain=astro-wallet.pages.dev");
     const okJson = (await okRes.json()) as {
       transaction: string;
       client_domain?: string;
       clientDomainSigned?: boolean;
     };
-    expect(okJson.client_domain).toBe("astrowallet-soroban.pages.dev");
+    expect(okJson.client_domain).toBe("astro-wallet.pages.dev");
     expect(okJson.clientDomainSigned).toBe(true);
     const cosigned = TransactionBuilder.fromXDR(okJson.transaction, Networks.TESTNET);
     expect(cosigned.signatures).toHaveLength(2);
@@ -3482,7 +3567,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     mode = "malicious";
     const badRes = await app.request(
       `/v1/proxy/sep10/challenge?domain=extstellar.moneygram.com&account=${userKp.publicKey()}`,
-      {},
+      { headers: { Authorization: `Bearer ${sep10Token}` } },
       sep10Env,
     );
     expect(badRes.status).toBe(502);

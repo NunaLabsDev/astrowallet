@@ -510,6 +510,15 @@ describe("100-User End-to-End Flow & Edge-Case Simulation", () => {
 
     const mockFetch = async (input: string | URL | Request, init?: RequestInit) => {
       const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/getMe")) {
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            result: { id: 1, is_bot: true, first_name: "AstroWallet", username: BASE_ENV.TG_BOT_USERNAME, can_join_groups: true, can_read_all_group_messages: false, supports_inline_queries: true },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
       if (url.includes("api.telegram.org")) {
         const parsed = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
         sentTgRequests.push({ method: url.split("/").pop() ?? "", body: parsed });
@@ -941,8 +950,8 @@ describe("100-User End-to-End Flow & Edge-Case Simulation", () => {
               date: now,
               chat: { id: -100990000 - u, type: "supergroup", title: "Crew" },
               from: { id: tgId, is_bot: false, first_name: "BotU", username },
-              text: "/split 20 XLM 2",
-              entities: [{ offset: 0, length: 6, type: "bot_command" }],
+              text: `/split@${BASE_ENV.TG_BOT_USERNAME} 20 XLM 2`,
+              entities: [{ offset: 0, length: 6 + 1 + BASE_ENV.TG_BOT_USERNAME.length, type: "bot_command" }],
             },
           }),
         },

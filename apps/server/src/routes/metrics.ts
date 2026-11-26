@@ -3,15 +3,8 @@ import type { KVNamespace } from "@cloudflare/workers-types";
 import { Hono } from "hono";
 import { z } from "zod";
 import type { ServerRepository } from "../db/repository.js";
+import { clientKeyFromHeaders } from "../rate-limit.js";
 import { authenticateMiniAppSession } from "./tg-auth.js";
-
-function clientKeyFromHeaders(headers: Headers): string {
-  return (
-    headers.get("CF-Connecting-IP")?.trim() ||
-    headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
-    "anon"
-  );
-}
 
 const EventBodySchema = z.object({
   eventType: z.enum([
@@ -177,46 +170,36 @@ export function createMetricsRoutes(): Hono<MetricsRouteEnv> {
       );
     }
 
+    const session = await authenticateMiniAppSession(c).catch(() => ({
+      ok: false as const,
+      status: 401 as const,
+      error: "Unauthorized",
+    }));
+    if (!session.ok) {
+      return c.json({ error: session.error }, session.status);
+    }
+
     const dayUtc = utcDayString();
-    const session = await authenticateMiniAppSession(c).catch(() => ({ ok: false as const }));
-    const tasks: Promise<unknown>[] = [
+    const userHash = await computeMonthlyUserHash(
+      session.claims.telegramUserId,
+      config.intentHmacSecret,
+      dayUtc,
+    );
+    await Promise.all([
       repo.incrementProductEvent({
         dayUtc,
         network: config.network,
         eventType: body.eventType,
       }),
-    ];
-
-    if (session.ok) {
-      const userHash = await computeMonthlyUserHash(
-        session.claims.telegramUserId,
-        config.intentHmacSecret,
+      repo.recordDailyUserActivity({
         dayUtc,
-      );
-      tasks.push(
-        repo.recordDailyUserActivity({
-          dayUtc,
-          userHash,
-          network: config.network,
-          platform: body.platform ?? "unknown",
-          lang: body.lang ?? "en",
-        }),
-      );
-    }
+        userHash,
+        network: config.network,
+        platform: body.platform ?? "unknown",
+        lang: body.lang ?? "en",
+      }),
+    ]);
 
-    if (body.txHash && session.ok) {
-      tasks.push(
-        repo.recordVerifiedTx({
-          txHash: body.txHash.toLowerCase(),
-          network: config.network,
-          actionType: body.eventType,
-          assetCode: body.assetCode,
-          amountEst: body.amountEst,
-        }),
-      );
-    }
-
-    await Promise.all(tasks);
     return c.json({ ok: true });
   });
 

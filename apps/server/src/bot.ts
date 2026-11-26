@@ -403,6 +403,8 @@ export function createTelegramBot(
       "• <b>Buy, Sell &amp; Send</b> tokens or <b>Classic NFTs</b> right in chat",
       "• <b>Zero-op_no_trust Auto-Escrow</b> when recipients lack a trustline",
       "• <b>Clear-Sign 2.0 + Express Sign</b> — minimal one-tap approvals",
+      "• <b>TON V4R2 / V5R1</b> wallets &amp; <b>TON Connect</b> with payload preview",
+      "• <b>Agent Budget</b> limits for x402 / AI payments",
       "",
       "Tap below to open your wallet, or run /help for quick commands.",
     ].join("\n");

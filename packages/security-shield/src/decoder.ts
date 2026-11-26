@@ -47,6 +47,7 @@ export interface DecodedTransactionSummary {
   feeSource?: string | undefined;
   sourceAccount: string;
   feeStroops: string;
+  sorobanResourceFeeStroops?: string | undefined;
   memo: DecodedMemo;
   operations: readonly DecodedOperation[];
 }
@@ -250,11 +251,27 @@ export function decodeTransactionEnvelope(
     };
   });
 
+  const txExt = (
+    innerTx as unknown as {
+      tx?: {
+        ext?: {
+          type?: string;
+          sorobanData?: { resourceFee?: bigint | { toString(): string } };
+        };
+      };
+    }
+  ).tx?.ext;
+  const sorobanResourceFeeStroops =
+    txExt?.type === "sorobanData" && txExt.sorobanData?.resourceFee !== undefined
+      ? txExt.sorobanData.resourceFee.toString()
+      : undefined;
+
   return {
     isFeeBump,
     feeSource: isFeeBump ? parsed.feeSource : undefined,
     sourceAccount: innerTx.source,
     feeStroops: String(parsed.fee),
+    sorobanResourceFeeStroops,
     memo: {
       type: memoType,
       value: memoValue,
@@ -267,6 +284,7 @@ export interface DecodedHostFunction {
   type: string;
   contractId?: string | undefined;
   functionName?: string | undefined;
+  args?: readonly string[] | undefined;
 }
 
 /**
@@ -287,6 +305,7 @@ export function decodeHostFunctionXdr(funcXdrBase64: string): DecodedHostFunctio
       type: hostFn.type,
       contractId,
       functionName: decodeFunctionName(invoke.functionName),
+      args: invoke.args.map(safeFormatScVal),
     };
   }
   return { type: hostFn.type };

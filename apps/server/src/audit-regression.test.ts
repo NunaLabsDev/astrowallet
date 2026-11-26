@@ -5,13 +5,15 @@ import type {
   SignedIntent,
   TelegramUserBinding,
 } from "@astrowallet/domain";
-import { signIntentToken } from "@astrowallet/tg-protocol";
+import { deriveClaimId, signIntentToken } from "@astrowallet/tg-protocol";
 import {
   Account,
   Address,
   BASE_FEE,
   Contract,
   Keypair,
+  SorobanDataBuilder,
+  StrKey,
   TransactionBuilder,
   nativeToScVal,
   scValToNative,
@@ -26,6 +28,8 @@ import type {
   TelegramUserRecord,
 } from "./db/repository.js";
 import { ChainWatcherDO } from "./durable-objects/chain-watcher.js";
+import { ChannelPoolDO } from "./durable-objects/channel-pool.js";
+import { verifyConnectAccountSubmissions } from "./routes/connect-verifier.js";
 import { resetMemoryRateLimits, clientKeyFromHeaders } from "./rate-limit.js";
 import { computeTelegramInitDataHash } from "@astrowallet/tg-protocol";
 import { isSafePublicDomain } from "./routes/proxy.js";
@@ -56,7 +60,7 @@ function createD1FaithfulRepo() {
   const connectRequests = new Map<string, ConnectRequestRecord>();
   const events = new Map<string, number>();
   const verifiedTxs: string[] = [];
-  const dedupKeys = new Set<string>();
+  const dedupKeys = new Map<string, number>();
   const relaySpent = new Map<string, bigint>();
   const relayTxCount = new Map<string, number>();
 
@@ -73,8 +77,17 @@ function createD1FaithfulRepo() {
       return null;
     },
     async setUserAlertsEnabled() {},
-    async linkVerifiedAddresses({ telegramUserId }) {
-      return bindings.get(telegramUserId) ?? [];
+    async linkVerifiedAddresses({ telegramUserId, accounts }) {
+      const next: TelegramUserBinding[] = accounts.map((acc, idx) => ({
+        telegramUserId,
+        address: acc.address as TelegramUserBinding["address"],
+        kind: acc.kind,
+        label: acc.label,
+        isDefault: Boolean(acc.isDefault ?? idx === 0),
+        verifiedAt: Math.floor(Date.now() / 1000),
+      }));
+      bindings.set(telegramUserId, next);
+      return next;
     },
     async listLinkedAddresses(telegramUserId) {
       return bindings.get(telegramUserId) ?? [];
@@ -88,7 +101,10 @@ function createD1FaithfulRepo() {
     async unlinkUserAddresses() {
       return 0;
     },
-    async isAddressLinked() {
+    async isAddressLinked(address) {
+      for (const list of bindings.values()) {
+        if (list.some((item) => item.address === address)) return true;
+      }
       return false;
     },
     async listWatchedAccounts() {
@@ -158,11 +174,22 @@ function createD1FaithfulRepo() {
     },
     async claimAlertDedupKey(key) {
       if (dedupKeys.has(key)) return false;
-      dedupKeys.add(key);
+      dedupKeys.set(key, Math.floor(Date.now() / 1000));
       return true;
     },
     async releaseAlertDedupKey(key) {
       dedupKeys.delete(key);
+    },
+    async getAlertDedupCreatedAt(key) {
+      return dedupKeys.get(key) ?? null;
+    },
+    async reclaimExpiredAlertDedupKey(key, minAgeSec, nowSec) {
+      const createdAt = dedupKeys.get(key);
+      if (createdAt === undefined) return false;
+      const now = nowSec ?? Math.floor(Date.now() / 1000);
+      if (createdAt >= now - minAgeSec) return false;
+      dedupKeys.set(key, now);
+      return true;
     },
     async findRecentPendingIntent() {
       return null;
@@ -792,7 +819,8 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     const kp = Keypair.random();
     const acc = new Account(kp.publicKey(), "100");
     const escrowContract = new Contract(escrowId);
-    const claimIdBytes = new Uint8Array(32).fill(1);
+    const claimIdHex = await deriveClaimId("int_relay_expired_claim");
+    const claimIdBytes = Buffer.from(claimIdHex, "hex");
     const sigBytes = new Uint8Array(64).fill(2);
 
     const claimTx = new TransactionBuilder(acc, {
@@ -1089,7 +1117,7 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     const kp = Keypair.random();
     const acc = new Account(kp.publicKey(), "100");
     const escrowContract = new Contract(escrowId);
-    const claimIdBytes = new Uint8Array(32).fill(5);
+    const claimIdBytes = Buffer.from(await deriveClaimId("it_audit2_relay"), "hex");
     const sigBytes = new Uint8Array(64).fill(6);
 
     const claimTx = new TransactionBuilder(acc, {
@@ -1221,7 +1249,7 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     const { sessionToken } = (await tgAuthRes.json()) as { sessionToken: string };
     const newBootKp = Keypair.random();
     const makeBootSig = async (targetKp: Keypair, nonce: string) => {
-      const msg = `astrowallet-bootstrap:v1:testnet:${targetKp.publicKey()}:${now}:${nonce}`;
+      const msg = `astrowallet-bootstrap:v1:testnet:sponsored_reserve:${targetKp.publicKey()}:${now}:${nonce}`;
       const digest = await crypto.subtle.digest(
         "SHA-256",
         new TextEncoder().encode(`Stellar Signed Message:\n${msg}`),
@@ -1305,5 +1333,625 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
     const svgMetaJson = (await svgMetaRes.json()) as { name?: string; image?: string };
     expect(svgMetaJson.name).toBe("Evil Art");
     expect(svgMetaJson.image).toBeUndefined();
+  });
+
+  it("enforces Carbon Block 1 defenses across bootstrap, relay auth/allowlist/fees, ChannelPoolDO persistence, and Smart Account linking", async () => {
+    const { repo, relaySpent, relayTxCount } = createD1FaithfulRepo();
+    const now = Math.floor(Date.now() / 1000);
+    const escrowId = TEST_ENV.CLAIM_ESCROW_CONTRACT_ID;
+    const otherContractId = StrKey.encodeContract(new Uint8Array(32).fill(9));
+    const sponsorKp = Keypair.random();
+    const linkedKp = Keypair.random();
+    const unlinkedKp = Keypair.random();
+    const bootTargetKp = Keypair.random();
+    const otherBootKp = Keypair.random();
+
+    await repo.linkVerifiedAddresses({
+      telegramUserId: "777001",
+      accounts: [
+        {
+          address: linkedKp.publicKey(),
+          kind: "classic",
+          label: "Linked",
+          isDefault: true,
+          verifiedSigHash: "sig_linked",
+        },
+      ],
+    });
+
+    const signSep53 = async (kp: Keypair, msg: string) => {
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(`Stellar Signed Message:\n${msg}`),
+      );
+      return Buffer.from(kp.sign(Buffer.from(digest))).toString("base64");
+    };
+
+    const sha256HexLocal = async (input: string) =>
+      Array.from(
+        new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input))),
+        (b) => b.toString(16).padStart(2, "0"),
+      ).join("");
+
+    const signWalletAuth = async (
+      kp: Keypair,
+      mode: "soroban" | "feebump",
+      payload: string,
+      nonce: string,
+    ) => {
+      const payloadHash = await sha256HexLocal(payload);
+      const msg = `astrowallet-relay:v1:testnet:${mode}:${payloadHash}:${now}:${nonce}`;
+      return {
+        address: kp.publicKey(),
+        timestamp: now,
+        nonce,
+        payloadHash,
+        signatureBase64: await signSep53(kp, msg),
+      };
+    };
+
+    // Mock Durable Object storage for ChannelPoolDO restart persistence test
+    const doStorageMap = new Map<string, unknown>();
+    const mockDoState = {
+      storage: {
+        get: async <T>(key: string) => doStorageMap.get(key) as T | undefined,
+        put: async <T>(key: string, val: T) => {
+          doStorageMap.set(key, val);
+        },
+      },
+    } as unknown as DurableObjectState;
+    const poolA = new ChannelPoolDO(mockDoState, {});
+    const channel1 = Keypair.random().publicKey();
+    const channel2 = Keypair.random().publicKey();
+
+    let upstreamBehavior: "ok" | "bad_seq" | "timeout" = "ok";
+    let upstreamCalls = 0;
+
+    const app = createApp({
+      createRepo: () => repo,
+      fetchFn: async (input) => {
+        const url = String(input);
+        if (url === "https://channels.example.org/testnet") {
+          upstreamCalls += 1;
+          if (upstreamBehavior === "bad_seq") {
+            return new Response(JSON.stringify({ error: "tx_bad_seq" }), { status: 400 });
+          }
+          if (upstreamBehavior === "timeout") {
+            throw new Error("The operation timed out");
+          }
+          return new Response(
+            JSON.stringify({ hash: "f".repeat(64), status: "submitted" }),
+            { status: 200 },
+          );
+        }
+        if (url.includes(`/accounts/${sponsorKp.publicKey()}`)) {
+          return new Response(JSON.stringify({ sequence: "500" }), { status: 200 });
+        }
+        if (
+          url.includes(`/accounts/${bootTargetKp.publicKey()}`) ||
+          url.includes(`/accounts/${otherBootKp.publicKey()}`)
+        ) {
+          return new Response("Not Found", { status: 404 });
+        }
+        return new Response("Not Found", { status: 404 });
+      },
+    });
+
+    const relayEnv = {
+      ...TEST_ENV,
+      OZ_CHANNELS_API_URL: "https://channels.example.org/testnet",
+      RELAY_ALLOWED_CONTRACTS: escrowId,
+      RELAY_SPONSOR_SECRET: sponsorKp.secret(),
+      RELAY_CHANNEL_ACCOUNTS: `${channel1},${channel2}`,
+      CHANNEL_POOL: {
+        idFromName: (name: string) => name as never,
+        get: () => poolA as never,
+      },
+    };
+
+    // --- HALLAZGO-01: bootstrap mode binding, direct flag block, and >180s retry recovery ---
+    const initPairs: Array<[string, string]> = [
+      ["auth_date", String(now - 2)],
+      ["user", JSON.stringify({ id: 777001, username: "carbon_user" })],
+    ];
+    initPairs.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    const initHash = await computeTelegramInitDataHash(
+      initPairs.map(([k, v]) => `${k}=${v}`).join("\n"),
+      TEST_ENV.TG_BOT_TOKEN,
+    );
+    const initParams = new URLSearchParams(Object.fromEntries(initPairs));
+    initParams.set("hash", initHash);
+    const tgAuthRes = await app.request(
+      "/v1/tg/auth",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ initData: initParams.toString() }),
+      },
+      TEST_ENV,
+    );
+    const { sessionToken } = (await tgAuthRes.json()) as { sessionToken: string };
+
+    // 1a. direct mode blocked when RELAY_ALLOW_DIRECT_BOOTSTRAP is false/unset
+    const directBlocked = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+        body: JSON.stringify({
+          address: bootTargetKp.publicKey(),
+          mode: "direct",
+          timestamp: now,
+          nonce: "boot_direct_1",
+          signatureBase64: await signSep53(
+            bootTargetKp,
+            `astrowallet-bootstrap:v1:testnet:direct:${bootTargetKp.publicKey()}:${now}:boot_direct_1`,
+          ),
+        }),
+      },
+      relayEnv,
+    );
+    expect(directBlocked.status).toBe(403);
+
+    // 1b. mode downgrade even when RELAY_ALLOW_DIRECT_BOOTSTRAP=true fails signature check -> 403
+    const downgradeBlocked = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+        body: JSON.stringify({
+          address: bootTargetKp.publicKey(),
+          mode: "direct",
+          timestamp: now,
+          nonce: "boot_downgrade_1",
+          signatureBase64: await signSep53(
+            bootTargetKp,
+            `astrowallet-bootstrap:v1:testnet:sponsored_reserve:${bootTargetKp.publicKey()}:${now}:boot_downgrade_1`,
+          ),
+        }),
+      },
+      { ...relayEnv, RELAY_ALLOW_DIRECT_BOOTSTRAP: "true" } as never,
+    );
+    expect(downgradeBlocked.status).toBe(403);
+
+    // 1c. Valid sponsored_reserve succeeds, immediate retry -> 409, retry >180s for same (tg, addr) -> 200 without extra budget
+    const bootOk = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+        body: JSON.stringify({
+          address: bootTargetKp.publicKey(),
+          mode: "sponsored_reserve",
+          timestamp: now,
+          nonce: "boot_ok_01",
+          signatureBase64: await signSep53(
+            bootTargetKp,
+            `astrowallet-bootstrap:v1:testnet:sponsored_reserve:${bootTargetKp.publicKey()}:${now}:boot_ok_01`,
+          ),
+        }),
+      },
+      relayEnv,
+    );
+    expect(bootOk.status).toBe(200);
+    const dayUtc = new Date(now * 1000).toISOString().slice(0, 10);
+    expect(relaySpent.get(`bootstrap:${dayUtc}`)).toBe(100_000n);
+
+    // Different address for same Telegram user must stay 409 even after >180s
+    const diffAddrBoot = await app.request(
+      "/v1/relay/bootstrap",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+        body: JSON.stringify({
+          address: otherBootKp.publicKey(),
+          mode: "sponsored_reserve",
+          timestamp: now,
+          nonce: "boot_diff_01",
+          signatureBase64: await signSep53(
+            otherBootKp,
+            `astrowallet-bootstrap:v1:testnet:sponsored_reserve:${otherBootKp.publicKey()}:${now}:boot_diff_01`,
+          ),
+        }),
+      },
+      relayEnv,
+    );
+    expect(diffAddrBoot.status).toBe(409);
+
+    // Simulate >180s expiry by aging pairDedupKey via reclaim test: fast-forward createdAt by mutating date via spy
+    const pairKey = `bootstrap:pair:testnet:777001:${bootTargetKp.publicKey()}`;
+    expect(await repo.getAlertDedupCreatedAt?.(pairKey)).not.toBeNull();
+    // Force pair key timestamp older than 180s by calling release+claim with older time via spy on Date.now
+    const dateNowSpy = vi.spyOn(Date, "now").mockReturnValue((now + 200) * 1000);
+    try {
+      // Wait for 10s sponsor lease from bootOk to expire at now+200
+      const retryTs = now + 200;
+      const retryBoot = await app.request(
+        "/v1/relay/bootstrap",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${sessionToken}` },
+          body: JSON.stringify({
+            address: bootTargetKp.publicKey(),
+            mode: "sponsored_reserve",
+            timestamp: retryTs,
+            nonce: "boot_retry_180",
+            signatureBase64: await signSep53(
+              bootTargetKp,
+              `astrowallet-bootstrap:v1:testnet:sponsored_reserve:${bootTargetKp.publicKey()}:${retryTs}:boot_retry_180`,
+            ),
+          }),
+        },
+        relayEnv,
+      );
+      expect(retryBoot.status).toBe(200);
+      // Budget was NOT consumed twice
+      expect(relaySpent.get(`bootstrap:${dayUtc}`)).toBe(100_000n);
+    } finally {
+      dateNowSpy.mockRestore();
+    }
+
+    // --- HALLAZGO-02: sourceAccount match, no Classic ops in feebump, authEntriesXdrBase64 binding & allowlist ---
+    const unlinkedTx = new TransactionBuilder(new Account(unlinkedKp.publicKey(), "100"), {
+      fee: BASE_FEE,
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        new Contract(escrowId).call(
+          "get_escrowed_balance",
+          new Address(unlinkedKp.publicKey()).toScVal(),
+        ),
+      )
+      .setTimeout(60)
+      .build()
+      .toXDR();
+    const mismatchSourceRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: unlinkedTx,
+          walletAuth: await signWalletAuth(linkedKp, "feebump", unlinkedTx, "nonce_src_1"),
+        }),
+      },
+      relayEnv,
+    );
+    expect(mismatchSourceRes.status).toBe(403);
+
+    const { Operation } = await import("@stellar/stellar-sdk");
+    const classicOpTx = new TransactionBuilder(new Account(linkedKp.publicKey(), "100"), {
+      fee: BASE_FEE,
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })
+      .addOperation(Operation.manageData({ name: "spam", value: "1" }))
+      .setTimeout(60)
+      .build()
+      .toXDR();
+    const classicBlockedRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: classicOpTx,
+          walletAuth: await signWalletAuth(linkedKp, "feebump", classicOpTx, "nonce_cls_1"),
+        }),
+      },
+      relayEnv,
+    );
+    expect(classicBlockedRes.status).toBe(403);
+
+    // Soroban mode: mutating authEntriesXdrBase64 invalidates walletAuth; HashIdPreimage rejected (400); unlisted sub-contract rejected (403)
+    const validFuncXdr = xdr.HostFunction.hostFunctionTypeInvokeContract(
+      new xdr.InvokeContractArgs({
+        contractAddress: new Address(escrowId).toScAddress(),
+        functionName: "get_escrowed_balance",
+        args: [new Address(linkedKp.publicKey()).toScVal()],
+      }),
+    ).toXDR("base64");
+    const makeAuthEntryXdr = (targetContract: string) =>
+      new xdr.SorobanAuthorizationEntry({
+        credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+        rootInvocation: new xdr.SorobanAuthorizedInvocation({
+          function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+            new xdr.InvokeContractArgs({
+              contractAddress: new Address(targetContract).toScAddress(),
+              functionName: "get_escrowed_balance",
+              args: [],
+            }),
+          ),
+          subInvocations: [],
+        }),
+      }).toXDR("base64");
+
+    const allowedAuthEntry = makeAuthEntryXdr(escrowId);
+    const unlistedAuthEntry = makeAuthEntryXdr(otherContractId);
+    const mutatedAuthRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "soroban",
+          funcXdrBase64: validFuncXdr,
+          authEntriesXdrBase64: [allowedAuthEntry],
+          // Signed WITHOUT authEntriesXdrBase64 -> must fail 403
+          walletAuth: await signWalletAuth(linkedKp, "soroban", validFuncXdr, "nonce_auth_mut"),
+        }),
+      },
+      relayEnv,
+    );
+    expect(mutatedAuthRes.status).toBe(403);
+
+    const unlistedAuthPayload = [validFuncXdr, unlistedAuthEntry].join(":");
+    const unlistedAuthRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "soroban",
+          funcXdrBase64: validFuncXdr,
+          authEntriesXdrBase64: [unlistedAuthEntry],
+          walletAuth: await signWalletAuth(
+            linkedKp,
+            "soroban",
+            unlistedAuthPayload,
+            "nonce_auth_unlisted",
+          ),
+        }),
+      },
+      relayEnv,
+    );
+    expect(unlistedAuthRes.status).toBe(403);
+
+    // --- HALLAZGO-03: walletAuth fallback when intentAuth stage is already consumed & claim_id binding ---
+    const claimIntentId = "it_carbon_claim_01";
+    const claimSig = await signIntentToken(
+      { intentId: claimIntentId, network: "testnet", telegramUserId: "777001", expiresAt: now + 300 },
+      TEST_ENV.INTENT_HMAC_SECRET,
+    );
+    await repo.createSignedIntent({
+      intentId: claimIntentId,
+      network: "testnet",
+      creatorTelegramUserId: "777001",
+      actionType: "claim",
+      payloadJson: JSON.stringify({ amount: "10", assetCode: "XLM" }),
+      hmacSig: claimSig,
+      status: "signed",
+      expiresAt: now + 300,
+      createdAt: now,
+    });
+    const expectedClaimIdBytes = Buffer.from(await deriveClaimId(claimIntentId), "hex");
+    const wrongClaimIdBytes = Buffer.alloc(32, 0x99);
+    const buildClaimCallTx = (fn: string, cid: Buffer) =>
+      new TransactionBuilder(new Account(linkedKp.publicKey(), "100"), {
+        fee: BASE_FEE,
+        networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+      })
+        .addOperation(
+          new Contract(escrowId).call(
+            fn,
+            nativeToScVal(cid, { type: "bytes" }),
+            ...(fn === "claim"
+              ? [
+                  new Address(linkedKp.publicKey()).toScVal(),
+                  nativeToScVal(new Uint8Array(64).fill(1), { type: "bytes" }),
+                ]
+              : []),
+          ),
+        )
+        .setTimeout(60)
+        .build()
+        .toXDR();
+
+    // Wrong claimId with intentAuth alone -> 403
+    const wrongClaimRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: buildClaimCallTx("claim", wrongClaimIdBytes),
+          intentAuth: { intentId: claimIntentId, sig: claimSig },
+        }),
+      },
+      relayEnv,
+    );
+    expect(wrongClaimRes.status).toBe(403);
+
+    // Consume intentAuth stage key, then submit again with BOTH consumed intentAuth AND valid walletAuth -> 200
+    const goodClaimTx = buildClaimCallTx("claim", expectedClaimIdBytes);
+    const firstIntentClaim = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: goodClaimTx,
+          intentAuth: { intentId: claimIntentId, sig: claimSig },
+        }),
+      },
+      relayEnv,
+    );
+    expect(firstIntentClaim.status).toBe(200);
+
+    const fallbackWalletClaim = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: goodClaimTx,
+          intentAuth: { intentId: claimIntentId, sig: claimSig },
+          walletAuth: await signWalletAuth(linkedKp, "feebump", goodClaimTx, "nonce_fallback_1"),
+        }),
+      },
+      relayEnv,
+    );
+    expect(fallbackWalletClaim.status).toBe(200);
+
+    // --- HALLAZGO-04: resourceFee ceiling & accounting even when v1.tx.fee is 100 ---
+    const highResourceBuilt = new TransactionBuilder(new Account(linkedKp.publicKey(), "100"), {
+      fee: "100",
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        new Contract(escrowId).call("claim", nativeToScVal(expectedClaimIdBytes, { type: "bytes" })),
+      )
+      .setSorobanData(new SorobanDataBuilder().setResourceFee("5000000").build())
+      .setTimeout(60)
+      .build();
+    const highResEnvXdr = highResourceBuilt.toEnvelope();
+    highResEnvXdr.v1.tx.fee = 100;
+    const highResXdr = highResEnvXdr.toXDR("base64");
+    const overResourceRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: highResXdr,
+          walletAuth: await signWalletAuth(linkedKp, "feebump", highResXdr, "nonce_resfee_1"),
+        }),
+      },
+      relayEnv,
+    );
+    expect(overResourceRes.status).toBe(403);
+
+    const normalResourceBuilt = new TransactionBuilder(new Account(linkedKp.publicKey(), "100"), {
+      fee: "100",
+      networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+    })
+      .addOperation(
+        new Contract(escrowId).call("claim", nativeToScVal(expectedClaimIdBytes, { type: "bytes" })),
+      )
+      .setSorobanData(new SorobanDataBuilder().setResourceFee("400000").build())
+      .setTimeout(60)
+      .build();
+    const normalEnvXdr = normalResourceBuilt.toEnvelope();
+    normalEnvXdr.v1.tx.fee = 100;
+    const normalResXdr = normalEnvXdr.toXDR("base64");
+    const spentBefore = relaySpent.get(dayUtc) ?? 0n;
+    const normalRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: normalResXdr,
+          walletAuth: await signWalletAuth(linkedKp, "feebump", normalResXdr, "nonce_resfee_2"),
+        }),
+      },
+      relayEnv,
+    );
+    expect(normalRes.status).toBe(200);
+    expect((relaySpent.get(dayUtc) ?? 0n) - spentBefore).toBeGreaterThanOrEqual(420_000n);
+
+    // --- HALLAZGO-05: no tx_bad_seq retry in feebump, timeout retains lease, DO storage persistence ---
+    upstreamBehavior = "bad_seq";
+    upstreamCalls = 0;
+    const badSeqFeebump = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "feebump",
+          signedTxXdrBase64: goodClaimTx,
+          walletAuth: await signWalletAuth(linkedKp, "feebump", goodClaimTx, "nonce_badseq_fb"),
+        }),
+      },
+      relayEnv,
+    );
+    expect(badSeqFeebump.status).toBe(502);
+    expect(upstreamCalls).toBe(1);
+
+    // Timeout holds lease across DO restart (hydrated from mockDoState.storage)
+    upstreamBehavior = "timeout";
+    const timeoutPayload = [validFuncXdr, allowedAuthEntry].join(":");
+    const timeoutRes = await app.request(
+      "/v1/relay/submit",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "soroban",
+          funcXdrBase64: validFuncXdr,
+          authEntriesXdrBase64: [allowedAuthEntry],
+          walletAuth: await signWalletAuth(linkedKp, "soroban", timeoutPayload, "nonce_to_1"),
+        }),
+      },
+      relayEnv,
+    );
+    expect(timeoutRes.status).toBe(502);
+
+    const poolRestarted = new ChannelPoolDO(mockDoState, {});
+    const statusRes = await poolRestarted.fetch(new Request("https://channel-pool.internal/status"));
+    const statusJson = (await statusRes.json()) as { activeLeases: number };
+    expect(statusJson.activeLeases).toBeGreaterThanOrEqual(1);
+    void relayTxCount;
+
+    // --- HALLAZGO-07: Fail-closed smart account linking when SMART_ACCOUNT_WASM_HASH is unset ---
+    const challengeMessage = `astrowallet-connect:v1:testnet:777001:ch_carbon:${now}:${now + 600}`;
+    const verifyRes = await verifyConnectAccountSubmissions({
+      config: {
+        network: "testnet",
+        networkPassphrase: TEST_ENV.STELLAR_NETWORK_PASSPHRASE,
+        rpcUrls: [TEST_ENV.STELLAR_RPC_URLS],
+        horizonUrls: [TEST_ENV.HORIZON_URLS],
+        pwaOrigin: TEST_ENV.PWA_ORIGIN,
+        allowedOrigins: [TEST_ENV.ALLOWED_ORIGINS],
+        sep42AssetListUrls: [],
+        relayAllowedContracts: [],
+        relayRateLimitPerMin: 10,
+        proxyRateLimitPerMin: 60,
+        relayMaxOperations: 5,
+        relayMaxFeeStroops: "2000000",
+        relayDailyBudgetStroops: "500000000",
+        tgBotToken: TEST_ENV.TG_BOT_TOKEN,
+        tgWebhookSecret: TEST_ENV.TG_WEBHOOK_SECRET,
+        intentHmacSecret: TEST_ENV.INTENT_HMAC_SECRET,
+        connectVerifiedBots: [],
+        relayChannelAccounts: [],
+        relayBootstrapStartingBalanceXlm: "1.5",
+        relayBootstrapDailyLimit: 25,
+        relayAllowDirectBootstrap: false,
+        smartAccountWasmHash: undefined,
+      },
+      repo,
+      telegramUserId: "777001",
+      challengeMessage,
+      accounts: [
+        {
+          address: linkedKp.publicKey() as never,
+          kind: "classic",
+          label: "Guardian",
+          signatureBase64: await signSep53(linkedKp, challengeMessage),
+        },
+        {
+          address: escrowId as never,
+          kind: "smart",
+          label: "Arbitrary Contract",
+          guardianAddress: linkedKp.publicKey() as never,
+          signatureBase64: await signSep53(
+            linkedKp,
+            `${challengeMessage}:smart:${escrowId}`,
+          ),
+        },
+      ],
+    });
+    expect(verifyRes.ok).toBe(false);
+    if (!verifyRes.ok) {
+      expect(verifyRes.status).toBe(403);
+    }
   });
 });

@@ -11,8 +11,9 @@
 | [`ENV_MATRIX.md`](ENV_MATRIX.md) | 63 | Client (`VITE_*`) & Server (`wrangler.toml`/secrets) Zod env matrix | **Active**; single env spec alongside `domain/src/config.ts` |
 | [`ASTRO_CONNECT_SPEC.md`](ASTRO_CONNECT_SPEC.md) | 90 | Open AstroConnect v1 protocol specification (SEP-53 auth, Clear-Sign XDR, Boomerang, discovery) | **Active Open Standard** |
 | [`DEVELOPER_QUICKSTART.md`](DEVELOPER_QUICKSTART.md) | 125 | 5-minute developer guide for `@astrowallet/connect` & `StellarWalletsKit` bridge | **Active Developer Guide** |
-| [`AUDIT_2026-11.md`](AUDIT_2026-11.md) | 78 | Full post-`81c4441` + remediation security/UX/Stellar/Soroban audit | **Authoritative blocker list** (updated with latest remediation) |
-| [`MAINNET_READINESS_5_AUDITS_2026-11-25.md`](MAINNET_READINESS_5_AUDITS_2026-11-25.md) | 125 | Pre-Mainnet 5-audit roadmap, live Cloudflare/on-chain forensics & remediation tracker | **Active Handoff (5 Surgical Audits Roadmap & Findings)** |
+| [`AUDIT_2026-11.md`](AUDIT_2026-11.md) | 82 | Full post-`81c4441` + remediation security/UX/Stellar/Soroban audit | **Authoritative blocker list** (updated with Carbon Block 1 remediation) |
+| [`MAINNET_READINESS_5_AUDITS_2026-11-25.md`](MAINNET_READINESS_5_AUDITS_2026-11-25.md) | 105 | Pre-Mainnet 5-audit roadmap, live Cloudflare/on-chain forensics & remediation tracker | **Active Handoff (5 Surgical Audits + Carbon Block 1)** |
+| [`AUDIT_CARBON_BLOCK_1.md`](../AUDIT_CARBON_BLOCK_1.md) | 534 | Pre-Mainnet invariant audit Block 1 (+ Smart Account `C...`): 7 P0/P1 findings & `NO-GO` gates | **Remediated** (`HALLAZGO-01..07` fixed in code; `HALLAZGO-08` & Smart Account remain Mainnet gates) |
 | [`SESSION_HANDOFF_2026-11-20.md`](SESSION_HANDOFF_2026-11-20.md) | 29 | Notes from `wip/telegram-mini-app` cutover (resolved in `82e5890..81c4441`) | **Historical snapshot** |
 | [`NEXT_SESSION_HANDOFF.md`](NEXT_SESSION_HANDOFF.md) | 96 | Live Testnet infra IDs, Mini App + TON state, `AstroID`/intent sync & resume commands | **Active Testnet handoff** (updated with `AstroID` SSO & external intent federation) |
 | [`PROPOSAL_TELEGRAM_MINI_APP.md`](PROPOSAL_TELEGRAM_MINI_APP.md) | 84 | Mini App & ToS Clause 7.3 proposal | **APPROVED & IMPLEMENTED** (`2026-11-20`, Rule 7 amended) |

@@ -143,6 +143,12 @@ export interface ServerRepository {
   /** Returns true the first time a dedup key is claimed, false on repeats. */
   claimAlertDedupKey(dedupKey: string): Promise<boolean>;
   releaseAlertDedupKey?(dedupKey: string): Promise<void>;
+  getAlertDedupCreatedAt?(dedupKey: string): Promise<number | null>;
+  reclaimExpiredAlertDedupKey?(
+    dedupKey: string,
+    minAgeSec: number,
+    nowSec?: number,
+  ): Promise<boolean>;
   findRecentPendingIntent(input: {
     creatorTelegramUserId: string;
     actionType: IntentActionType;
@@ -882,6 +888,25 @@ export function createD1Repository(db: D1Database): ServerRepository {
       await db.prepare("DELETE FROM processed_alerts WHERE dedup_key = ?").bind(dedupKey).run();
     },
 
+    async getAlertDedupCreatedAt(dedupKey) {
+      const row = await db
+        .prepare("SELECT created_at FROM processed_alerts WHERE dedup_key = ?")
+        .bind(dedupKey)
+        .first<{ created_at: number }>();
+      return row?.created_at ?? null;
+    },
+
+    async reclaimExpiredAlertDedupKey(dedupKey, minAgeSec, nowSec) {
+      const now = nowSec ?? Math.floor(Date.now() / 1000);
+      const res = await db
+        .prepare(
+          "UPDATE processed_alerts SET created_at = ? WHERE dedup_key = ? AND created_at < ?",
+        )
+        .bind(now, dedupKey, now - minAgeSec)
+        .run();
+      return (res.meta?.changes ?? 0) > 0;
+    },
+
     async findRecentPendingIntent({ creatorTelegramUserId, actionType, payloadJson, sinceUnix }) {
       const row = await db
         .prepare(
@@ -1008,7 +1033,7 @@ export function createD1Repository(db: D1Database): ServerRepository {
           .bind(nowSec - 7 * 86_400),
         db
           .prepare(
-            "DELETE FROM processed_alerts WHERE created_at < ? AND dedup_key NOT LIKE 'bootstrap:%'",
+            "DELETE FROM processed_alerts WHERE created_at < ? AND dedup_key NOT LIKE 'bootstrap:%' AND dedup_key NOT LIKE 'relay-intent:%'",
           )
           .bind(nowSec - 30 * 86_400),
         db.prepare("DELETE FROM daily_user_activity WHERE day_utc < ?").bind(cutoffDayUtc),

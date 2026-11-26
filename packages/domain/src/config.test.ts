@@ -281,4 +281,20 @@ describe("parseServerConfig", () => {
     expect(backToTestnet.lzOftContractId).toBeUndefined();
     expect(backToTestnet.moneygramAnchorDomain).toBe("extstellar.moneygram.com");
   });
+
+  it("defaults relayAllowDirectBootstrap to false and hard-blocks it on mainnet", () => {
+    const testnetCfg = parseServerConfig(VALID_TESTNET_SERVER_ENV);
+    expect(testnetCfg.relayAllowDirectBootstrap).toBe(false);
+
+    expect(() =>
+      parseServerConfig({
+        ...VALID_TESTNET_SERVER_ENV,
+        STELLAR_NETWORK: "mainnet",
+        STELLAR_NETWORK_PASSPHRASE: "Public Global Stellar Network ; September 2015",
+        FRIENDBOT_URL: undefined,
+        ALLOWED_ORIGINS: "https://app.astrowallet.example",
+        RELAY_ALLOW_DIRECT_BOOTSTRAP: "true",
+      }),
+    ).toThrow(/RELAY_ALLOW_DIRECT_BOOTSTRAP/);
+  });
 });

@@ -11,9 +11,10 @@ const DAY_IN_LEDGERS_CONSERVATIVE: u32 = 28_800;
 const CLAIM_TTL_MIN_LEDGERS: u32 = DAY_IN_LEDGERS_CONSERVATIVE * 14;
 const CLAIM_TTL_BUFFER_LEDGERS: u32 = DAY_IN_LEDGERS_CONSERVATIVE * 14;
 const CLAIM_TTL_MAX_LEDGERS: u32 = DAY_IN_LEDGERS_CONSERVATIVE * 60;
+const ESCROWED_BALANCE_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS_CONSERVATIVE * 45;
 const TERMINAL_TTL_LEDGERS: u32 = DAY_IN_LEDGERS_CONSERVATIVE * 7;
-const INSTANCE_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS_CONSERVATIVE * 7;
-const INSTANCE_TTL_EXTEND_TO: u32 = DAY_IN_LEDGERS_CONSERVATIVE * 30;
+const INSTANCE_TTL_THRESHOLD: u32 = DAY_IN_LEDGERS_CONSERVATIVE * 45;
+const INSTANCE_TTL_EXTEND_TO: u32 = CLAIM_TTL_MAX_LEDGERS;
 const MAX_CLAIM_DURATION_SECS: u64 = 30 * 86_400;
 
 #[contracterror]
@@ -111,9 +112,11 @@ fn increase_escrowed_balance(env: &Env, token: &Address, amount: i128) {
         None => panic_with_error!(env, ClaimError::Overflow),
     };
     env.storage().persistent().set(&key, &next);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, CLAIM_TTL_MAX_LEDGERS / 2, CLAIM_TTL_MAX_LEDGERS);
+    env.storage().persistent().extend_ttl(
+        &key,
+        ESCROWED_BALANCE_TTL_THRESHOLD,
+        CLAIM_TTL_MAX_LEDGERS,
+    );
 }
 
 fn decrease_escrowed_balance(env: &Env, token: &Address, amount: i128) {
@@ -124,9 +127,11 @@ fn decrease_escrowed_balance(env: &Env, token: &Address, amount: i128) {
         None => panic_with_error!(env, ClaimError::Overflow),
     };
     env.storage().persistent().set(&key, &next);
-    env.storage()
-        .persistent()
-        .extend_ttl(&key, CLAIM_TTL_MAX_LEDGERS / 2, CLAIM_TTL_MAX_LEDGERS);
+    env.storage().persistent().extend_ttl(
+        &key,
+        ESCROWED_BALANCE_TTL_THRESHOLD,
+        CLAIM_TTL_MAX_LEDGERS,
+    );
 }
 
 fn write_terminal_deposit(env: &Env, key: &DataKey, deposit: &ClaimDeposit) {
@@ -274,7 +279,7 @@ impl ClaimEscrowContract {
         if escrowed > 0 {
             env.storage().persistent().extend_ttl(
                 &DataKey::EscrowedBalance(token.clone()),
-                CLAIM_TTL_MAX_LEDGERS / 2,
+                ESCROWED_BALANCE_TTL_THRESHOLD,
                 CLAIM_TTL_MAX_LEDGERS,
             );
         }
@@ -640,7 +645,7 @@ impl ClaimEscrowContract {
         env.storage().persistent().extend_ttl(&key, ttl / 2, ttl);
         env.storage().persistent().extend_ttl(
             &DataKey::EscrowedBalance(deposit.token),
-            CLAIM_TTL_MAX_LEDGERS / 2,
+            ESCROWED_BALANCE_TTL_THRESHOLD,
             CLAIM_TTL_MAX_LEDGERS,
         );
         env.storage()
@@ -1556,5 +1561,99 @@ mod test {
         });
 
         client.cancel_claim_to(&claim_id, &alt_dest);
+    }
+
+    #[test]
+    fn test_instance_and_escrowed_balance_ttl_always_outlive_max_duration_claim() {
+        let max_claim_ttl = compute_claim_ttl_ledgers(1_000, 1_000 + MAX_CLAIM_DURATION_SECS);
+        assert!(
+            INSTANCE_TTL_EXTEND_TO >= max_claim_ttl,
+            "INSTANCE_TTL_EXTEND_TO ({}) must be >= max claim TTL ({})",
+            INSTANCE_TTL_EXTEND_TO,
+            max_claim_ttl
+        );
+        assert!(
+            INSTANCE_TTL_THRESHOLD >= max_claim_ttl,
+            "INSTANCE_TTL_THRESHOLD ({}) must be >= max claim TTL ({})",
+            INSTANCE_TTL_THRESHOLD,
+            max_claim_ttl
+        );
+        assert!(
+            ESCROWED_BALANCE_TTL_THRESHOLD >= max_claim_ttl,
+            "ESCROWED_BALANCE_TTL_THRESHOLD ({}) must be >= max claim TTL ({})",
+            ESCROWED_BALANCE_TTL_THRESHOLD,
+            max_claim_ttl
+        );
+
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000;
+            li.sequence_number = 100;
+            li.max_entry_ttl = 3_110_400;
+        });
+
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(admin.clone())
+            .address();
+        let token_admin = token::StellarAssetClient::new(&env, &token_id);
+        let token = token::Client::new(&env, &token_id);
+        token_admin.mint(&sender, &1_000);
+
+        let escrow_id = env.register(ClaimEscrowContract, (Some(admin),));
+        let client = ClaimEscrowContractClient::new(&env, &escrow_id);
+        let signing_key = SigningKey::from_bytes(&[77u8; 32]);
+        let claim_pubkey = BytesN::from_array(&env, &signing_key.verifying_key().to_bytes());
+        let claim_id = BytesN::from_array(&env, &[77u8; 32]);
+
+        client.create_claim(
+            &claim_id,
+            &sender,
+            &token_id,
+            &500,
+            &claim_pubkey,
+            &(1_000 + MAX_CLAIM_DURATION_SECS),
+            &false,
+        );
+        assert_eq!(token.balance(&escrow_id), 500);
+
+        // Verify explicit TTLs on ClaimEscrow instance, EscrowedBalance, and Claim exceed 864_000 ledgers
+        use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
+        env.as_contract(&escrow_id, || {
+            let inst_ttl = env.storage().instance().get_ttl();
+            let esc_ttl = env
+                .storage()
+                .persistent()
+                .get_ttl(&DataKey::EscrowedBalance(token_id.clone()));
+            let claim_ttl = env
+                .storage()
+                .persistent()
+                .get_ttl(&DataKey::Claim(claim_id.clone()));
+            assert!(
+                inst_ttl >= max_claim_ttl,
+                "inst_ttl={inst_ttl} < {max_claim_ttl}"
+            );
+            assert!(
+                esc_ttl >= max_claim_ttl,
+                "esc_ttl={esc_ttl} < {max_claim_ttl}"
+            );
+            assert!(
+                claim_ttl >= max_claim_ttl,
+                "claim_ttl={claim_ttl} < {max_claim_ttl}"
+            );
+        });
+
+        // Advance past old 30d instance TTL (864_000 ledgers) and past expiry timestamp:
+        // ClaimEscrow's own instance, EscrowedBalance, and Claim entries must all still be live.
+        env.ledger().with_mut(|li| {
+            li.timestamp = 1_000 + MAX_CLAIM_DURATION_SECS + 1;
+            li.sequence_number = 100 + 864_001;
+        });
+
+        assert_eq!(client.get_escrowed_balance(&token_id), 500);
+        assert_eq!(client.get_claim(&claim_id).unwrap().amount, 500);
+        assert!(!client.is_deposits_paused());
     }
 }

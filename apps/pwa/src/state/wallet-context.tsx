@@ -2894,11 +2894,12 @@ export function WalletProvider({
       return withActiveKeypair(async (keypair) =>
         enqueueAccountTx(keypair.publicKey(), async () => {
           const address = keypair.publicKey() as ClassicAddress;
+          const mode = "sponsored_reserve" as const;
           const timestamp = Math.floor(Date.now() / 1000);
           const nonceBytes = new Uint8Array(12);
           crypto.getRandomValues(nonceBytes);
           const nonce = Array.from(nonceBytes, (b) => b.toString(16).padStart(2, "0")).join("");
-          const challengeMsg = `astrowallet-bootstrap:v1:${config.network}:${address}:${timestamp}:${nonce}`;
+          const challengeMsg = `astrowallet-bootstrap:v1:${config.network}:${mode}:${address}:${timestamp}:${nonce}`;
           const signatureBase64 = signChallengeMessage(keypair, challengeMsg);
           const res = await fetch(`${apiBase}/v1/relay/bootstrap`, {
             method: "POST",
@@ -2909,6 +2910,7 @@ export function WalletProvider({
             },
             body: JSON.stringify({
               address,
+              mode,
               timestamp,
               nonce,
               signatureBase64,

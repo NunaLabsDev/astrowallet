@@ -18,7 +18,13 @@ import {
   signMiniAppSessionToken,
   type ConnectChallengePayload,
 } from "@astrowallet/tg-protocol";
-import { Keypair } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Contract,
+  Keypair,
+  TransactionBuilder,
+  nativeToScVal,
+} from "@stellar/stellar-sdk";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { ChannelPoolDO } from "./durable-objects/channel-pool.js";
@@ -43,6 +49,24 @@ const OTHER_CONTRACT =
   "CAEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQTD2L" as ContractAddress;
 const SOROBAN_HOST_FN_XDR =
   "AAAAAAAAAAEHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwAAAAh0cmFuc2ZlcgAAAAA=";
+
+function buildAllowlistedSorobanTxXdr(
+  sourceAddress: string,
+  contractId: string = SOROBAN_HOST_FN_CONTRACT,
+  functionName = "transfer",
+  args: ReturnType<typeof nativeToScVal>[] = [],
+  fee = "100",
+): string {
+  const contract = new Contract(contractId);
+  return new TransactionBuilder(new Account(sourceAddress, "100"), {
+    fee,
+    networkPassphrase: "Test SDF Network ; September 2015",
+  })
+    .addOperation(contract.call(functionName, ...args))
+    .setTimeout(60)
+    .build()
+    .toXDR();
+}
 
 const TEST_ENV = {
   STELLAR_NETWORK: "testnet",
@@ -146,7 +170,7 @@ function createMemoryRepo(): ServerRepository {
     string,
     Array<{ txHash: string; amount: string; payerAddress?: string }>
   >();
-  const dedupKeys = new Set<string>();
+  const dedupKeys = new Map<string, number>();
   const rateLimits = new Map<string, number>();
   const relayBudget = new Map<string, bigint>();
   const tgUpdates = new Set<number>();
@@ -341,11 +365,22 @@ function createMemoryRepo(): ServerRepository {
     },
     async claimAlertDedupKey(dedupKey) {
       if (dedupKeys.has(dedupKey)) return false;
-      dedupKeys.add(dedupKey);
+      dedupKeys.set(dedupKey, Math.floor(Date.now() / 1000));
       return true;
     },
     async releaseAlertDedupKey(dedupKey) {
       dedupKeys.delete(dedupKey);
+    },
+    async getAlertDedupCreatedAt(dedupKey) {
+      return dedupKeys.get(dedupKey) ?? null;
+    },
+    async reclaimExpiredAlertDedupKey(dedupKey, minAgeSec, nowSec) {
+      const createdAt = dedupKeys.get(dedupKey);
+      if (createdAt === undefined) return false;
+      const now = nowSec ?? Math.floor(Date.now() / 1000);
+      if (createdAt >= now - minAgeSec) return false;
+      dedupKeys.set(dedupKey, now);
+      return true;
     },
     async findRecentPendingIntent({ creatorTelegramUserId, actionType, payloadJson, sinceUnix }) {
       const now = Math.floor(Date.now() / 1000);
@@ -837,12 +872,13 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(scanRes.status).toBe(200);
 
-    // Phase 2 OpenZeppelin Channels relay proxy (walletAuth + allowlisted contracts + valid benign XDR)
+    // Phase 2 OpenZeppelin Channels relay proxy (walletAuth + allowlisted contracts + valid Soroban XDR)
+    const relayTxXdr = buildAllowlistedSorobanTxXdr(relaySigner.address);
     const walletAuth = await signRelayWalletAuth(
       relaySigner,
       "testnet",
       "feebump",
-      BENIGN_PAYMENT_TX_XDR,
+      relayTxXdr,
     );
     const relayRes = await app.request(
       "/v1/relay/submit",
@@ -854,7 +890,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         },
         body: JSON.stringify({
           mode: "feebump",
-          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          signedTxXdrBase64: relayTxXdr,
           walletAuth,
         }),
       },
@@ -1163,7 +1199,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     );
     expect(badXdrRes.status).toBe(400);
 
-    // 4. Valid intentAuth without Origin -> 200
+    // 4. Valid intentAuth (bound to claim_id + create_claim) without Origin -> 200
     const now = Math.floor(Date.now() / 1000);
     const expiresAt = now + 300;
     const intentId = "it_relay_01";
@@ -1175,13 +1211,20 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
       intentId,
       network: "testnet",
       creatorTelegramUserId: "9001",
-      actionType: "pay",
-      payloadJson: "{}",
+      actionType: "claim",
+      payloadJson: JSON.stringify({ amount: "10", assetCode: "XLM" }),
       hmacSig: sig,
       status: "pending",
       expiresAt,
       createdAt: now,
     });
+    const intentClaimId = await deriveClaimId(intentId);
+    const intentClaimTxXdr = buildAllowlistedSorobanTxXdr(
+      relaySigner.address,
+      SOROBAN_HOST_FN_CONTRACT,
+      "create_claim",
+      [nativeToScVal(Buffer.from(intentClaimId, "hex"), { type: "bytes" })],
+    );
     const intentRelayRes = await app.request(
       "/v1/relay/submit",
       {
@@ -1189,11 +1232,11 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: "feebump",
-          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          signedTxXdrBase64: intentClaimTxXdr,
           intentAuth: { intentId, sig },
         }),
       },
-      relayEnv,
+      { ...relayEnv, CLAIM_ESCROW_CONTRACT_ID: SOROBAN_HOST_FN_CONTRACT },
     );
     expect(intentRelayRes.status).toBe(200);
 
@@ -1976,12 +2019,13 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     });
 
     // 1. Relay daily budget exhaustion -> 429
+    const budgetSorobanTxXdr = buildAllowlistedSorobanTxXdr(signer.address);
     const tightBudgetEnv = {
       ...TEST_ENV,
       OZ_CHANNELS_API_URL: "https://channels.openzeppelin.com/testnet",
       RELAY_ALLOWED_CONTRACTS: SOROBAN_HOST_FN_CONTRACT,
-      RELAY_MAX_FEE_STROOPS: "100",
-      RELAY_DAILY_BUDGET_STROOPS: "150",
+      RELAY_MAX_FEE_STROOPS: "100000",
+      RELAY_DAILY_BUDGET_STROOPS: "150000",
     };
     const r1 = await app.request(
       "/v1/relay/submit",
@@ -1990,12 +2034,12 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: "feebump",
-          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          signedTxXdrBase64: budgetSorobanTxXdr,
           walletAuth: await signRelayWalletAuth(
             signer,
             "testnet",
             "feebump",
-            BENIGN_PAYMENT_TX_XDR,
+            budgetSorobanTxXdr,
           ),
         }),
       },
@@ -2009,12 +2053,12 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           mode: "feebump",
-          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
+          signedTxXdrBase64: budgetSorobanTxXdr,
           walletAuth: await signRelayWalletAuth(
             signer,
             "testnet",
             "feebump",
-            BENIGN_PAYMENT_TX_XDR,
+            budgetSorobanTxXdr,
           ),
         }),
       },
@@ -2879,34 +2923,25 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     expect(scanRes.status).toBe(200);
     expect(scanRes.headers.get("Access-Control-Allow-Origin")).toBe("*");
 
-    // 2. ChannelPoolDO lease + tx_bad_seq retry
-    const intentNow = Math.floor(Date.now() / 1000);
-    const intentExpiresAt = intentNow + 300;
-    const intentSig = await signIntentToken(
-      {
-        intentId: "int_chan01",
-        network: "testnet",
-        telegramUserId: "55112233",
-        expiresAt: intentExpiresAt,
-      },
-      TEST_ENV.INTENT_HMAC_SECRET,
-    );
-    await repo.createSignedIntent({
-      intentId: "int_chan01",
-      network: "testnet",
-      actionType: "sign_xdr",
-      creatorTelegramUserId: "55112233",
-      payloadJson: JSON.stringify({ humanSummary: "Test channel pool" }),
-      hmacSig: intentSig,
-      status: "pending",
-      expiresAt: intentExpiresAt,
-      createdAt: intentNow,
+    // 2. ChannelPoolDO lease + tx_bad_seq retry (mode: "soroban", where channel owns sequence)
+    const chanSigner = await generateTestSigner();
+    await repo.linkVerifiedAddresses({
+      telegramUserId: "55112233",
+      accounts: [
+        {
+          address: chanSigner.address,
+          kind: "classic",
+          label: "ChannelTest",
+          isDefault: true,
+          verifiedSigHash: "sig_chan_1",
+        },
+      ],
     });
 
     const envWithPool = {
       ...TEST_ENV,
       OZ_CHANNELS_API_URL: "https://channels.openzeppelin.com/testnet",
-      RELAY_ALLOWED_CONTRACTS: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC",
+      RELAY_ALLOWED_CONTRACTS: SOROBAN_HOST_FN_CONTRACT,
       RELAY_CHANNEL_ACCOUNTS: `${channel1},${channel2}`,
       CHANNEL_POOL: {
         idFromName: (name: string) => name as never,
@@ -2920,9 +2955,14 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          mode: "feebump",
-          signedTxXdrBase64: BENIGN_PAYMENT_TX_XDR,
-          intentAuth: { intentId: "int_chan01", sig: intentSig },
+          mode: "soroban",
+          funcXdrBase64: SOROBAN_HOST_FN_XDR,
+          walletAuth: await signRelayWalletAuth(
+            chanSigner,
+            "testnet",
+            "soroban",
+            SOROBAN_HOST_FN_XDR,
+          ),
         }),
       },
       envWithPool as never,
@@ -2964,7 +3004,7 @@ describe("apps/server Phase 0 + Phase 1 endpoints", () => {
     const bootEnv = { ...TEST_ENV, RELAY_SPONSOR_SECRET: sponsorKp.secret() };
 
     const makeBootSig = async (kp: Keypair, nonce: string) => {
-      const msg = `astrowallet-bootstrap:v1:testnet:${kp.publicKey()}:${now}:${nonce}`;
+      const msg = `astrowallet-bootstrap:v1:testnet:sponsored_reserve:${kp.publicKey()}:${now}:${nonce}`;
       const digest = await crypto.subtle.digest(
         "SHA-256",
         new TextEncoder().encode(`Stellar Signed Message:\n${msg}`),

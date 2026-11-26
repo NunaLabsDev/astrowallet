@@ -5,8 +5,14 @@ import {
   decodeTransactionEnvelope,
   evaluateDecodedTransaction,
   evaluateSorobanInvocation,
+  fetchSep42VerifiedAssets,
+  type DecodedSorobanInvocation,
 } from "@astrowallet/security-shield";
-import { verifyConnectSignature, verifyIntentToken } from "@astrowallet/tg-protocol";
+import {
+  deriveClaimId,
+  verifyConnectSignature,
+  verifyIntentToken,
+} from "@astrowallet/tg-protocol";
 import type { DurableObjectNamespace, KVNamespace } from "@cloudflare/workers-types";
 import {
   BASE_FEE,
@@ -67,6 +73,31 @@ const RelaySubmitSchema = z.discriminatedUnion("mode", [
   }),
 ]);
 
+function validateAllowlistedInvocationTree(
+  inv: DecodedSorobanInvocation,
+  allowlist: readonly string[],
+): boolean {
+  if (!inv.contractId || !allowlist.includes(inv.contractId)) {
+    return false;
+  }
+  for (const sub of inv.subInvocations) {
+    if (!validateAllowlistedInvocationTree(sub, allowlist)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function allowedClaimFunctionsForIntent(
+  status: string,
+  isExpired: boolean,
+): readonly string[] {
+  if (status === "pending" && !isExpired) return ["create_claim"];
+  if (status === "signed" && !isExpired) return ["claim", "cancel_claim", "cancel_claim_to"];
+  if (status === "signed" && isExpired) return ["refund_expired", "refund_expired_to"];
+  return [];
+}
+
 /**
  * Policy-gated proxy to OpenZeppelin Stellar Channels (sponsors transaction gas fees,
  * distinct from Classic CAP-33 account reserves).
@@ -118,7 +149,8 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
     }
 
     // Cryptographic authentication only (Origin header is spoofable and never sufficient).
-    let authorized = false;
+    // Evaluate walletAuth first so linked accounts are never blocked by consumed intentAuth.
+    let authMethod: "wallet" | "intent" | null = null;
     const nowSec = Math.floor(Date.now() / 1000);
 
     let intentAuthRecord: {
@@ -129,50 +161,16 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
     } | null = null;
     let intentAuthExpiredClaim = false;
 
-    if (body.intentAuth) {
-      const intent = repo ? await repo.getSignedIntent(body.intentAuth.intentId) : null;
-      const allowSignedClaim =
-        intent?.actionType === "claim" && intent.status === "signed";
-      const isExpiredSignedClaim = Boolean(allowSignedClaim && nowSec > intent.expiresAt);
-      if (
-        intent &&
-        intent.actionType !== "connect" &&
-        intent.network === config.network &&
-        (intent.status === "pending" || allowSignedClaim)
-      ) {
-        const check = await verifyIntentToken(
-          {
-            intentId: intent.intentId,
-            network: intent.network,
-            telegramUserId: intent.creatorTelegramUserId,
-            expiresAt: intent.expiresAt,
-          },
-          body.intentAuth.sig,
-          config.intentHmacSecret,
-          isExpiredSignedClaim ? intent.expiresAt - 1 : undefined,
-        );
-        if (check.valid) {
-          if (intent.actionType === "claim") {
-            const escrowContract = config.claimEscrowContractId;
-            authorized = Boolean(
-              escrowContract &&
-                config.relayAllowedContracts.includes(escrowContract),
-            );
-          } else {
-            authorized = true;
-          }
-          if (authorized) {
-            intentAuthRecord = intent;
-            intentAuthExpiredClaim = isExpiredSignedClaim;
-          }
-        }
-      }
-    }
+    const canonicalSorobanAuthEntries =
+      body.mode === "soroban" ? body.authEntriesXdrBase64.map((e) => e.trim()) : [];
+    const canonicalPayload =
+      body.mode === "soroban"
+        ? [body.funcXdrBase64.trim(), ...canonicalSorobanAuthEntries].join(":")
+        : body.signedTxXdrBase64.trim();
 
-    if (!authorized && body.walletAuth) {
+    if (body.walletAuth) {
       const w = body.walletAuth;
-      const rawPayload = body.mode === "soroban" ? body.funcXdrBase64 : body.signedTxXdrBase64;
-      const expectedPayloadHash = await sha256Hex(rawPayload);
+      const expectedPayloadHash = await sha256Hex(canonicalPayload);
       if (
         constantTimeEqual(w.payloadHash.toLowerCase(), expectedPayloadHash) &&
         Math.abs(nowSec - w.timestamp) <= 120 &&
@@ -189,19 +187,64 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
           const nonceClaimed = await repo.claimAlertDedupKey(
             `relay-nonce:${w.address}:${w.nonce}`,
           );
-          authorized = nonceClaimed;
+          if (nonceClaimed) {
+            authMethod = "wallet";
+          }
         }
       }
     }
 
-    if (!authorized) {
+    if (authMethod === null && body.intentAuth) {
+      const intent = repo ? await repo.getSignedIntent(body.intentAuth.intentId) : null;
+      const allowSignedClaim =
+        intent?.actionType === "claim" && intent.status === "signed";
+      const isExpiredSignedClaim = Boolean(allowSignedClaim && nowSec > intent.expiresAt);
+      if (
+        intent &&
+        (intent.actionType === "claim" || intent.actionType === "sign_xdr") &&
+        intent.network === config.network &&
+        (intent.status === "pending" || allowSignedClaim)
+      ) {
+        const check = await verifyIntentToken(
+          {
+            intentId: intent.intentId,
+            network: intent.network,
+            telegramUserId: intent.creatorTelegramUserId,
+            expiresAt: intent.expiresAt,
+          },
+          body.intentAuth.sig,
+          config.intentHmacSecret,
+          isExpiredSignedClaim ? intent.expiresAt - 1 : undefined,
+        );
+        if (check.valid) {
+          let intentAuthorized = false;
+          if (intent.actionType === "claim") {
+            const escrowContract = config.claimEscrowContractId;
+            intentAuthorized = Boolean(
+              escrowContract &&
+                config.relayAllowedContracts.includes(escrowContract),
+            );
+          } else {
+            intentAuthorized = true;
+          }
+          if (intentAuthorized) {
+            authMethod = "intent";
+            intentAuthRecord = intent;
+            intentAuthExpiredClaim = isExpiredSignedClaim;
+          }
+        }
+      }
+    }
+
+    if (authMethod === null) {
       return c.json(
         { error: "Relay requires a valid signed intentAuth or linked walletAuth proof" },
         403,
       );
     }
 
-    const principalKey = intentAuthRecord?.intentId ?? body.walletAuth?.address;
+    const principalKey =
+      authMethod === "wallet" ? body.walletAuth?.address : intentAuthRecord?.intentId;
     if (principalKey) {
       const principalLimit = await checkRateLimit({
         repository: repo,
@@ -238,7 +281,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
     if (body.mode === "feebump") {
       let decoded;
       try {
-        decoded = decodeTransactionEnvelope(body.signedTxXdrBase64, config.networkPassphrase);
+        decoded = decodeTransactionEnvelope(canonicalPayload, config.networkPassphrase);
       } catch {
         return c.json({ error: "signedTxXdrBase64 is not a valid transaction envelope" }, 400);
       }
@@ -254,40 +297,69 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
           403,
         );
       }
-      if (/^\d+$/.test(decoded.feeStroops) && BigInt(decoded.feeStroops) > maxFeeAllowed) {
-        return c.json({ error: "Transaction fee exceeds relay ceiling" }, 403);
-      }
       const parsedInnerFee = /^\d+$/.test(decoded.feeStroops)
         ? BigInt(decoded.feeStroops)
-        : maxFeeAllowed;
-      const hasSorobanOp = decoded.operations.some((op) => Boolean(op.soroban));
-      const minAccountingFloor = BigInt(
-        Math.max(hasSorobanOp ? 100_000 : 100, decoded.operations.length * 100),
+        : maxFeeAllowed + 1n;
+      const parsedResourceFee =
+        decoded.sorobanResourceFeeStroops && /^\d+$/.test(decoded.sorobanResourceFeeStroops)
+          ? BigInt(decoded.sorobanResourceFeeStroops)
+          : 0n;
+      if (parsedInnerFee > maxFeeAllowed || parsedResourceFee > maxFeeAllowed) {
+        return c.json({ error: "Transaction fee exceeds relay ceiling" }, 403);
+      }
+      const hasSorobanOp = decoded.operations.some(
+        (op) =>
+          Boolean(op.soroban) ||
+          op.type === "extendFootprintTtl" ||
+          op.type === "restoreFootprint",
       );
-      const boundedFloor =
-        minAccountingFloor > maxFeeAllowed ? maxFeeAllowed : minAccountingFloor;
+      const outerInclusionFloor = BigInt((decoded.operations.length + 1) * 10_000);
+      const minAccountingFloor =
+        parsedResourceFee > 0n
+          ? parsedResourceFee + outerInclusionFloor
+          : hasSorobanOp
+            ? 100_000n
+            : outerInclusionFloor;
+      const effectiveEstimate =
+        parsedInnerFee >= minAccountingFloor ? parsedInnerFee : minAccountingFloor;
       estimatedFeeStroops = (
-        parsedInnerFee >= boundedFloor ? parsedInnerFee : boundedFloor
+        effectiveEstimate > maxFeeAllowed ? maxFeeAllowed : effectiveEstimate
       ).toString();
 
-      for (const op of decoded.operations) {
-        if (op.soroban) {
-          if (
-            !op.soroban.contractId ||
-            !config.relayAllowedContracts.includes(op.soroban.contractId)
-          ) {
-            return c.json({ error: "Contract in feebump is not on the relay allowlist" }, 403);
-          }
-        } else if (intentAuthRecord?.actionType === "claim") {
+      if (authMethod === "wallet" && body.walletAuth) {
+        const signerAddr = body.walletAuth.address;
+        if (
+          decoded.sourceAccount !== signerAddr ||
+          decoded.operations.some((op) => op.source && op.source !== signerAddr)
+        ) {
           return c.json(
-            { error: "Claim intentAuth only permits Soroban ClaimEscrow operations" },
+            { error: "walletAuth address must match transaction sourceAccount" },
             403,
           );
         }
       }
 
+      for (const op of decoded.operations) {
+        if (!op.soroban) {
+          return c.json(
+            { error: "Relay feebump only permits allowlisted Soroban contract invocations" },
+            403,
+          );
+        }
+        if (!validateAllowlistedInvocationTree(op.soroban, config.relayAllowedContracts)) {
+          return c.json({ error: "Contract in feebump is not on the relay allowlist" }, 403);
+        }
+      }
+
+      const verifiedAssets =
+        config.sep42AssetListUrls.length > 0
+          ? await fetchSep42VerifiedAssets(config.sep42AssetListUrls, {
+              fetchFn: fetchFn as typeof fetch,
+            }).catch(() => [])
+          : [];
       const report = evaluateDecodedTransaction(decoded, {
         networkPassphrase: config.networkPassphrase,
+        verifiedAssets,
       });
       if (report.verdict === "malicious" || report.findings.some((f) => f.blocksSigning)) {
         return c.json(
@@ -299,26 +371,61 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         );
       }
 
-      if (intentAuthRecord?.actionType === "claim" && config.claimEscrowContractId) {
-        const hasEscrowOp = decoded.operations.some(
-          (op) => op.soroban?.contractId === config.claimEscrowContractId,
-        );
-        if (!hasEscrowOp) {
-          return c.json({ error: "Relay payload does not invoke ClaimEscrow contract" }, 403);
-        }
-        if (intentAuthExpiredClaim) {
-          const allRefundOps = decoded.operations.every(
+      if (authMethod === "intent" && intentAuthRecord) {
+        if (intentAuthRecord.actionType === "claim" && config.claimEscrowContractId) {
+          const expectedClaimId = (await deriveClaimId(intentAuthRecord.intentId)).toLowerCase();
+          const allowedFns = allowedClaimFunctionsForIntent(
+            intentAuthRecord.status,
+            intentAuthExpiredClaim,
+          );
+          const allMatchIntent = decoded.operations.every(
             (op) =>
               Boolean(
                 op.soroban &&
                   op.soroban.contractId === config.claimEscrowContractId &&
-                  (op.soroban.functionName === "refund_expired" ||
-                    op.soroban.functionName === "refund_expired_to"),
+                  allowedFns.includes(op.soroban.functionName) &&
+                  op.soroban.args[0]?.toLowerCase() === expectedClaimId,
               ),
           );
-          if (!allRefundOps) {
+          if (!allMatchIntent) {
             return c.json(
-              { error: "Expired signed claim intents may only relay refund_expired operations" },
+              { error: "Relay payload does not match ClaimEscrow intent parameters or stage" },
+              403,
+            );
+          }
+        } else if (intentAuthRecord.actionType === "sign_xdr") {
+          let expectedUnsignedXdr = "";
+          try {
+            const parsedPayload = JSON.parse(intentAuthRecord.payloadJson) as {
+              unsignedXdr?: unknown;
+            };
+            if (typeof parsedPayload.unsignedXdr === "string") {
+              expectedUnsignedXdr = parsedPayload.unsignedXdr.trim();
+            }
+          } catch {
+            expectedUnsignedXdr = "";
+          }
+          if (!expectedUnsignedXdr) {
+            return c.json(
+              { error: "sign_xdr intent lacks an unsignedXdr binding for relay" },
+              403,
+            );
+          }
+          let expectedDecoded;
+          try {
+            expectedDecoded = decodeTransactionEnvelope(
+              expectedUnsignedXdr,
+              config.networkPassphrase,
+            );
+          } catch {
+            return c.json({ error: "Stored sign_xdr intent transaction is invalid" }, 403);
+          }
+          if (
+            expectedDecoded.sourceAccount !== decoded.sourceAccount ||
+            JSON.stringify(expectedDecoded.operations) !== JSON.stringify(decoded.operations)
+          ) {
+            return c.json(
+              { error: "Relay payload does not match sign_xdr intent transaction" },
               403,
             );
           }
@@ -327,7 +434,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
     } else {
       let hostFn;
       try {
-        hostFn = decodeHostFunctionXdr(body.funcXdrBase64);
+        hostFn = decodeHostFunctionXdr(body.funcXdrBase64.trim());
       } catch {
         return c.json({ error: "funcXdrBase64 is not a valid HostFunction XDR" }, 400);
       }
@@ -338,28 +445,36 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       ) {
         return c.json({ error: "Contract is not on the relay allowlist" }, 403);
       }
-      if (
-        intentAuthRecord?.actionType === "claim" &&
-        config.claimEscrowContractId &&
-        hostFn.contractId !== config.claimEscrowContractId
-      ) {
-        return c.json({ error: "Relay payload does not invoke ClaimEscrow contract" }, 403);
-      }
-      if (
-        intentAuthExpiredClaim &&
-        hostFn.functionName !== "refund_expired" &&
-        hostFn.functionName !== "refund_expired_to"
-      ) {
-        return c.json(
-          { error: "Expired signed claim intents may only relay refund_expired operations" },
-          403,
-        );
+      if (authMethod === "intent" && intentAuthRecord) {
+        if (intentAuthRecord.actionType !== "claim") {
+          return c.json(
+            { error: "sign_xdr intents require feebump transaction mode" },
+            403,
+          );
+        }
+        if (config.claimEscrowContractId) {
+          const expectedClaimId = (await deriveClaimId(intentAuthRecord.intentId)).toLowerCase();
+          const allowedFns = allowedClaimFunctionsForIntent(
+            intentAuthRecord.status,
+            intentAuthExpiredClaim,
+          );
+          if (
+            hostFn.contractId !== config.claimEscrowContractId ||
+            !allowedFns.includes(hostFn.functionName ?? "") ||
+            hostFn.args?.[0]?.toLowerCase() !== expectedClaimId
+          ) {
+            return c.json(
+              { error: "Relay payload does not match ClaimEscrow intent parameters or stage" },
+              403,
+            );
+          }
+        }
       }
 
       const fnFindings = evaluateSorobanInvocation({
         contractId: hostFn.contractId,
         functionName: hostFn.functionName ?? "",
-        args: [],
+        args: hostFn.args ?? [],
         subInvocations: [],
       });
       if (fnFindings.some((f) => f.severity === "malicious" || f.blocksSigning)) {
@@ -372,12 +487,32 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         );
       }
 
-      for (const rawAuthEntry of body.authEntriesXdrBase64) {
+      for (const rawAuthEntry of canonicalSorobanAuthEntries) {
         let decodedAuth;
         try {
           decodedAuth = decodeAuthEntryXdr(rawAuthEntry);
         } catch {
           return c.json({ error: "authEntriesXdrBase64 contains invalid Soroban auth XDR" }, 400);
+        }
+        if (decodedAuth.kind !== "soroban_authorization_entry") {
+          return c.json(
+            {
+              error:
+                "Soroban relay requires signed SorobanAuthorizationEntry XDR, not HashIdPreimage",
+            },
+            400,
+          );
+        }
+        if (
+          !validateAllowlistedInvocationTree(
+            decodedAuth.invocation,
+            config.relayAllowedContracts,
+          )
+        ) {
+          return c.json(
+            { error: "Contract in Soroban auth entry is not on the relay allowlist" },
+            403,
+          );
         }
         const authFindings = evaluateSorobanInvocation(decodedAuth.invocation);
         if (authFindings.some((f) => f.severity === "malicious" || f.blocksSigning)) {
@@ -392,7 +527,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       }
     }
 
-    if (intentAuthRecord && repo) {
+    if (authMethod === "intent" && intentAuthRecord && repo) {
       const stageKey = `relay-intent:${intentAuthRecord.intentId}:${intentAuthRecord.status}`;
       const claimed = await repo.claimAlertDedupKey(stageKey);
       if (!claimed) {
@@ -417,8 +552,8 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
 
     const upstreamPayload =
       body.mode === "soroban"
-        ? { func: body.funcXdrBase64, auth: body.authEntriesXdrBase64 }
-        : { xdr: body.signedTxXdrBase64 };
+        ? { func: body.funcXdrBase64.trim(), auth: canonicalSorobanAuthEntries }
+        : { xdr: canonicalPayload };
 
     const cleanUrl = config.ozChannelsApiUrl.replace(/\/+$/, "");
     const poolStub =
@@ -489,11 +624,19 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
             429,
           );
         }
+        let holdLeaseOnUncertainUpstream = false;
         try {
-          res = await submitWithChannel(lease?.channelAddress);
+          try {
+            res = await submitWithChannel(lease?.channelAddress);
+          } catch (submitErr) {
+            // Timeout/network failure leaves TX potentially in-flight; keep lease until TTL expiry.
+            holdLeaseOnUncertainUpstream = true;
+            throw submitErr;
+          }
           if (!res.ok) {
             const errText = await res.text();
             if (
+              body.mode === "soroban" &&
               /tx_bad_seq/i.test(errText) &&
               lease &&
               config.relayChannelAccounts.length > 1
@@ -502,9 +645,20 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
               await releaseChannel(lease.leaseId);
               lease = await acquireChannel(excluded);
               if (lease && !("errorStatus" in lease)) {
-                res = await submitWithChannel(lease.channelAddress);
+                try {
+                  res = await submitWithChannel(lease.channelAddress);
+                } catch (retryErr) {
+                  holdLeaseOnUncertainUpstream = true;
+                  throw retryErr;
+                }
               } else {
                 await rollbackRelayReservation();
+                if (lease && "errorStatus" in lease && lease.errorStatus === 429) {
+                  return c.json(
+                    { error: "All relay channel accounts are busy; retry shortly" },
+                    429,
+                  );
+                }
                 return c.json(
                   { error: `Relayer rejected transaction (${res.status})`, details: errText.slice(0, 500) },
                   502,
@@ -519,7 +673,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
             }
           }
         } finally {
-          if (lease && !("errorStatus" in lease)) {
+          if (!holdLeaseOnUncertainUpstream && lease && !("errorStatus" in lease)) {
             await releaseChannel(lease.leaseId);
           }
         }
@@ -615,12 +769,22 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       );
     }
 
+    if (
+      body.mode === "direct" &&
+      (config.network === "mainnet" || !config.relayAllowDirectBootstrap)
+    ) {
+      return c.json(
+        { error: "Direct XLM bootstrap mode is disabled; use sponsored_reserve" },
+        403,
+      );
+    }
+
     const nowSec = Math.floor(Date.now() / 1000);
     if (Math.abs(nowSec - body.timestamp) > 120) {
       return c.json({ error: "Bootstrap signature timestamp expired" }, 403);
     }
 
-    const challengeMsg = `astrowallet-bootstrap:v1:${config.network}:${body.address}:${body.timestamp}:${body.nonce}`;
+    const challengeMsg = `astrowallet-bootstrap:v1:${config.network}:${body.mode}:${body.address}:${body.timestamp}:${body.nonce}`;
     const sigValid = await verifyConnectSignature({
       address: body.address,
       message: challengeMsg,
@@ -658,9 +822,11 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
 
     const userDedupKey = `bootstrap:tg:${config.network}:${session.claims.telegramUserId}`;
     const addrDedupKey = `bootstrap:addr:${config.network}:${body.address}`;
+    const pairDedupKey = `bootstrap:pair:${config.network}:${session.claims.telegramUserId}:${body.address}`;
     const dayUtc = `bootstrap:${new Date(nowSec * 1000).toISOString().slice(0, 10)}`;
     let claimedUser = false;
     let claimedAddr = false;
+    let claimedPair = false;
     let bootstrapBudgetConsumed = false;
 
     const rollbackDedup = async () => {
@@ -674,6 +840,10 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         claimedAddr = false;
         tasks.push(repo.releaseAlertDedupKey(addrDedupKey).catch(() => undefined));
       }
+      if (claimedPair && repo.releaseAlertDedupKey) {
+        claimedPair = false;
+        tasks.push(repo.releaseAlertDedupKey(pairDedupKey).catch(() => undefined));
+      }
       if (bootstrapBudgetConsumed && repo.refundRelayBudget) {
         bootstrapBudgetConsumed = false;
         tasks.push(
@@ -686,33 +856,91 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
     if (repo) {
       claimedUser = await repo.claimAlertDedupKey(userDedupKey);
       if (!claimedUser) {
-        return c.json({ error: "This Telegram account has already used its sponsored activation" }, 409);
-      }
-      claimedAddr = await repo.claimAlertDedupKey(addrDedupKey);
-      if (!claimedAddr) {
-        await rollbackDedup();
-        return c.json({ error: "This Stellar address has already been bootstrapped" }, 409);
-      }
+        const reclaimedExpired =
+          body.mode === "sponsored_reserve" &&
+          repo.reclaimExpiredAlertDedupKey &&
+          (await repo.reclaimExpiredAlertDedupKey(pairDedupKey, 180, nowSec));
+        if (!reclaimedExpired) {
+          return c.json({ error: "This Telegram account has already used its sponsored activation" }, 409);
+        }
+      } else {
+        claimedAddr = await repo.claimAlertDedupKey(addrDedupKey);
+        if (!claimedAddr) {
+          await rollbackDedup();
+          return c.json({ error: "This Stellar address has already been bootstrapped" }, 409);
+        }
+        claimedPair = await repo.claimAlertDedupKey(pairDedupKey);
 
-      const budget = await repo.tryConsumeRelayBudget({
-        dayUtc,
-        feeStroops: "100000",
-        dailyBudgetStroops: String(BigInt(config.relayBootstrapDailyLimit) * 100_000n),
-      });
-      if (!budget.allowed) {
-        await rollbackDedup();
-        return c.json({ error: "Daily sponsored bootstrap limit reached" }, 429);
+        const budget = await repo.tryConsumeRelayBudget({
+          dayUtc,
+          feeStroops: "100000",
+          dailyBudgetStroops: String(BigInt(config.relayBootstrapDailyLimit) * 100_000n),
+        });
+        if (!budget.allowed) {
+          await rollbackDedup();
+          return c.json({ error: "Daily sponsored bootstrap limit reached" }, 429);
+        }
+        bootstrapBudgetConsumed = true;
       }
-      bootstrapBudgetConsumed = true;
     }
 
     let sponsorKeypair: Keypair;
     let sponsorAddress: string;
-    let sponsorSignedXdr: string;
     try {
       sponsorKeypair = Keypair.fromSecret(config.relaySponsorSecret);
       sponsorAddress = sponsorKeypair.publicKey();
+    } catch {
+      await rollbackDedup();
+      return c.json({ error: "Failed to load sponsor signing key" }, 500);
+    }
 
+    const poolStub = c.env.CHANNEL_POOL
+      ? c.env.CHANNEL_POOL.get(
+          c.env.CHANNEL_POOL.idFromName(`channel-pool:${config.network}`),
+        )
+      : null;
+
+    let sponsorLeaseId: string | undefined;
+    if (poolStub) {
+      const leaseRes = await poolStub.fetch(
+        new Request("https://channel-pool.internal/acquire", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channels: [`sponsor:${sponsorAddress}`],
+            ttlMs: 10_000,
+          }),
+        }),
+      );
+      if (!leaseRes.ok) {
+        await rollbackDedup();
+        c.header("Retry-After", "10");
+        return c.json(
+          { error: "Sponsor activation queue busy; retry in a few seconds" },
+          429,
+        );
+      }
+      const leaseJson = (await leaseRes.json()) as { leaseId?: string };
+      sponsorLeaseId = leaseJson.leaseId;
+    }
+
+    const releaseSponsorLease = async () => {
+      if (!poolStub || !sponsorLeaseId) return;
+      const leaseId = sponsorLeaseId;
+      sponsorLeaseId = undefined;
+      await poolStub
+        .fetch(
+          new Request("https://channel-pool.internal/release", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ leaseId }),
+          }),
+        )
+        .catch(() => undefined);
+    };
+
+    let sponsorSignedXdr: string;
+    try {
       let sponsorSequence: string | undefined;
       for (const hBase of config.horizonUrls) {
         try {
@@ -734,6 +962,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
         }
       }
       if (!sponsorSequence) {
+        await releaseSponsorLease();
         await rollbackDedup();
         return c.json({ error: "Sponsor account sequence unavailable on Horizon" }, 502);
       }
@@ -782,11 +1011,13 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       tx.sign(sponsorKeypair);
       sponsorSignedXdr = tx.toXDR();
     } catch {
+      await releaseSponsorLease();
       await rollbackDedup();
       return c.json({ error: "Failed to construct sponsor bootstrap transaction" }, 500);
     }
 
     if (body.mode === "sponsored_reserve") {
+      // Keep the 10s sponsor lease held briefly so concurrent users don't collide on sponsorSequence
       return c.json({
         ok: true,
         mode: "sponsored_reserve",
@@ -808,6 +1039,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
           },
         );
         if (submitRes.ok) {
+          await releaseSponsorLease();
           const submitted = (await submitRes.json().catch(() => ({}))) as {
             hash?: string;
             ledger?: number;
@@ -825,6 +1057,7 @@ export function createRelayRoutes(deps: RelayRoutesDeps = {}): Hono<RelayRouteEn
       }
     }
 
+    await releaseSponsorLease();
     await rollbackDedup();
     return c.json({ error: "Horizon rejected direct bootstrap transaction" }, 502);
   });

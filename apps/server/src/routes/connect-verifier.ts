@@ -86,6 +86,13 @@ export async function verifyConnectAccountSubmissions(input: {
 
   for (const acc of input.accounts) {
     if (acc.kind !== "smart") continue;
+    if (!input.config.smartAccountWasmHash) {
+      return {
+        ok: false,
+        status: 403,
+        error: "Smart Account linking is disabled until SMART_ACCOUNT_WASM_HASH is configured",
+      };
+    }
     const ok = await verifySmartAccountGuardianSignature({
       contractAddress: acc.address,
       guardianAddress: acc.guardianAddress,
@@ -106,20 +113,18 @@ export async function verifyConnectAccountSubmissions(input: {
         error: `Recovery Guardian ${acc.guardianAddress} must be linked or verified alongside ${acc.address}`,
       };
     }
-    if (input.config.smartAccountWasmHash) {
-      const expectedContract = await deriveCounterfactualContractAddress({
-        guardianAddress: acc.guardianAddress,
-        wasmHashHex: input.config.smartAccountWasmHash,
-        networkPassphrase: input.config.networkPassphrase,
-        credentialIdB64: acc.credentialIdB64,
-      });
-      if (expectedContract !== acc.address) {
-        return {
-          ok: false,
-          status: 403,
-          error: `Smart Account ${acc.address} does not match counterfactual derivation for configured WASM hash`,
-        };
-      }
+    const expectedContract = await deriveCounterfactualContractAddress({
+      guardianAddress: acc.guardianAddress,
+      wasmHashHex: input.config.smartAccountWasmHash,
+      networkPassphrase: input.config.networkPassphrase,
+      credentialIdB64: acc.credentialIdB64,
+    });
+    if (expectedContract !== acc.address) {
+      return {
+        ok: false,
+        status: 403,
+        error: `Smart Account ${acc.address} does not match counterfactual derivation for configured WASM hash`,
+      };
     }
     verifiedInputs.push({
       address: acc.address,

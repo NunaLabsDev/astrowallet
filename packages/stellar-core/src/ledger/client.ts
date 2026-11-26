@@ -526,7 +526,7 @@ export function createStellarClient(
   ): Promise<{ hash: string; ledger: number }> {
     const sourceAddress = sourceKeypair.publicKey();
     return enqueueAccountTx(sourceAddress, async () => {
-      const preparedTx = await withRpcFailover(async (server) => {
+      const buildAndSimulate = async (server: rpc.Server) => {
         const [sourceAccount, inclusionFee] = await Promise.all([
           server.getAccount(sourceAddress),
           resolveSorobanInclusionFeeStroops(server),
@@ -542,24 +542,88 @@ export function createStellarClient(
 
         const tx = builder.setTimeout(60).build();
         const sim = await server.simulateTransaction(tx);
+        return { tx, sourceAccount, inclusionFee, sim };
+      };
+
+      const pollConfirmed = async (txHash: string, timeoutMsg: string): Promise<{ hash: string; ledger: number }> =>
+        withRpcFailover(async (server) => {
+          let polled = await server.getTransaction(txHash);
+          for (
+            let i = 0;
+            i < 18 && polled.status === rpc.Api.GetTransactionStatus.NOT_FOUND;
+            i += 1
+          ) {
+            if (pollIntervalMs > 0) {
+              await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+            }
+            polled = await server.getTransaction(txHash);
+          }
+
+          if (polled.status === rpc.Api.GetTransactionStatus.FAILED) {
+            throw new NonRetryableSorobanError(`Soroban transaction failed on ledger (${txHash})`);
+          }
+          if (polled.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
+            throw new NonRetryableSorobanError(timeoutMsg);
+          }
+          return { hash: txHash, ledger: polled.ledger };
+        });
+
+      const initial = await withRpcFailover(buildAndSimulate);
+      let { tx, sim } = initial;
+
+      if (rpc.Api.isSimulationRestore(sim)) {
+        const restoreFee = BigInt(sim.restorePreamble.minResourceFee || "0");
+        if (restoreFee > maxResourceFeeStroops) {
+          throw new NonRetryableSorobanError(
+            `Soroban archived state restore fee (${restoreFee} stroops) exceeds limit (${maxResourceFeeStroops} stroops)`,
+          );
+        }
+        const restoreTx = new TransactionBuilder(initial.sourceAccount, {
+          fee: (BigInt(initial.inclusionFee) + restoreFee).toString(),
+          networkPassphrase: config.networkPassphrase,
+        })
+          .setSorobanData(sim.restorePreamble.transactionData.build())
+          .addOperation(Operation.restoreFootprint({}))
+          .setTimeout(60)
+          .build();
+        restoreTx.sign(sourceKeypair);
+
+        const restoreSent = await withRpcFailover(async (server) => {
+          const sent = await server.sendTransaction(restoreTx);
+          if (sent.status === "ERROR") {
+            throw new NonRetryableSorobanError(
+              `Soroban restoreFootprint failed (${sent.hash})`,
+            );
+          }
+          return sent;
+        });
+        await pollConfirmed(
+          restoreSent.hash,
+          `Soroban restoreFootprint confirmation timed out (${restoreSent.hash})`,
+        );
+
+        const resim = await withRpcFailover(buildAndSimulate);
+        tx = resim.tx;
+        sim = resim.sim;
         if (rpc.Api.isSimulationRestore(sim)) {
           throw new NonRetryableSorobanError(
             "Soroban archived state restore required before submission",
           );
         }
-        if (rpc.Api.isSimulationError(sim)) {
-          throw new NonRetryableSorobanError(`Soroban simulation failed: ${sim.error}`);
-        }
+      }
 
-        const simulatedResourceFee = BigInt(sim.minResourceFee || "0");
-        if (simulatedResourceFee > maxResourceFeeStroops) {
-          throw new NonRetryableSorobanError(
-            `Soroban simulated resource fee (${simulatedResourceFee} stroops) exceeds limit (${maxResourceFeeStroops} stroops)`,
-          );
-        }
+      if (rpc.Api.isSimulationError(sim)) {
+        throw new NonRetryableSorobanError(`Soroban simulation failed: ${sim.error}`);
+      }
 
-        return rpc.assembleTransaction(tx, sim).build();
-      });
+      const simulatedResourceFee = BigInt(sim.minResourceFee || "0");
+      if (simulatedResourceFee > maxResourceFeeStroops) {
+        throw new NonRetryableSorobanError(
+          `Soroban simulated resource fee (${simulatedResourceFee} stroops) exceeds limit (${maxResourceFeeStroops} stroops)`,
+        );
+      }
+
+      const preparedTx = rpc.assembleTransaction(tx, sim).build();
 
       // Assemble and sign exactly once before broadcasting across failover RPC nodes
       preparedTx.sign(sourceKeypair);

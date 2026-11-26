@@ -96,3 +96,15 @@
   - Pages Producción (`--branch main` desde `apps/pwa` con `./functions`): `https://237bba00.astrowallet-soroban.pages.dev` (`https://astrowallet-soroban.pages.dev`).
   - Smoke Tests en vivo: **8/8 `200 application/json`** en Mainnet y Testnet (`/health`, `/openapi.json`, `/v1/metrics/public`, `/v1/proxy/oracle/prices?assets=xlm,usdc,btc`).
   - **Checklist Fase Beta Cerrada:** probar con 5–10 testers usando montos pequeños ($5–$20), mantener límites conservadores en `RELAY_DAILY_BUDGET_STROOPS`, y provisionar `CLAIM_ESCROW_CONTRACT_ID`, `RELAY_ALLOWED_CONTRACTS`, `RELAY_SPONSOR_SECRET`, `OZ_CHANNELS_API_KEY` y `SOROSWAP_API_KEY` únicamente tras completar la auditoría externa de `ClaimEscrowContract`.
+
+---
+
+## Sección G — Remediación Carbon Block 1 (`2026-11-26`, Estado: **✅ CERRADA EN CÓDIGO — [`AUDIT_CARBON_BLOCK_1.md`](../AUDIT_CARBON_BLOCK_1.md)**)
+
+- **HALLAZGO-01 (`P0`):** `mode` firmado en SEP-53 `astrowallet-bootstrap:v1`, `RELAY_ALLOW_DIRECT_BOOTSTRAP` (default `false`, prohibido en Mainnet), serialización de secuencia del sponsor en `ChannelPoolDO` (`10s` TTL), y recuperación idempotente de `sponsored_reserve` tras `> 180s` si la cuenta sigue `404` en Horizon.
+- **HALLAZGO-02 (`P0`):** `walletAuth` en modo `soroban` hashea `funcXdrBase64` + `authEntriesXdrBase64`, rechaza `HashIdPreimage` (`400`) y valida recursivamente `RELAY_ALLOWED_CONTRACTS` en `subInvocations`; en modo `feebump` exige `decoded.sourceAccount === walletAuth.address`, rechaza operaciones sin `op.soroban` (`403`) y pasa SEP-42 `verifiedAssets` a `evaluateDecodedTransaction`.
+- **HALLAZGO-03 (`P1`):** `walletAuth` se evalúa primero evitando `409` por `intentAuth` consumido; `intentAuth` exige ligadura estricta a `deriveClaimId(intentId)` + función permitida por etapa (o `unsignedXdr` en `sign_xdr`), y `purgeExpiredRecords` preserva `relay-intent:%`.
+- **HALLAZGO-04 (`P1`):** `decodeTransactionEnvelope` extrae `sorobanData.resourceFee` desde `tx.ext`; `/v1/relay/submit` lo incluye tanto en el límite `RELAY_MAX_FEE_STROOPS` como en la contabilidad `relay_daily_usage`.
+- **HALLAZGO-05 (`P1`):** `ChannelPoolDO` persiste leases en `state.storage` (`12s` TTL), `/v1/relay/submit` solo reintenta `tx_bad_seq` en modo `soroban`, devuelve `429` si no hay canales libres, y retiene el lease ante timeout de red.
+- **HALLAZGO-06 (`P1`):** `claim-escrow` eleva `INSTANCE_TTL_THRESHOLD` / `ESCROWED_BALANCE_TTL_THRESHOLD` (`1_296_000`) e `INSTANCE_TTL_EXTEND_TO` (`1_728_000`) por encima de `compute_claim_ttl_ledgers(30d)` (`1_267_200`), y `packages/stellar-core/src/ledger/client.ts` ejecuta `Operation.restoreFootprint({})` automáticamente ante `isSimulationRestore`.
+- **HALLAZGO-07 (`P0`):** `connect-verifier.ts` rechaza `kind: "smart"` (*fail-closed* `403`) cuando `SMART_ACCOUNT_WASM_HASH` no está configurado. Smart Accounts (`C...`) permanecen desactivadas en Mainnet hasta completar el flujo CAP-46 + `__check_auth`.

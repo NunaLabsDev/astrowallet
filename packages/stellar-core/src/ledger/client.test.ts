@@ -98,7 +98,7 @@ describe("StellarLedgerClient hardening (sequence mutex, restore guard, fee cap,
     ]);
   });
 
-  it("blocks Soroban submissions when simulation requires archived state restore", async () => {
+  it("auto-restores archived Soroban state via restoreFootprint before submitting main operation, and enforces restore fee cap", async () => {
     const kp = Keypair.random();
     const simRestore = {
       ...buildSuccessSim("150000"),
@@ -107,6 +107,10 @@ describe("StellarLedgerClient hardening (sequence mutex, restore guard, fee cap,
         transactionData: new SorobanDataBuilder(),
       },
     } as unknown as rpc.Api.SimulateTransactionRestoreResponse;
+
+    let simCalls = 0;
+    let sendCalls = 0;
+    const sentHashes: string[] = [];
 
     const client = createStellarClient({
       network: "testnet",
@@ -118,27 +122,89 @@ describe("StellarLedgerClient hardening (sequence mutex, restore guard, fee cap,
       rpcServerFactory: () =>
         ({
           async getAccount() {
+            return new Account(kp.publicKey(), String(10 + sendCalls));
+          },
+          async getFeeStats() {
+            return { sorobanInclusionFee: { p90: "250" } };
+          },
+          async simulateTransaction() {
+            simCalls += 1;
+            return simCalls === 1 ? simRestore : buildSuccessSim("150000");
+          },
+          async sendTransaction() {
+            sendCalls += 1;
+            const hash = (sendCalls === 1 ? "r" : "m").repeat(64);
+            sentHashes.push(hash);
+            return { status: "PENDING", hash };
+          },
+          async getTransaction(hash: string) {
+            return {
+              status: rpc.Api.GetTransactionStatus.SUCCESS,
+              ledger: hash.startsWith("r") ? 501 : 502,
+            };
+          },
+        }) as unknown as rpc.Server,
+    });
+
+    const result = await client.fundClaimEscrow({
+      sourceKeypair: kp,
+      escrowContractId: ESCROW_CONTRACT,
+      claimIdHex: "aa".repeat(32),
+      amount: "5",
+      assetCode: "XLM",
+      expiresAtUnix: 1_900_000_000,
+    });
+    expect(simCalls).toBe(2);
+    expect(sendCalls).toBe(2);
+    expect(sentHashes).toEqual(["r".repeat(64), "m".repeat(64)]);
+    expect(result).toMatchObject({ hash: "m".repeat(64), ledger: 502 });
+
+    // Restore fee exceeding cap must fail closed without sending any transaction
+    let cappedSendCalled = false;
+    const expensiveRestore = {
+      ...buildSuccessSim("150000"),
+      restorePreamble: {
+        minResourceFee: "300000",
+        transactionData: new SorobanDataBuilder(),
+      },
+    } as unknown as rpc.Api.SimulateTransactionRestoreResponse;
+    const cappedClient = createStellarClient({
+      network: "testnet",
+      networkPassphrase: Networks.TESTNET,
+      horizonUrls: ["https://horizon-1.example"],
+      rpcUrls: ["https://rpc-1.example"],
+      friendbotUrl: "https://friendbot.example",
+      sorobanMaxResourceFeeStroops: "200000",
+      sorobanPollIntervalMs: 0,
+      rpcServerFactory: () =>
+        ({
+          async getAccount() {
             return new Account(kp.publicKey(), "10");
           },
           async getFeeStats() {
             return { sorobanInclusionFee: { p90: "250" } };
           },
           async simulateTransaction() {
-            return simRestore;
+            return expensiveRestore;
+          },
+          async sendTransaction() {
+            cappedSendCalled = true;
+            throw new Error("should not send");
           },
         }) as unknown as rpc.Server,
     });
 
     await expect(
-      client.fundClaimEscrow({
+      cappedClient.fundClaimEscrow({
         sourceKeypair: kp,
         escrowContractId: ESCROW_CONTRACT,
-        claimIdHex: "aa".repeat(32),
+        claimIdHex: "bb".repeat(32),
         amount: "5",
         assetCode: "XLM",
         expiresAtUnix: 1_900_000_000,
       }),
-    ).rejects.toThrow(/archived state restore required/i);
+    ).rejects.toThrow(/restore fee .* exceeds limit/i);
+    expect(cappedSendCalled).toBe(false);
   });
 
   it("rejects Soroban submissions whose minResourceFee exceeds configured cap", async () => {

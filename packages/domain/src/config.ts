@@ -789,6 +789,7 @@ const RawServerEnvSchema = z
         ),
     ),
     RELAY_BOOTSTRAP_DAILY_LIMIT: parsePositiveIntWithDefault(25, 500),
+    RELAY_ALLOW_DIRECT_BOOTSTRAP: parseBooleanWithDefault(false),
     SEP10_CLIENT_DOMAIN: z.preprocess(
       emptyToUndefined,
       z
@@ -819,6 +820,13 @@ const RawServerEnvSchema = z
         code: "custom",
         path: ["FRIENDBOT_URL"],
         message: "FRIENDBOT_URL is strictly forbidden when STELLAR_NETWORK=mainnet",
+      });
+    }
+    if (env.STELLAR_NETWORK === "mainnet" && env.RELAY_ALLOW_DIRECT_BOOTSTRAP) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["RELAY_ALLOW_DIRECT_BOOTSTRAP"],
+        message: "RELAY_ALLOW_DIRECT_BOOTSTRAP is strictly forbidden when STELLAR_NETWORK=mainnet",
       });
     }
     validateNetworkCoherence(
@@ -881,6 +889,7 @@ export interface ServerConfig {
   relaySponsorSecret?: string | undefined;
   relayBootstrapStartingBalanceXlm: string;
   relayBootstrapDailyLimit: number;
+  relayAllowDirectBootstrap: boolean;
   sep10ClientDomain?: string | undefined;
   sep10ClientSigningSecret?: string | undefined;
 }
@@ -925,6 +934,7 @@ export function parseServerConfig(rawEnv: Record<string, unknown>): ServerConfig
     relaySponsorSecret: parsed.RELAY_SPONSOR_SECRET,
     relayBootstrapStartingBalanceXlm: parsed.RELAY_BOOTSTRAP_STARTING_BALANCE_XLM,
     relayBootstrapDailyLimit: parsed.RELAY_BOOTSTRAP_DAILY_LIMIT,
+    relayAllowDirectBootstrap: parsed.RELAY_ALLOW_DIRECT_BOOTSTRAP,
     sep10ClientDomain: parsed.SEP10_CLIENT_DOMAIN,
     sep10ClientSigningSecret: parsed.SEP10_CLIENT_SIGNING_SECRET,
   };

@@ -868,4 +868,43 @@ describe("Scan & Shield deterministic pre-sign rules", () => {
       ),
     ).toBe(true);
   });
+
+  it("extracts sorobanResourceFeeStroops even when innerTx.fee is tampered and decodes host function args", async () => {
+    const { Contract, SorobanDataBuilder, nativeToScVal } = await import("@stellar/stellar-sdk");
+    const contractId = StrKey.encodeContract(new Uint8Array(32).fill(7));
+    const claimIdBytes = new Uint8Array(32).fill(0xab);
+    const contract = new Contract(contractId);
+    const sorobanData = new SorobanDataBuilder().setResourceFee("5000000").build();
+
+    const built = new TransactionBuilder(new Account(SOURCE_KP.publicKey(), "100"), {
+      fee: "100",
+      networkPassphrase: TESTNET_PASSPHRASE,
+    })
+      .addOperation(
+        contract.call("refund_expired", nativeToScVal(claimIdBytes, { type: "bytes" })),
+      )
+      .setSorobanData(sorobanData)
+      .setTimeout(60)
+      .build();
+
+    // Tamper v1.tx.fee down to 100 while sorobanData.resourceFee remains 5_000_000
+    const envXdr = built.toEnvelope();
+    envXdr.v1.tx.fee = 100;
+    const decoded = decodeTransactionEnvelope(envXdr.toXDR("base64"), TESTNET_PASSPHRASE);
+    expect(decoded.feeStroops).toBe("100");
+    expect(decoded.sorobanResourceFeeStroops).toBe("5000000");
+
+    const hostFn = xdr.HostFunction.hostFunctionTypeInvokeContract(
+      new xdr.InvokeContractArgs({
+        contractAddress: new Address(contractId).toScAddress(),
+        functionName: "refund_expired",
+        args: [nativeToScVal(claimIdBytes, { type: "bytes" })],
+      }),
+    );
+    const { decodeHostFunctionXdr } = await import("./decoder.js");
+    const decodedFn = decodeHostFunctionXdr(hostFn.toXDR("base64"));
+    expect(decodedFn.contractId).toBe(contractId);
+    expect(decodedFn.functionName).toBe("refund_expired");
+    expect(decodedFn.args).toEqual(["ab".repeat(32)]);
+  });
 });

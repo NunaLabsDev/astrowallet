@@ -58,6 +58,7 @@
 | `RELAY_CHANNEL_ACCOUNTS` | Env Var | Optional comma-separated Classic `G...` Channel Accounts leased via `ChannelPoolDO` |
 | `RELAY_BOOTSTRAP_STARTING_BALANCE_XLM` | Env Var | Optional `1`..`5` XLM starting balance for `direct` `/v1/relay/bootstrap` (default `1.5`) |
 | `RELAY_BOOTSTRAP_DAILY_LIMIT` | Env Var | Optional daily cap on `/v1/relay/bootstrap` activations (default `25`) |
+| `RELAY_ALLOW_DIRECT_BOOTSTRAP` | Env Var | Optional `true`/`false` (default `false`); **Zod rejects `true` when `STELLAR_NETWORK=mainnet`** |
 | `RELAY_SPONSOR_SECRET` | Secret | Optional Stellar `S...` sponsor secret for CAP-33 `G...` account bootstrapping |
 | `RELAY_RATE_LIMIT_PER_MIN` / `PROXY_RATE_LIMIT_PER_MIN` | Env Var | Rate-limit thresholds (defaults: `10`, `60`) |
 | `RELAY_MAX_OPERATIONS` / `RELAY_MAX_FEE_STROOPS` / `RELAY_DAILY_BUDGET_STROOPS` | Env Var | Policy caps (defaults: `5`, `2000000`, `500000000` stroops) |

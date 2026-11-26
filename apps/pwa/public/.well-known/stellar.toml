@@ -2,7 +2,7 @@ VERSION = "2.2.0"
 SIGNING_KEY = "GBFRJ6WMZJ37EQBA34RUEZBDSGZBKRY5T2JIVPG7EHJXZZUSKKQD6YRT"
 
 [DOCUMENTATION]
-ORG_NAME = "AstroWallet"
+ORG_NAME = "Astro Soroban"
 ORG_URL = "https://astro-wallet.pages.dev"
 ORG_DESCRIPTION = "Non-custodial Stellar & TON Telegram Mini App wallet with Clear-Sign 2.0 and Express Sign."
 ORG_LOGO = "https://astro-wallet.pages.dev/icon-512.png"

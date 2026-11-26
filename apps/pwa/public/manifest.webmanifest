@@ -1,6 +1,6 @@
 {
-  "name": "AstroWallet",
-  "short_name": "AstroWallet",
+  "name": "Astro Wallet",
+  "short_name": "Astro Wallet",
   "description": "Telegram-exclusive non-custodial Stellar & TON multichain Mini App with Scan & Shield and Sorobits SEP-50.",
   "start_url": "/app",
   "display": "standalone",

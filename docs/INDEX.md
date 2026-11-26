@@ -1,4 +1,4 @@
-# AstroWallet — Documentation Index
+# Astro Wallet — Documentation Index
 
 > Check this index first (with `rg`, or `astro-docs` CLI/MCP) and read **only** the doc/section needed for your task. Never bulk-read `docs/`.
 
@@ -12,6 +12,7 @@
 | [`DEVELOPER_QUICKSTART.md`](DEVELOPER_QUICKSTART.md) | 125 | 5-minute developer guide for `@astrowallet/connect` & `StellarWalletsKit` bridge | **Active Developer Guide** |
 | [`AUDIT_2026-11.md`](AUDIT_2026-11.md) | 75 | Consolidated Security Audit (Audits #1–#5 + Carbon Block 1) & remaining Pre-Mainnet GA gates | **Authoritative Audit Tracker** |
 | [`NEXT_SESSION_HANDOFF.md`](NEXT_SESSION_HANDOFF.md) | 55 | Live Mainnet/Testnet IDs, deploy/verify commands, and next priorities | **Active Operations Handoff** |
+| [`NAMING.md`](NAMING.md) | 30 | Naming standard: brand names vs stable technical identifiers | **Active Spec** |
 | [`DESIGN_SYSTEM.md`](DESIGN_SYSTEM.md) | 165 | Liquid Glass tokens, 5-color palette, Telegram Mini App shell & Navigators | **Active Spec** |
 | [`SCF_7_SUBMISSION_AND_STRIDE_THREAT_MODEL.md`](SCF_7_SUBMISSION_AND_STRIDE_THREAT_MODEL.md) | 79 | SCF 7.0 Integration Track dossier, STRIDE model, Audit Bank KPIs | **Submission Dossier** |
 

@@ -1,4 +1,4 @@
-# AstroWallet
+# Astro Wallet (Astro Soroban)
 
 > **100% Phone-First, Telegram-Exclusive Multichain Mini App (Stellar + TON)** — Unifying non-custodial multi-account SEP-0005 Stellar (`G...` + optional `C...`) and SLIP-0010 TON (`WalletContractV4` / `WalletContractV5R1`) custody, zero-WASM pre-sign threat scanning, Apple Liquid Glass UI, TON Connect v2, and genuine Telegram Super-Bot social payments inside `@AstroWalletAppBot` (Telegram ToS Clause 7.3 compliant).
 

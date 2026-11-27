@@ -15,8 +15,9 @@ Single source of truth for names. Use **display names** in anything users read; 
 | Identifier | Current value | Why stable |
 | :--- | :--- | :--- |
 | Public origin | `https://astro-wallet.pages.dev` | CSP, CORS, SEP-10 `client_domain`, bot webhook |
-| Legacy origin | `https://astrowallet-soroban.pages.dev` | Temporary entry in `ALLOWED_ORIGINS` until AstroGate/ASTROdex migrate |
-| Workers | `astrowallet-server`, `astrowallet-server-mainnet` | Service Bindings, Durable Objects, Wrangler secrets |
+| Legacy origin | `https://astrowallet-soroban.pages.dev` | Temporary entry in `ALLOWED_ORIGINS`; ASTROdex already migrated, remove after AstroGate is confirmed |
+| Workers | `astro-wallet-server` (testnet), `astro-wallet-server-mainnet` | Service Bindings, Durable Objects, Wrangler secrets |
+| Legacy Workers | `astrowallet-server`, `astrowallet-server-mainnet` | Kept without cron triggers until deletion is approved; the Free plan allows only 5 cron triggers per account |
 | Telegram bot | `@AstroWalletAppBot` | Username changes only via BotFather and break `t.me` links |
 | GitHub repo | `NunaLabsDev/astrowallet` | Remote URLs of all clones |
 | Packages | `@astrowallet/*` | Workspace imports |

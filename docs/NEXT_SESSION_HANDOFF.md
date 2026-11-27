@@ -1,6 +1,6 @@
 # AstroWallet — Operations & Next Session Handoff
 
-> **Live State (Carbon Block 2, 2026-11-26):** Deployed live on Cloudflare **Mainnet** (`astrowallet-server-mainnet`), **Testnet** (`astrowallet-server`), and **Pages** (`https://astro-wallet.pages.dev`). Carbon Block 1 (`HALLAZGO-01..07`) & Carbon Block 2 (`HALLAZGO-08..17`) closed and verified. See [`AUDIT_2026-11.md`](AUDIT_2026-11.md) for remaining Mainnet GA gates.
+> **Live State (Carbon Block 2, 2026-11-26):** Deployed live on Cloudflare **Mainnet** (`astro-wallet-server-mainnet`), **Testnet** (`astro-wallet-server`), and **Pages** (`https://astro-wallet.pages.dev`). Carbon Block 1 (`HALLAZGO-01..07`) & Carbon Block 2 (`HALLAZGO-08..17`) closed and verified. See [`AUDIT_2026-11.md`](AUDIT_2026-11.md) for remaining Mainnet GA gates.
 
 ---
 
@@ -11,8 +11,8 @@
 | **GitHub Repo** | `NunaLabsDev/astrowallet` (`main` branch) | Independent repo |
 | **Mini App & Origin** | `https://astro-wallet.pages.dev` (`t.me/AstroWalletAppBot/wallet`) | Pages project `astro-wallet` (`./functions` proxy routes by `X-Astro-Network`) |
 | **Telegram Super-Bot** | `@AstroWalletAppBot` (`17` commands) | Webhook `/tg/webhook` (query `?network=testnet` for Testnet routing) |
-| **Mainnet Worker** | `astrowallet-server-mainnet` (`workers_dev = false`) | D1 `astrowallet-mainnet` (`b67e7931-e091-418b-84ad-5c8003d2c421`, `0001..0009`) · KV `a21e4dfbbc9e45d1bdb7a6e3bf9606b3` |
-| **Testnet Worker** | `astrowallet-server` (`workers_dev = false`) | D1 `astrowallet` (`12b7f77d-5467-44a6-a4b3-11ccd63a315c`, `0001..0009`) · KV `3389ff9f05414c219d912e82a7a84baa` |
+| **Mainnet Worker** | `astro-wallet-server-mainnet` (`workers_dev = false`) | D1 `astrowallet-mainnet` (`b67e7931-e091-418b-84ad-5c8003d2c421`, `0001..0009`) · KV `a21e4dfbbc9e45d1bdb7a6e3bf9606b3` |
+| **Testnet Worker** | `astro-wallet-server` (`workers_dev = false`) | D1 `astrowallet` (`12b7f77d-5467-44a6-a4b3-11ccd63a315c`, `0001..0009`) · KV `3389ff9f05414c219d912e82a7a84baa` |
 | **RedStone Oracle (Mainnet)** | `CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF` | Live SEP-40 feed (`/v1/proxy/oracle/prices`) |
 | **ClaimEscrow (Testnet)** | `CCWVGVBSHAFS73HCDRJ5MEFJPYKKG4WQFJ2LJPNIO2PU3U4X6PTDA4TA` | Latest built WASM (`lib.rs` TTL fix): `944f9bfccd17f2e95942525dd7e050c40cbc5b6616950fc5287afbb9c37123de` |
 | **Sorobits SEP-50 (Testnet)** | `CBVETCPLVAMNUUQRUJGH54XHVQT5ZOVB4FGGP2IGOGAZLUIYBBV7G3I3` | Also in Testnet `RELAY_ALLOWED_CONTRACTS` |

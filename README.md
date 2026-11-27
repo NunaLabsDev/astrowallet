@@ -78,14 +78,14 @@ Any Stellar or Soroban Telegram Mini App can use **AstroWallet** as its permissi
 
 ## Live Deployment & Contracts
 
-> Deployed live on Cloudflare **Mainnet** (`astrowallet-server-mainnet`), **Testnet** (`astrowallet-server`), and Pages (`https://astro-wallet.pages.dev`, zero `workers.dev` exposure). Do **not** deploy new Mainnet contracts until external audit completes.
+> Deployed live on Cloudflare **Mainnet** (`astro-wallet-server-mainnet`), **Testnet** (`astro-wallet-server`), and Pages (`https://astro-wallet.pages.dev`, zero `workers.dev` exposure). Do **not** deploy new Mainnet contracts until external audit completes.
 
 | Component | Live Identifier |
 | :--- | :--- |
 | **Telegram Mini App Link** | [`t.me/AstroWalletAppBot/wallet`](https://t.me/AstroWalletAppBot/wallet) (`https://astro-wallet.pages.dev/app`) |
 | **Health Check (Mainnet / Testnet)** | `https://astro-wallet.pages.dev/health` (add `X-Astro-Network: testnet` for Testnet) |
 | **Telegram Super-Bot** | [`@AstroWalletAppBot`](https://t.me/AstroWalletAppBot) (`https://astro-wallet.pages.dev/tg/webhook`) |
-| **Mainnet Worker / D1 / KV** | `astrowallet-server-mainnet` · D1 `b67e7931-e091-418b-84ad-5c8003d2c421` (`0001..0009`) · KV `a21e4dfbbc9e45d1bdb7a6e3bf9606b3` |
+| **Mainnet Worker / D1 / KV** | `astro-wallet-server-mainnet` · D1 `b67e7931-e091-418b-84ad-5c8003d2c421` (`0001..0009`) · KV `a21e4dfbbc9e45d1bdb7a6e3bf9606b3` |
 | **RedStone SEP-40 Oracle (Mainnet)** | `CBMGLKUQZVSAIL5CPDDAWSUY7MAKXISHMOZEVLMBUWBMFGHRJSR4WYRF` |
 | **Claim-Link Escrow (Testnet)** | `CCWVGVBSHAFS73HCDRJ5MEFJPYKKG4WQFJ2LJPNIO2PU3U4X6PTDA4TA` *(latest built WASM hash `944f9bfccd17f2e95942525dd7e050c40cbc5b6616950fc5287afbb9c37123de`)* |
 | **Sorobits SEP-50 Contract (Testnet)** | `CBVETCPLVAMNUUQRUJGH54XHVQT5ZOVB4FGGP2IGOGAZLUIYBBV7G3I3` |

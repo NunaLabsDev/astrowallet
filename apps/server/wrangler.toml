@@ -1,4 +1,4 @@
-name = "astrowallet-server"
+name = "astro-wallet-server"
 main = "src/index.ts"
 workers_dev = false
 compatibility_date = "2026-04-01"
@@ -67,7 +67,7 @@ TG_MINI_APP_SHORT_NAME = "wallet"
 CONNECT_VERIFIED_BOTS = "AstroDexBot,AstroGateSorobanBot"
 
 [env.testnet]
-name = "astrowallet-server"
+name = "astro-wallet-server"
 workers_dev = false
 
 [[env.testnet.d1_databases]]
@@ -125,7 +125,7 @@ TG_MINI_APP_SHORT_NAME = "wallet"
 CONNECT_VERIFIED_BOTS = "AstroDexBot,AstroGateSorobanBot"
 
 [env.mainnet]
-name = "astrowallet-server-mainnet"
+name = "astro-wallet-server-mainnet"
 workers_dev = false
 
 [[env.mainnet.d1_databases]]

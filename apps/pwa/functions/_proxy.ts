@@ -14,7 +14,7 @@ export interface PagesProxyContext {
 
 /**
  * Forwards API, webhook, and Telegram Bot requests from Cloudflare Pages
- * (`astrowallet.pages.dev`) to `astrowallet-server` (Mainnet or Testnet) via Service Binding.
+ * (`astrowallet.pages.dev`) to `astro-wallet-server` (Mainnet or Testnet) via Service Binding.
  */
 export async function forwardToWorker(context: PagesProxyContext): Promise<Response> {
   const requestedNet = (

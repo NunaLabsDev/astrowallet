@@ -11,7 +11,9 @@ import { getCachedSep42VerifiedAssets } from "../lib/sep42-cache.js";
 import { fetchIncomingPaymentsSince, fetchLatestPaymentCursor } from "../stellar-verifier.js";
 import { sendTelegramMessage } from "../telegram-api.js";
 
-const POLL_INTERVAL_MS = 5_000;
+const POLL_INTERVAL_MS = 30_000;
+// Free-tier Durable Object duration guard: stop polling after 30 min without /ensure.
+const HIBERNATE_IDLE_SECONDS = 1_800;
 const BATCH_SIZE = 15;
 const MIN_NATIVE_ALERT_STROOPS = 500_000n; // 0.05 XLM dust spam filter
 const MIN_ISSUED_ALERT_STROOPS = 10_000n; // 0.001 issued asset dust spam filter
@@ -50,6 +52,7 @@ export class ChainWatcherDO {
     }
 
     if (url.pathname === "/ensure" && request.method === "POST") {
+      await this.state.storage.put("lastActiveUnix", Math.floor(Date.now() / 1000));
       const currentAlarm = await this.state.storage.getAlarm();
       if (!currentAlarm) {
         await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
@@ -267,7 +270,10 @@ export class ChainWatcherDO {
       }
     } finally {
       if (shouldReschedule) {
-        await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
+        const lastActiveUnix = (await this.state.storage.get<number>("lastActiveUnix")) ?? 0;
+        if (Math.floor(Date.now() / 1000) - lastActiveUnix <= HIBERNATE_IDLE_SECONDS) {
+          await this.state.storage.setAlarm(Date.now() + POLL_INTERVAL_MS);
+        }
       }
     }
   }

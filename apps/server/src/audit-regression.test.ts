@@ -499,9 +499,16 @@ describe("Backend Security, D1 Atomicity, DO Recovery & CSP Proxy Regression (Fr
       DB: failingDb,
     } as unknown as WorkerBindings;
 
+    store.set("lastActiveUnix", Math.floor(Date.now() / 1000));
     const watcherErr = new ChainWatcherDO(doState, failingEnv);
     await watcherErr.alarm().catch(() => {});
     expect(alarmCount).toBe(1);
+
+    // Hibernation: no /ensure activity for > 30 min must stop the alarm loop (free-tier DO duration guard)
+    store.set("lastActiveUnix", Math.floor(Date.now() / 1000) - 1_801);
+    await watcherErr.alarm().catch(() => {});
+    expect(alarmCount).toBe(1);
+    store.set("lastActiveUnix", Math.floor(Date.now() / 1000));
 
     // 2. 30 accounts (2 full pages of 15): wrap-around must set nextOffset = 15, NOT 45
     const accounts30 = Array.from({ length: 30 }, (_, i) => ({
